@@ -1,0 +1,4 @@
+target/
+.nsh/
+xcode/NshGame/build/
+*.log

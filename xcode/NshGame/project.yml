@@ -1,0 +1,18 @@
+name: NshGame
+options:
+  bundleIdPrefix: com.lewu
+  deploymentTarget:
+    iOS: "17.0"
+targets:
+  NshGame:
+    type: application
+    platform: iOS
+    sources: [Sources]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.lewu.nshgame
+        DEVELOPMENT_TEAM: M39Q5944SD
+        CODE_SIGN_STYLE: Automatic
+        GENERATE_INFOPLIST_FILE: YES
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
