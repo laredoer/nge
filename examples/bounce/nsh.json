@@ -1,6 +1,6 @@
 {
-  "name": "nsh-game",
-  "id": "com.example.nshgame",
+  "name": "bounce",
+  "id": "com.lewu.nshgame",
   "version": "1.0.0",
   "build": 1,
   "rust": ".",

@@ -6,17 +6,17 @@ use nsh_core::prelude::*;
 use nsh_core::{TouchEvent, TouchPhase};
 use serde_json::json;
 
-#[cfg(any(target_os = "macos", target_os = "ios"))]
-mod game_core;
-#[cfg(target_os = "macos")]
-pub mod game_macos;
-#[cfg(target_os = "ios")]
-mod game_ios;
-#[cfg(target_os = "ios")]
-pub mod ios_host;
+mod game;
+mod render;
+mod sim;
 
 /// 宿主注册的游戏渲染组件名（各平台保持一致）。
 pub const GAME_COMPONENT: &str = "game.view";
+
+/// 引擎在渲染线程上用它创建游戏。
+pub fn factory() -> nge_core::GameFactory {
+    std::sync::Arc::new(|gfx| Box::new(game::Bounce::new(gfx)))
+}
 
 /// The app's UI set (`nsh.json` `"rust"`): what a TSX entry may import from
 /// `nsh-game/native` (`README.md`, "Adding a TSX entry").
@@ -62,6 +62,7 @@ pub fn App() -> impl IntoElement {
     let score = signal(0_u64);
     let balls = signal(0_u64);
     let fps = signal(0_u64);
+    let worst_ms = signal(0_u64);
     let paused = signal(false);
     let speed = signal(1.0_f64);
     let game = element_ref();
@@ -72,9 +73,9 @@ pub fn App() -> impl IntoElement {
         .items_center()
         .px_4()
         .py_3()
-        .child(text("NSH × wgpu 弹球").text_size(px(20.0)))
+        .child(text("nge 弹球示例").text_size(px(20.0)))
         .child(
-            text(move || format!("得分 {}  ·  球 {}  ·  {} FPS", score.get(), balls.get(), fps.get()))
+            text(move || format!("得分 {}  ·  球 {}  ·  {} FPS  ·  最长帧 {}ms", score.get(), balls.get(), fps.get(), worst_ms.get()))
                 .text_size(px(15.0)),
         );
 
@@ -90,7 +91,10 @@ pub fn App() -> impl IntoElement {
                 score.set(e.data["score"].as_u64().unwrap_or(0));
                 balls.set(e.data["balls"].as_u64().unwrap_or(0));
             }
-            "fps" => fps.set(e.data["fps"].as_u64().unwrap_or(0)),
+            "fps" => {
+                fps.set(e.data["fps"].as_u64().unwrap_or(0));
+                worst_ms.set(e.data["worst_ms"].as_u64().unwrap_or(0));
+            }
             "state" => paused.set(e.data["paused"].as_bool().unwrap_or(false)),
             _ => {}
             }
@@ -108,6 +112,7 @@ pub fn App() -> impl IntoElement {
         ))
         .child(control("加一个球", move || game.command("spawn", json!(null))))
         .child(control("重置", move || game.command("reset", json!(null))))
+        .child(control("卡主线程 200ms", move || game.command("nge.stall_main", json!({ "ms": 200 }))))
         .child(control("减速", move || speed.update(|s| *s = (*s - 0.25).max(0.25))))
         .child(control(move || SharedString::from(format!("加速 ×{:.2}", speed.get())), move || {
             speed.update(|s| *s = (*s + 0.25).min(4.0))

@@ -197,6 +197,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "bounce"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "env_logger",
+ "log",
+ "nge-core",
+ "nge-platform",
+ "nsh-base",
+ "nsh-core",
+ "nsh-platform-ios",
+ "nsh-platform-linux",
+ "nsh-platform-macos",
+ "nsh-platform-windows",
+ "serde_json",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1639,28 +1657,33 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
 
 [[package]]
-name = "nsh-app-nsh-game"
+name = "nge-core"
 version = "0.1.0"
 dependencies = [
- "bytemuck",
- "env_logger",
  "log",
- "nsh-base",
+ "pollster",
+ "raw-window-handle",
+ "serde_json",
+ "wgpu",
+]
+
+[[package]]
+name = "nge-platform"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "nge-core",
  "nsh-core",
  "nsh-engine",
  "nsh-platform-ios",
- "nsh-platform-linux",
  "nsh-platform-macos",
- "nsh-platform-windows",
  "objc2",
  "objc2-app-kit",
  "objc2-foundation",
  "objc2-quartz-core",
  "objc2-ui-kit",
- "pollster",
  "raw-window-handle",
  "serde_json",
- "wgpu",
 ]
 
 [[package]]

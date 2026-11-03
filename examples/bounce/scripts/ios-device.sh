@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # 构建 iOS 版本，打包成 .app，签名后装到真机并启动。
 # 用法: scripts/ios-device.sh [设备 UDID]
+# 环境变量 NGE_DEBUG_STALL_MS=200：启动时开启主线程卡顿压测，并在终端输出日志。
 set -euo pipefail
 
-cd "$(dirname "$0")/.."
+# 切到 workspace 根目录（编译产物在根目录 target/ 下）
+cd "$(dirname "$0")/../../.."
 
 BUNDLE_ID="com.lewu.nshgame"
 APP_NAME="NshGame"
@@ -12,25 +14,25 @@ PROFILE_NAME="iOS Team Provisioning Profile: ${BUNDLE_ID}"
 OUT="target/ios-device"
 APP="${OUT}/${APP_NAME}.app"
 
-# 找到对应 Bundle ID 的 provisioning profile（由 xcode/NshGame 项目自动生成）
+# 找到对应 Bundle ID 的 provisioning profile（由 tools/NshGame 项目自动生成）
 PROFILE=""
 for p in "$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles"/*.mobileprovision; do
   if security cms -D -i "$p" 2>/dev/null | grep -q "<string>${PROFILE_NAME}</string>"; then
     PROFILE="$p"
   fi
 done
-[ -n "$PROFILE" ] || { echo "找不到 ${PROFILE_NAME}，先构建一次 xcode/NshGame"; exit 1; }
+[ -n "$PROFILE" ] || { echo "找不到 ${PROFILE_NAME}，先构建一次 tools/NshGame"; exit 1; }
 
 mkdir -p "$OUT"
 security cms -D -i "$PROFILE" > "${OUT}.profile.plist"
 /usr/libexec/PlistBuddy -x -c "Print :Entitlements" "${OUT}.profile.plist" > "${OUT}.entitlements.plist"
 CERT_SHA=$(/usr/libexec/PlistBuddy -c "Print :DeveloperCertificates:0" "${OUT}.profile.plist" | openssl x509 -inform DER -noout -fingerprint -sha1 | cut -d= -f2 | tr -d :)
 
-cargo build --release --target aarch64-apple-ios
+cargo build -p bounce --release --target aarch64-apple-ios
 
 rm -rf "$APP"
 mkdir -p "$APP"
-cp target/aarch64-apple-ios/release/nsh-app-nsh-game "$APP/${APP_NAME}"
+cp target/aarch64-apple-ios/release/bounce "$APP/${APP_NAME}"
 cp "$PROFILE" "$APP/embedded.mobileprovision"
 cat > "$APP/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -62,4 +64,9 @@ codesign --force --sign "$CERT_SHA" --entitlements "${OUT}.entitlements.plist" -
 codesign --verify --verbose=1 "$APP"
 
 xcrun devicectl device install app --device "$DEVICE" "$APP"
-xcrun devicectl device process launch --device "$DEVICE" --terminate-existing "$BUNDLE_ID"
+if [ -n "${NGE_DEBUG_STALL_MS:-}" ]; then
+  xcrun devicectl device process launch --device "$DEVICE" --terminate-existing --console \
+    --environment-variables "{\"NGE_DEBUG_STALL_MS\": \"${NGE_DEBUG_STALL_MS}\"}" "$BUNDLE_ID"
+else
+  xcrun devicectl device process launch --device "$DEVICE" --terminate-existing "$BUNDLE_ID"
+fi

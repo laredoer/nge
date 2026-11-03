@@ -1,8 +1,7 @@
 //! iOS 应用宿主。nsh 0.3 的 `run_app` 不支持注册原生组件，
-//! 这里照它的结构自建 AppDelegate / SceneDelegate，用 AppView 挂载 NSH 并注册 game.view。
+//! 这里照它的结构自建 AppDelegate / SceneDelegate，用 AppView 挂载 NSH，并让应用注册自己的组件。
 
 use std::cell::RefCell;
-use std::rc::Rc;
 
 use nsh_platform_ios::{AppView, Components, Root, SurfaceOptions};
 use objc2::rc::Retained;
@@ -14,7 +13,11 @@ use objc2_ui_kit::{
     UIWindowScene, UIWindowSceneDelegate, UIWindowSceneSessionRoleApplication,
 };
 
-use crate::{App, GAME_COMPONENT, game_ios::GameView};
+/// 启动参数：根组件 + 注册组件的回调。
+struct Launch {
+    root: Root,
+    register: Box<dyn Fn(&Components)>,
+}
 
 struct AppState {
     _window: Retained<UIWindow>,
@@ -22,13 +25,14 @@ struct AppState {
 }
 
 thread_local! {
+    static LAUNCH: RefCell<Option<Launch>> = const { RefCell::new(None) };
     static APP: RefCell<Option<AppState>> = const { RefCell::new(None) };
 }
 
 define_class!(
     #[unsafe(super(UIResponder, NSObject))]
     #[thread_kind = MainThreadOnly]
-    #[name = "NshGameAppDelegate"]
+    #[name = "NgeAppDelegate"]
     struct AppDelegate;
 
     unsafe impl NSObjectProtocol for AppDelegate {}
@@ -55,7 +59,7 @@ define_class!(
 define_class!(
     #[unsafe(super(UIResponder, NSObject))]
     #[thread_kind = MainThreadOnly]
-    #[name = "NshGameSceneDelegate"]
+    #[name = "NgeSceneDelegate"]
     struct SceneDelegate;
 
     unsafe impl NSObjectProtocol for SceneDelegate {}
@@ -81,6 +85,9 @@ define_class!(
 );
 
 fn connect(mtm: MainThreadMarker, scene: &UIWindowScene) {
+    let Some(launch) = LAUNCH.with(|l| l.borrow_mut().take()) else {
+        return log::error!("没有要启动的应用");
+    };
     let window = UIWindow::initWithWindowScene(UIWindow::alloc(mtm), scene);
     let controller = UIViewController::new(mtm);
     let root = controller.view().expect("view controller has a view");
@@ -89,7 +96,7 @@ fn connect(mtm: MainThreadMarker, scene: &UIWindowScene) {
     window.makeKeyAndVisible();
 
     let components = Components::default();
-    components.register(GAME_COMPONENT, Rc::new(|ctx| Box::new(GameView::new(ctx))));
+    (launch.register)(&components);
     let view = AppView::new(
         mtm,
         root.bounds(),
@@ -100,7 +107,7 @@ fn connect(mtm: MainThreadMarker, scene: &UIWindowScene) {
         },
     );
     root.addSubview(view.view());
-    view.run(Root::of::<App>());
+    view.run(launch.root);
     APP.with(|app| {
         *app.borrow_mut() = Some(AppState {
             _window: window,
@@ -109,9 +116,10 @@ fn connect(mtm: MainThreadMarker, scene: &UIWindowScene) {
     });
 }
 
-/// 启动 UIKit 主循环，不返回。
-pub fn run() -> ! {
+/// 以 `root` 为根组件启动 UIKit 主循环，`register` 用来注册原生组件。不返回。
+pub fn run_app(root: Root, register: impl Fn(&Components) + 'static) -> ! {
     let mtm = MainThreadMarker::new().expect("必须在主线程启动");
+    LAUNCH.with(|l| *l.borrow_mut() = Some(Launch { root, register: Box::new(register) }));
     let delegate = NSString::from_str(AppDelegate::class().name().to_str().expect("类名是 UTF-8"));
     UIApplication::main(None, Some(&delegate), mtm)
 }

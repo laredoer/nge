@@ -1,0 +1,125 @@
+//! iOS：引擎挂在一个 UIView 上；主线程的 CADisplayLink 只采样视口，出帧在渲染线程。
+
+use std::ptr::NonNull;
+use std::rc::Rc;
+
+use nge_core::{Engine, GameFactory, Viewport, create_surface};
+use nsh_platform_ios::{ComponentContext, ComponentFactory, NativeComponent};
+use objc2::rc::Retained;
+use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
+use objc2_foundation::{NSObject, NSRunLoop, NSRunLoopCommonModes};
+use objc2_quartz_core::CADisplayLink;
+use objc2_quartz_core::CAFrameRateRange;
+use objc2_ui_kit::{UITraitEnvironment, UIView};
+use raw_window_handle::{RawDisplayHandle, RawWindowHandle, UiKitDisplayHandle, UiKitWindowHandle};
+use serde_json::{Value as JsonValue, json};
+
+use crate::shared::Proxy;
+
+/// 把 `factory` 包成 NSH 原生组件工厂，注册到 `AppOptions.components`。
+pub fn component(factory: GameFactory) -> ComponentFactory {
+    Rc::new(move |ctx| Box::new(GameView::new(ctx, factory.clone())))
+}
+
+struct Shared {
+    // 字段按声明顺序释放：proxy（内含 Engine，join 渲染线程）先于 view
+    proxy: Option<Proxy>,
+    view: Retained<UIView>,
+}
+
+impl Shared {
+    fn viewport(&self) -> Viewport {
+        let size = self.view.bounds().size;
+        let scale = unsafe { self.view.traitCollection().displayScale() };
+        Viewport {
+            size: [size.width as f32, size.height as f32],
+            pixels: [(size.width * scale) as u32, (size.height * scale) as u32],
+        }
+    }
+}
+
+define_class!(
+    #[unsafe(super(NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "NgeIosTicker"]
+    #[ivars = Rc<Shared>]
+    struct Ticker;
+
+    impl Ticker {
+        #[unsafe(method(tick:))]
+        fn tick(&self, _link: &CADisplayLink) {
+            let shared = self.ivars();
+            if let Some(proxy) = &shared.proxy {
+                proxy.tick(shared.viewport());
+            }
+        }
+    }
+);
+
+impl Ticker {
+    fn new(mtm: MainThreadMarker, shared: Rc<Shared>) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(shared);
+        unsafe { msg_send![super(this), init] }
+    }
+}
+
+pub struct GameView {
+    shared: Rc<Shared>,
+    link: Retained<CADisplayLink>,
+}
+
+impl GameView {
+    pub fn new(ctx: ComponentContext, factory: GameFactory) -> Self {
+        let mtm = MainThreadMarker::new().expect("原生组件必须在主线程创建");
+        let view = UIView::new(mtm);
+
+        let window = RawWindowHandle::UiKit(UiKitWindowHandle::new(NonNull::from(&*view).cast()));
+        let display = RawDisplayHandle::UiKit(UiKitDisplayHandle::new());
+        // SAFETY: view 由 Shared 持有，且 Shared 先释放 proxy（Engine）再释放 view
+        let proxy = match unsafe { create_surface(window, display) } {
+            Ok((instance, surface)) => {
+                let emit_ctx = ctx.clone();
+                let engine = Engine::spawn(instance, surface, Box::new(move |n, d| emit_ctx.emit(n, d)), factory);
+                Some(Proxy::new(engine))
+            }
+            Err(e) => {
+                log::error!("创建 surface 失败: {e}");
+                ctx.emit("error", json!({ "message": e }));
+                None
+            }
+        };
+        let shared = Rc::new(Shared { proxy, view });
+
+        let ticker = Ticker::new(mtm, shared.clone());
+        let link = unsafe { CADisplayLink::displayLinkWithTarget_selector(&ticker, sel!(tick:)) };
+        // ProMotion 机型请求到 120Hz（还需 Info.plist 的 CADisableMinimumFrameDurationOnPhone）
+        link.setPreferredFrameRateRange(CAFrameRateRange { minimum: 30.0, maximum: 120.0, preferred: 120.0 });
+        unsafe { link.addToRunLoop_forMode(&NSRunLoop::mainRunLoop(), NSRunLoopCommonModes) };
+        Self { shared, link }
+    }
+}
+
+impl NativeComponent for GameView {
+    fn view(&self) -> &UIView {
+        &self.shared.view
+    }
+
+    fn set_prop(&mut self, name: &str, value: Option<&JsonValue>) {
+        if let Some(proxy) = &self.shared.proxy {
+            proxy.prop(name, value);
+        }
+    }
+
+    fn command(&mut self, name: &str, args: &JsonValue) {
+        if let Some(proxy) = &self.shared.proxy {
+            proxy.command(name, args);
+        }
+    }
+}
+
+impl Drop for GameView {
+    fn drop(&mut self) {
+        // 断开 display link → Ticker → Shared；最后一个 Rc 释放时 Engine 会 join 渲染线程
+        self.link.invalidate();
+    }
+}
