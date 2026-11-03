@@ -1,0 +1,25 @@
+[package]
+name = "sprites"
+description = "nge 示例：精灵压测（M1 验收）"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+nge-core.workspace = true
+nge-ecs.workspace = true
+# derive(Component/Resource) 展开时需要 bevy_ecs 路径
+bevy_ecs.workspace = true
+nge-render2d.workspace = true
+nge-platform.workspace = true
+nsh-core.workspace = true
+nsh-base.workspace = true
+serde_json.workspace = true
+log.workspace = true
+env_logger.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+nsh-platform-macos.workspace = true
+
+[target.'cfg(target_os = "ios")'.dependencies]
+nsh-platform-ios.workspace = true

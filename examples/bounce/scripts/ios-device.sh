@@ -4,6 +4,7 @@
 # 压测环境变量（设了任意一个就在终端输出日志）：
 #   NGE_DEBUG_STALL_MS=200    每 2s 让主线程卡 200ms
 #   NGE_DEBUG_REMOUNT_MS=300  每 300ms 卸载 / 挂载一次游戏视图
+# NGE_EXAMPLE=sprites：换成其他示例（默认 bounce）；NGE_SPRITES=20000 设定 sprites 初始数量。
 set -euo pipefail
 
 # 切到 workspace 根目录（编译产物在根目录 target/ 下）
@@ -30,11 +31,12 @@ security cms -D -i "$PROFILE" > "${OUT}.profile.plist"
 /usr/libexec/PlistBuddy -x -c "Print :Entitlements" "${OUT}.profile.plist" > "${OUT}.entitlements.plist"
 CERT_SHA=$(/usr/libexec/PlistBuddy -c "Print :DeveloperCertificates:0" "${OUT}.profile.plist" | openssl x509 -inform DER -noout -fingerprint -sha1 | cut -d= -f2 | tr -d :)
 
-cargo build -p bounce --release --target aarch64-apple-ios
+EXAMPLE="${NGE_EXAMPLE:-bounce}"
+cargo build -p "$EXAMPLE" --release --target aarch64-apple-ios
 
 rm -rf "$APP"
 mkdir -p "$APP"
-cp target/aarch64-apple-ios/release/bounce "$APP/${APP_NAME}"
+cp "target/aarch64-apple-ios/release/$EXAMPLE" "$APP/${APP_NAME}"
 cp "$PROFILE" "$APP/embedded.mobileprovision"
 cat > "$APP/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -67,7 +69,7 @@ codesign --verify --verbose=1 "$APP"
 
 xcrun devicectl device install app --device "$DEVICE" "$APP"
 ENV_JSON=""
-for name in NGE_DEBUG_STALL_MS NGE_DEBUG_REMOUNT_MS; do
+for name in NGE_DEBUG_STALL_MS NGE_DEBUG_REMOUNT_MS NGE_SPRITES; do
   if [ -n "${!name:-}" ]; then
     ENV_JSON="${ENV_JSON:+$ENV_JSON, }\"$name\": \"${!name}\""
   fi

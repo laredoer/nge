@@ -1,0 +1,13 @@
+[package]
+name = "nge-ecs"
+description = "NSH 游戏引擎 ECS 层：基于 bevy_ecs 的 App、调度、时间、输入和与 NSH 的消息通道"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+nge-core.workspace = true
+bevy_ecs.workspace = true
+glam.workspace = true
+serde_json.workspace = true
+log.workspace = true

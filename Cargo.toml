@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/nge-core", "crates/nge-platform", "examples/bounce"]
+members = ["crates/nge-core", "crates/nge-ecs", "crates/nge-platform", "crates/nge-render2d", "examples/bounce", "examples/sprites"]
 
 [workspace.package]
 version = "0.1.0"
@@ -10,6 +10,11 @@ publish = false
 [workspace.dependencies]
 nge-core = { path = "crates/nge-core" }
 nge-platform = { path = "crates/nge-platform" }
+nge-ecs = { path = "crates/nge-ecs" }
+nge-render2d = { path = "crates/nge-render2d" }
+bevy_ecs = { version = "0.20.1", default-features = false, features = ["std"] }
+glam = { version = "0.34", features = ["bytemuck"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
 nsh-core = "0.3.0"
 nsh-base = "0.3.0"
 nsh-engine = { version = "0.3.0", default-features = false }

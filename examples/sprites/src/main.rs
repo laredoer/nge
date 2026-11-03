@@ -1,0 +1,25 @@
+//! 直接在本机原生后端上跑。
+
+#[cfg(target_os = "macos")]
+fn main() -> impl std::process::Termination {
+    use nsh_platform_macos as platform;
+    env_logger::init();
+    let components = platform::Components::default();
+    components.register(sprites::GAME_COMPONENT, nge_platform::macos::component(sprites::factory()));
+    platform::run_app(
+        platform::AppSource::Rust(platform::Root::of::<sprites::App>()),
+        platform::AppOptions { title: "nge sprites".to_owned(), size: (900, 700), components, ..Default::default() },
+    )
+}
+
+#[cfg(target_os = "ios")]
+fn main() {
+    env_logger::Builder::new().parse_filters("sprites=info,nge_core=info,nge_platform=info,warn").init();
+    let factory = sprites::factory();
+    nge_platform::ios_app::run_app(nsh_platform_ios::Root::of::<sprites::App>(), move |components| {
+        components.register(sprites::GAME_COMPONENT, nge_platform::ios::component(factory.clone()));
+    })
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "ios")))]
+compile_error!("sprites 示例目前只支持 macOS 和 iOS");
