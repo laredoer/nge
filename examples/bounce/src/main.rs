@@ -30,7 +30,7 @@ fn main() -> impl std::process::Termination {
 
 #[cfg(target_os = "ios")]
 fn main() {
-    env_logger::Builder::new().parse_filters("bounce=debug,nge_core=info,nge_platform=info,warn").init();
+    env_logger::Builder::new().parse_filters("bounce=debug,nge_core=debug,nge_platform=info,warn").init();
     let factory = bounce::factory();
     nge_platform::ios_app::run_app(nsh_platform_ios::Root::of::<bounce::App>(), move |components| {
         components.register(bounce::GAME_COMPONENT, nge_platform::ios::component(factory.clone()));

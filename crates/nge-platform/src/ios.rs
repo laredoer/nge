@@ -1,7 +1,8 @@
 //! iOS：引擎挂在一个 UIView 上；主线程的 CADisplayLink 只采样视口，出帧在渲染线程。
 
+use std::cell::{Cell, OnceCell, RefCell};
 use std::ptr::NonNull;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
 use nge_core::{Engine, GameFactory, Viewport, create_surface};
 use nsh_platform_ios::{ComponentContext, ComponentFactory, NativeComponent};
@@ -10,7 +11,7 @@ use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_se
 use objc2_foundation::{NSObject, NSRunLoop, NSRunLoopCommonModes};
 use objc2_quartz_core::CADisplayLink;
 use objc2_quartz_core::CAFrameRateRange;
-use objc2_ui_kit::{UITraitEnvironment, UIView};
+use objc2_ui_kit::{UITraitEnvironment, UIView, UIWindow};
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle, UiKitDisplayHandle, UiKitWindowHandle};
 use serde_json::{Value as JsonValue, json};
 
@@ -24,7 +25,28 @@ pub fn component(factory: GameFactory) -> ComponentFactory {
 struct Shared {
     // 字段按声明顺序释放：proxy（内含 Engine，join 渲染线程）先于 view
     proxy: Option<Proxy>,
-    view: Retained<UIView>,
+    view: Retained<HostView>,
+}
+
+thread_local! {
+    /// 所有存活的游戏 View，App 前后台切换时逐个通知。
+    static LIVE: RefCell<Vec<Weak<Shared>>> = const { RefCell::new(Vec::new()) };
+    /// App 当前是否在前台；后台新建的 View 也要按它起步。
+    static APP_ACTIVE: Cell<bool> = const { Cell::new(true) };
+}
+
+/// App 进后台 / 回前台（主线程）：后台不能再提交 GPU 命令，否则会被系统杀掉。
+pub(crate) fn set_app_active(active: bool) {
+    APP_ACTIVE.with(|a| a.set(active));
+    LIVE.with(|live| {
+        let mut live = live.borrow_mut();
+        live.retain(|w| w.strong_count() > 0);
+        for shared in live.iter().filter_map(Weak::upgrade) {
+            if let Some(proxy) = &shared.proxy {
+                proxy.set_active(active);
+            }
+        }
+    });
 }
 
 impl Shared {
@@ -34,6 +56,45 @@ impl Shared {
         Viewport {
             size: [size.width as f32, size.height as f32],
             pixels: [(size.width * scale) as u32, (size.height * scale) as u32],
+        }
+    }
+}
+
+define_class!(
+    /// 承载 surface 的 UIView：离开窗口前同步暂停渲染线程。
+    #[unsafe(super(UIView))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "NgeIosHostView"]
+    #[ivars = OnceCell<Weak<Shared>>]
+    struct HostView;
+
+    impl HostView {
+        #[unsafe(method(willMoveToWindow:))]
+        fn will_move_to_window(&self, window: Option<&UIWindow>) {
+            // 离开或换到另一个窗口都先暂停，didMoveToWindow 里再恢复
+            self.set_in_window(false);
+            let _: () = unsafe { msg_send![super(self), willMoveToWindow: window] };
+        }
+
+        #[unsafe(method(didMoveToWindow))]
+        fn did_move_to_window(&self) {
+            let _: () = unsafe { msg_send![super(self), didMoveToWindow] };
+            if self.window().is_some() {
+                self.set_in_window(true);
+            }
+        }
+    }
+);
+
+impl HostView {
+    fn new(mtm: MainThreadMarker) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(OnceCell::new());
+        unsafe { msg_send![super(this), init] }
+    }
+
+    fn set_in_window(&self, in_window: bool) {
+        if let Some(proxy) = self.ivars().get().and_then(Weak::upgrade).as_ref().and_then(|s| s.proxy.as_ref()) {
+            proxy.set_in_window(in_window);
         }
     }
 }
@@ -71,7 +132,7 @@ pub struct GameView {
 impl GameView {
     pub fn new(ctx: ComponentContext, factory: GameFactory) -> Self {
         let mtm = MainThreadMarker::new().expect("原生组件必须在主线程创建");
-        let view = UIView::new(mtm);
+        let view = HostView::new(mtm);
 
         let window = RawWindowHandle::UiKit(UiKitWindowHandle::new(NonNull::from(&*view).cast()));
         let display = RawDisplayHandle::UiKit(UiKitDisplayHandle::new());
@@ -79,8 +140,15 @@ impl GameView {
         let proxy = match unsafe { create_surface(window, display) } {
             Ok((instance, surface)) => {
                 let emit_ctx = ctx.clone();
-                let engine = Engine::spawn(instance, surface, Box::new(move |n, d| emit_ctx.emit(n, d)), factory);
-                Some(Proxy::new(engine))
+                let emit = Box::new(move |n: &str, d| emit_ctx.emit(n, d));
+                match Engine::spawn(instance, surface, emit, factory, Box::new(view.clone())) {
+                    Ok(engine) => Some(Proxy::new(engine, APP_ACTIVE.with(Cell::get))),
+                    Err(e) => {
+                        log::error!("{e}");
+                        ctx.emit("error", json!({ "message": e }));
+                        None
+                    }
+                }
             }
             Err(e) => {
                 log::error!("创建 surface 失败: {e}");
@@ -89,6 +157,12 @@ impl GameView {
             }
         };
         let shared = Rc::new(Shared { proxy, view });
+        let _ = shared.view.ivars().set(Rc::downgrade(&shared));
+        LIVE.with(|live| {
+            let mut live = live.borrow_mut();
+            live.retain(|w| w.strong_count() > 0);
+            live.push(Rc::downgrade(&shared));
+        });
 
         let ticker = Ticker::new(mtm, shared.clone());
         let link = unsafe { CADisplayLink::displayLinkWithTarget_selector(&ticker, sel!(tick:)) };

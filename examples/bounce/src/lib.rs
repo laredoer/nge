@@ -12,6 +12,8 @@ mod sim;
 
 /// 宿主注册的游戏渲染组件名（各平台保持一致）。
 pub const GAME_COMPONENT: &str = "game.view";
+/// 环境变量：每隔这么多毫秒卸载 / 重新挂载一次游戏视图，压测引擎的创建和释放。
+pub const REMOUNT_ENV: &str = "NGE_DEBUG_REMOUNT_MS";
 
 /// 引擎在渲染线程上用它创建游戏。
 pub fn factory() -> nge_core::GameFactory {
@@ -66,6 +68,12 @@ pub fn App() -> impl IntoElement {
     let paused = signal(false);
     let speed = signal(1.0_f64);
     let game = element_ref();
+    let mounted = signal(true);
+
+    if let Some(ms) = std::env::var(REMOUNT_ENV).ok().and_then(|v| v.parse::<u64>().ok()).filter(|&ms| ms > 0) {
+        log::warn!("压测：每 {ms}ms 卸载 / 挂载一次游戏视图");
+        let _ = set_interval(std::time::Duration::from_millis(ms), move || mounted.update(|m| *m = !*m));
+    }
 
     let header = view()
         .flex_row()
@@ -79,7 +87,7 @@ pub fn App() -> impl IntoElement {
                 .text_size(px(15.0)),
         );
 
-    let canvas = native(GAME_COMPONENT)
+    let canvas = move || native(GAME_COMPONENT)
         .flex_1()
         .element_ref(&game)
         .prop("speed", move || json!(speed.get()))
@@ -96,9 +104,11 @@ pub fn App() -> impl IntoElement {
                 worst_ms.set(e.data["worst_ms"].as_u64().unwrap_or(0));
             }
             "state" => paused.set(e.data["paused"].as_bool().unwrap_or(false)),
+            "error" => log::error!("引擎错误: {}", e.data),
             _ => {}
             }
         });
+    let canvas = when(mounted, canvas).otherwise(|| view().flex_1());
 
     let controls = view()
         .flex_row()
@@ -112,6 +122,10 @@ pub fn App() -> impl IntoElement {
         ))
         .child(control("加一个球", move || game.command("spawn", json!(null))))
         .child(control("重置", move || game.command("reset", json!(null))))
+        .child(control(
+            move || SharedString::from(if mounted.get() { "卸载" } else { "挂载" }),
+            move || mounted.update(|m| *m = !*m),
+        ))
         .child(control("卡主线程 200ms", move || game.command("nge.stall_main", json!({ "ms": 200 }))))
         .child(control("减速", move || speed.update(|s| *s = (*s - 0.25).max(0.25))))
         .child(control(move || SharedString::from(format!("加速 ×{:.2}", speed.get())), move || {

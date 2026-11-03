@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # 构建 iOS 版本，打包成 .app，签名后装到真机并启动。
 # 用法: scripts/ios-device.sh [设备 UDID]
-# 环境变量 NGE_DEBUG_STALL_MS=200：启动时开启主线程卡顿压测，并在终端输出日志。
+# 压测环境变量（设了任意一个就在终端输出日志）：
+#   NGE_DEBUG_STALL_MS=200    每 2s 让主线程卡 200ms
+#   NGE_DEBUG_REMOUNT_MS=300  每 300ms 卸载 / 挂载一次游戏视图
 set -euo pipefail
 
 # 切到 workspace 根目录（编译产物在根目录 target/ 下）
@@ -64,9 +66,15 @@ codesign --force --sign "$CERT_SHA" --entitlements "${OUT}.entitlements.plist" -
 codesign --verify --verbose=1 "$APP"
 
 xcrun devicectl device install app --device "$DEVICE" "$APP"
-if [ -n "${NGE_DEBUG_STALL_MS:-}" ]; then
+ENV_JSON=""
+for name in NGE_DEBUG_STALL_MS NGE_DEBUG_REMOUNT_MS; do
+  if [ -n "${!name:-}" ]; then
+    ENV_JSON="${ENV_JSON:+$ENV_JSON, }\"$name\": \"${!name}\""
+  fi
+done
+if [ -n "$ENV_JSON" ]; then
   xcrun devicectl device process launch --device "$DEVICE" --terminate-existing --console \
-    --environment-variables "{\"NGE_DEBUG_STALL_MS\": \"${NGE_DEBUG_STALL_MS}\"}" "$BUNDLE_ID"
+    --environment-variables "{$ENV_JSON}" "$BUNDLE_ID"
 else
   xcrun devicectl device process launch --device "$DEVICE" --terminate-existing "$BUNDLE_ID"
 fi

@@ -79,6 +79,16 @@ define_class!(
                 connect(self.mtm(), scene);
             }
         }
+
+        #[unsafe(method(sceneDidEnterBackground:))]
+        fn did_enter_background(&self, _scene: &UIScene) {
+            crate::ios::set_app_active(false);
+        }
+
+        #[unsafe(method(sceneWillEnterForeground:))]
+        fn will_enter_foreground(&self, _scene: &UIScene) {
+            crate::ios::set_app_active(true);
+        }
     }
 
     unsafe impl UIWindowSceneDelegate for SceneDelegate {}
