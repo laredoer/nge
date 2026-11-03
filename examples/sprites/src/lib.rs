@@ -1,16 +1,14 @@
 //! M1 验收示例：上万个精灵的 ECS + 实例化渲染压测，界面上显示 FPS 和最长帧间隔。
 
+use nge_nsh::{FRAME_STATS, GameViewExt, game_ref, game_view};
 use nsh_base::theme;
 use nsh_core::prelude::*;
-use nsh_core::{TouchEvent, TouchPhase};
 use serde_json::json;
 
 mod game;
 
 pub use game::COUNT_ENV;
-
-/// 宿主注册的游戏渲染组件名。
-pub const GAME_COMPONENT: &str = "game.view";
+use game::{ADD, Add, COUNT, REMOVE, Remove};
 
 pub fn factory() -> nge_core::GameFactory {
     nge_ecs::factory(game::app)
@@ -32,24 +30,12 @@ fn control(label: impl IntoReactive<SharedString>, on_press: impl Fn() + 'static
         .child(text(label).text_size(px(15.0)).text_color(move || theme().primary_foreground))
 }
 
-fn forward_touch(game: ElementRef, e: &TouchEvent) {
-    let phase = match e.phase {
-        TouchPhase::Start => "start",
-        TouchPhase::Move => "move",
-        TouchPhase::End => "end",
-        TouchPhase::Cancel => "cancel",
-    };
-    for p in e.points.iter().filter(|p| p.changed) {
-        game.command("touch", json!({ "phase": phase, "id": p.id, "x": p.location.x.0, "y": p.location.y.0 }));
-    }
-}
-
 #[component]
 pub fn App() -> impl IntoElement {
     let count = signal(0_u64);
-    let fps = signal(0_u64);
-    let worst_ms = signal(0_u64);
-    let game = element_ref();
+    let fps = signal(0_u32);
+    let worst_ms = signal(0_u32);
+    let game = game_ref();
 
     let header = view()
         .flex_row()
@@ -63,19 +49,13 @@ pub fn App() -> impl IntoElement {
                 .text_size(px(15.0)),
         );
 
-    let canvas = native(GAME_COMPONENT)
+    let canvas = game_view(game)
         .flex_1()
-        .element_ref(&game)
-        .on_touch(move |e: &TouchEvent| forward_touch(game, e))
-        .on_native_event(move |e: &NativeEvent| match &*e.name {
-            "count" => count.set(e.data["count"].as_u64().unwrap_or(0)),
-            "fps" => {
-                log::debug!("fps {} worst {}ms", e.data["fps"], e.data["worst_ms"]);
-                fps.set(e.data["fps"].as_u64().unwrap_or(0));
-                worst_ms.set(e.data["worst_ms"].as_u64().unwrap_or(0));
-            }
-            "error" => log::error!("引擎错误: {}", e.data),
-            _ => {}
+        .on_game_event(COUNT, move |n| count.set(n))
+        .on_game_event(FRAME_STATS, move |s| {
+            log::debug!("fps {} worst {}ms", s.fps, s.worst_ms);
+            fps.set(s.fps);
+            worst_ms.set(s.worst_ms);
         });
 
     let controls = view()
@@ -84,9 +64,9 @@ pub fn App() -> impl IntoElement {
         .gap_3()
         .px_4()
         .py_3()
-        .child(control("+1000", move || game.command("add", json!({ "n": 1000 }))))
-        .child(control("-1000", move || game.command("remove", json!({ "n": 1000 }))))
-        .child(control("+10000", move || game.command("add", json!({ "n": 10000 }))))
+        .child(control("+1000", move || game.send(ADD, &Add(1000))))
+        .child(control("-1000", move || game.send(REMOVE, &Remove(1000))))
+        .child(control("+10000", move || game.send(ADD, &Add(10_000))))
         .child(control("卡主线程 200ms", move || game.command("nge.stall_main", json!({ "ms": 200 }))));
 
     view()

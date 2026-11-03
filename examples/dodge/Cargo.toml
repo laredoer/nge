@@ -1,0 +1,27 @@
+[package]
+name = "dodge"
+description = "nge 示例：躲陨石（M2 验收：纯 Rust 游戏 + NSH HUD）"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+nge-core.workspace = true
+nge-ecs.workspace = true
+nge-render2d.workspace = true
+nge-nsh.workspace = true
+nge-platform.workspace = true
+nsh-core.workspace = true
+nsh-base.workspace = true
+# derive(Component/Resource/Message) 展开时需要 bevy_ecs 路径
+bevy_ecs.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+log.workspace = true
+env_logger.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+nsh-platform-macos.workspace = true
+
+[target.'cfg(target_os = "ios")'.dependencies]
+nsh-platform-ios.workspace = true

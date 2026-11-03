@@ -2,8 +2,8 @@
 
 use std::time::{Duration, Instant};
 
-/// 一个统计窗口的结果。
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// 一个统计窗口的结果，每秒通过 [`crate::bridge::FRAME_STATS`] 发给 NSH。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct FrameReport {
     pub fps: u32,
     /// 窗口内最长的两帧间隔（毫秒）。

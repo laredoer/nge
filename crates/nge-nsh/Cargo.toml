@@ -1,0 +1,13 @@
+[package]
+name = "nge-nsh"
+description = "NSH 游戏引擎的 NSH 侧：游戏视图元素和类型化通道绑定（主线程）"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+nge-core.workspace = true
+nsh-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+log.workspace = true

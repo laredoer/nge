@@ -1,5 +1,6 @@
 //! App：World + 四个调度 + 渲染器列表；实现 `nge_core::Game` 接进引擎。
 
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use bevy_ecs::message::Messages;
@@ -7,6 +8,7 @@ use bevy_ecs::prelude::*;
 use bevy_ecs::schedule::{IntoScheduleConfigs, ScheduleLabel};
 use bevy_ecs::system::ScheduleSystem;
 use glam::Vec2;
+use nge_core::bridge::TOUCH;
 use nge_core::{Ctx, Game, GameFactory, Gfx, Viewport, wgpu};
 use serde_json::Value as JsonValue;
 
@@ -25,9 +27,13 @@ pub struct Update;
 /// 游戏逻辑之后：引擎内部（如整理渲染数据）。
 #[derive(ScheduleLabel, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PostUpdate;
+/// 每帧最后：把变化了的 State 推给 NSH（引擎内部）。
+#[derive(ScheduleLabel, Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct Last;
 
-/// 触摸 command 名，与 NSH 侧转发时一致。
-const TOUCH_COMMAND: &str = "touch";
+/// 收到某个 prop / command 时把它转成类型化资源 / 消息。
+pub(crate) type PropHandler = Box<dyn Fn(&mut World, Option<&JsonValue>)>;
+pub(crate) type CommandHandler = Box<dyn Fn(&mut World, &JsonValue)>;
 
 pub trait Plugin {
     fn build(&self, app: &mut App);
@@ -43,6 +49,10 @@ pub struct App {
     renderers: Vec<Box<dyn Renderer>>,
     /// 每帧末尾轮转的消息队列（双缓冲），不轮转会无限增长。
     message_updaters: Vec<fn(&mut World)>,
+    pub(crate) props: HashMap<&'static str, PropHandler>,
+    pub(crate) commands: HashMap<&'static str, CommandHandler>,
+    /// 已注册的游戏 → NSH 通道名（State 和 Event 共用 NSH 的事件名空间）。
+    pub(crate) outbound: HashSet<&'static str>,
     started: bool,
 }
 
@@ -60,10 +70,18 @@ impl App {
         world.init_resource::<Props>();
         world.init_resource::<Outbox>();
         world.init_resource::<Input>();
-        for schedule in [Schedule::new(Startup), Schedule::new(PreUpdate), Schedule::new(Update), Schedule::new(PostUpdate)] {
+        for schedule in [Schedule::new(Startup), Schedule::new(PreUpdate), Schedule::new(Update), Schedule::new(PostUpdate), Schedule::new(Last)] {
             world.add_schedule(schedule);
         }
-        let mut app = Self { world, renderers: Vec::new(), message_updaters: Vec::new(), started: false };
+        let mut app = Self {
+            world,
+            renderers: Vec::new(),
+            message_updaters: Vec::new(),
+            props: HashMap::new(),
+            commands: HashMap::new(),
+            outbound: HashSet::new(),
+            started: false,
+        };
         app.add_message::<NshCommand>();
         app
     }
@@ -114,13 +132,15 @@ impl App {
         &mut self.world
     }
 
-    /// 收到 NSH 的 command：触摸进 Input，其余变成 [`NshCommand`] 消息。
+    /// 收到 NSH 的 command：触摸进 Input，注册过的变成类型化消息，其余变成 [`NshCommand`]。
     pub fn command(&mut self, name: &str, args: &JsonValue) {
-        if name == TOUCH_COMMAND {
-            let phase = args["phase"].as_str().unwrap_or("");
-            let id = args["id"].as_u64().unwrap_or(0) as u32;
-            let at = Vec2::new(args["x"].as_f64().unwrap_or(0.0) as f32, args["y"].as_f64().unwrap_or(0.0) as f32);
-            self.world.resource_mut::<Input>().touch(phase, id, at);
+        if name == TOUCH.name() {
+            match TOUCH.decode(args) {
+                Ok(t) => self.world.resource_mut::<Input>().touch(t.phase, t.id, Vec2::new(t.x, t.y)),
+                Err(e) => log::warn!("{e}"),
+            }
+        } else if let Some(handler) = self.commands.get(name) {
+            handler(&mut self.world, args);
         } else {
             self.world.write_message(NshCommand { name: name.to_owned(), args: args.clone() });
         }
@@ -132,6 +152,9 @@ impl App {
             Some(v) => props.0.insert(name.to_owned(), v.clone()),
             None => props.0.remove(name),
         };
+        if let Some(handler) = self.props.get(name) {
+            handler(&mut self.world, value);
+        }
     }
 
     /// 跑一帧逻辑，返回本帧要发回 NSH 的事件。
@@ -154,6 +177,7 @@ impl App {
         self.world.run_schedule(PreUpdate);
         self.world.run_schedule(Update);
         self.world.run_schedule(PostUpdate);
+        self.world.run_schedule(Last);
 
         self.world.resource_mut::<Input>().end_frame();
         for update in &self.message_updaters {

@@ -2,6 +2,7 @@
 
 use bevy_ecs::prelude::Resource;
 use glam::Vec2;
+use nge_core::bridge::TouchPhase;
 
 /// 一根手指 / 一个鼠标指针。`screen` 是视图内的 point 坐标（左上角原点，y 朝下）。
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -23,11 +24,11 @@ pub struct Input {
 }
 
 impl Input {
-    /// 收到一次触摸变化。`phase` 是 NSH 的 start / move / end / cancel。
-    pub fn touch(&mut self, phase: &str, id: u32, screen: Vec2) {
+    /// 收到一次触摸变化。
+    pub fn touch(&mut self, phase: TouchPhase, id: u32, screen: Vec2) {
         let existing = self.pointers.iter_mut().find(|p| p.id == id && p.down);
         match (phase, existing) {
-            ("start", stale) => {
+            (TouchPhase::Start, stale) => {
                 // 丢了 end / cancel 时同一 id 又按下：旧的当作已松开
                 if let Some(old) = stale {
                     old.down = false;
@@ -43,14 +44,13 @@ impl Input {
                 just_released: false,
                 })
             }
-            ("move", Some(p)) => p.screen = screen,
-            ("end" | "cancel", Some(p)) => {
+            (TouchPhase::Move, Some(p)) => p.screen = screen,
+            (TouchPhase::End | TouchPhase::Cancel, Some(p)) => {
                 p.screen = screen;
                 p.down = false;
                 p.just_released = true;
             }
-            (phase, None) => log::debug!("忽略没有按下记录的触摸 {phase} #{id}"),
-            (phase, Some(_)) => log::debug!("未知触摸阶段 {phase}"),
+            (phase, None) => log::debug!("忽略没有按下记录的触摸 {phase:?} #{id}"),
         }
     }
 
@@ -90,21 +90,22 @@ impl Input {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use TouchPhase::*;
 
     #[test]
     fn press_move_release_across_frames() {
         let mut input = Input::default();
-        input.touch("start", 1, Vec2::new(10.0, 20.0));
+        input.touch(Start, 1, Vec2::new(10.0, 20.0));
         assert_eq!(input.pointers_pressed().count(), 1);
         input.end_frame();
 
-        input.touch("move", 1, Vec2::new(15.0, 25.0));
+        input.touch(Move, 1, Vec2::new(15.0, 25.0));
         assert_eq!(input.pointers_pressed().count(), 0);
         let p = input.pointers_down().next().unwrap();
         assert_eq!((p.screen, p.start), (Vec2::new(15.0, 25.0), Vec2::new(10.0, 20.0)));
         input.end_frame();
 
-        input.touch("end", 1, Vec2::new(16.0, 26.0));
+        input.touch(End, 1, Vec2::new(16.0, 26.0));
         assert_eq!(input.pointers_released().count(), 1);
         assert_eq!(input.pointers_down().count(), 0);
         input.end_frame();
@@ -114,8 +115,8 @@ mod tests {
     #[test]
     fn tap_within_one_frame_is_pressed_and_released() {
         let mut input = Input::default();
-        input.touch("start", 7, Vec2::ZERO);
-        input.touch("end", 7, Vec2::ZERO);
+        input.touch(Start, 7, Vec2::ZERO);
+        input.touch(End, 7, Vec2::ZERO);
         let p = input.pointers().next().unwrap();
         assert!(p.just_pressed && p.just_released && !p.down);
         input.end_frame();
@@ -125,9 +126,9 @@ mod tests {
     #[test]
     fn same_id_reused_after_release_is_a_new_pointer() {
         let mut input = Input::default();
-        input.touch("start", 1, Vec2::ZERO);
-        input.touch("end", 1, Vec2::ZERO);
-        input.touch("start", 1, Vec2::ONE);
+        input.touch(Start, 1, Vec2::ZERO);
+        input.touch(End, 1, Vec2::ZERO);
+        input.touch(Start, 1, Vec2::ONE);
         assert_eq!(input.pointers().count(), 2);
         assert_eq!(input.pointers_down().count(), 1);
     }
@@ -135,20 +136,20 @@ mod tests {
     #[test]
     fn multitouch_tracked_separately_and_stray_events_ignored() {
         let mut input = Input::default();
-        input.touch("move", 9, Vec2::ONE);
-        input.touch("start", 1, Vec2::ZERO);
-        input.touch("start", 2, Vec2::ONE);
-        input.touch("cancel", 1, Vec2::ZERO);
+        input.touch(Move, 9, Vec2::ONE);
+        input.touch(Start, 1, Vec2::ZERO);
+        input.touch(Start, 2, Vec2::ONE);
+        input.touch(Cancel, 1, Vec2::ZERO);
         assert_eq!(input.pointers_down().map(|p| p.id).collect::<Vec<_>>(), vec![2]);
     }
 
     #[test]
     fn repeated_start_without_end_does_not_leave_ghost() {
         let mut input = Input::default();
-        input.touch("start", 1, Vec2::ZERO);
+        input.touch(Start, 1, Vec2::ZERO);
         input.end_frame();
-        input.touch("start", 1, Vec2::ONE);
-        input.touch("end", 1, Vec2::ONE);
+        input.touch(Start, 1, Vec2::ONE);
+        input.touch(End, 1, Vec2::ONE);
         input.end_frame();
         assert_eq!(input.pointers().count(), 0);
     }
@@ -156,7 +157,7 @@ mod tests {
     #[test]
     fn map_world_applies_to_all() {
         let mut input = Input::default();
-        input.touch("start", 1, Vec2::new(2.0, 3.0));
+        input.touch(Start, 1, Vec2::new(2.0, 3.0));
         input.map_world(|s| s * 2.0);
         assert_eq!(input.pointers().next().unwrap().world, Vec2::new(4.0, 6.0));
     }

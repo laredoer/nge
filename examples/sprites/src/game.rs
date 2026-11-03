@@ -3,12 +3,24 @@
 use nge_ecs::prelude::*;
 use nge_render2d::prelude::*;
 use nge_render2d::AtlasId;
+use serde::{Deserialize, Serialize};
 
 /// 环境变量：启动时的精灵数量。
 pub const COUNT_ENV: &str = "NGE_SPRITES";
 const DEFAULT_COUNT: u32 = 10_000;
 const SPRITE_SIZE: f32 = 24.0;
 const TAP_BURST: u32 = 100;
+
+/// NSH → 游戏：加 / 减多少个精灵。
+#[derive(Message, Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct Add(pub u32);
+#[derive(Message, Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct Remove(pub u32);
+
+pub const ADD: CommandKey<Add> = CommandKey::new("add");
+pub const REMOVE: CommandKey<Remove> = CommandKey::new("remove");
+/// 游戏 → NSH：精灵数量变了。
+pub const COUNT: EventKey<u64> = EventKey::new("count");
 
 #[derive(Component)]
 struct Velocity {
@@ -40,8 +52,11 @@ pub fn app() -> App {
     let mut app = App::new();
     app.add_plugins(Render2dPlugin)
         .insert_resource(Rng(0x9E37_79B9))
+        .add_command(ADD)
+        .add_command(REMOVE)
+        .add_event(COUNT)
         .add_systems(Startup, setup)
-        .add_systems(Update, (move_sprites, on_pointer, on_command, report).chain());
+        .add_systems(Update, (move_sprites, on_pointer, add, remove, report).chain());
     app
 }
 
@@ -94,28 +109,17 @@ fn on_pointer(mut commands: Commands, input: Res<Input>, ships: Res<Ships>, mut 
     }
 }
 
-fn on_command(
-    mut commands: Commands,
-    mut reader: MessageReader<NshCommand>,
-    sprites: Query<Entity, With<Sprite>>,
-    ships: Res<Ships>,
-    mut rng: ResMut<Rng>,
-    screen: Res<Screen>,
-) {
+fn add(mut commands: Commands, mut reader: MessageReader<Add>, ships: Res<Ships>, mut rng: ResMut<Rng>, screen: Res<Screen>) {
     let half = screen.size / 2.0;
-    for cmd in reader.read() {
-        let n = cmd.args["n"].as_u64().unwrap_or(1000) as u32;
-        match cmd.name.as_str() {
-            "add" => spawn(&mut commands, &mut rng, ships.0, n, |rng| {
-                Vec2::new(rng.range(-half.x, half.x), rng.range(-half.y, half.y))
-            }),
-            "remove" => {
-                for e in sprites.iter().take(n as usize) {
-                    commands.entity(e).despawn();
-                }
-            }
-            other => log::warn!("未知 command {other}"),
-        }
+    for Add(n) in reader.read() {
+        spawn(&mut commands, &mut rng, ships.0, *n, |rng| Vec2::new(rng.range(-half.x, half.x), rng.range(-half.y, half.y)));
+    }
+}
+
+fn remove(mut commands: Commands, mut reader: MessageReader<Remove>, sprites: Query<Entity, With<Sprite>>) {
+    let n: usize = reader.read().map(|Remove(n)| *n as usize).sum();
+    for e in sprites.iter().take(n) {
+        commands.entity(e).despawn();
     }
 }
 
@@ -124,6 +128,6 @@ fn report(sprites: Query<(), With<Sprite>>, mut outbox: ResMut<Outbox>, mut last
     let count = sprites.iter().len();
     if *last != Some(count) {
         *last = Some(count);
-        outbox.emit("count", json!({ "count": count }));
+        outbox.send(COUNT, &(count as u64));
     }
 }

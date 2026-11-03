@@ -13,8 +13,9 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
-use serde_json::{Value as JsonValue, json};
+use serde_json::Value as JsonValue;
 
+use crate::bridge::{ENGINE_ERROR, EngineError, FRAME_STATS};
 use crate::game::{Ctx, Emit, Game, GameFactory, Gfx, Viewport};
 use crate::stats::FrameStats;
 
@@ -91,7 +92,7 @@ impl Engine {
                 };
                 if let Some(e) = error {
                     log::error!("渲染线程退出: {e}");
-                    emit("error", json!({ "message": e }));
+                    emit(ENGINE_ERROR.name(), ENGINE_ERROR.encode(&EngineError { message: e }));
                 }
                 let _ = done_tx.send(());
             })
@@ -277,7 +278,7 @@ impl Loop<'_> {
 
             if self.draw() {
                 if let Some(report) = stats.frame(Instant::now()) {
-                    (self.emit)("fps", json!({ "fps": report.fps, "worst_ms": report.worst_ms }));
+                    (self.emit)(FRAME_STATS.name(), FRAME_STATS.encode(&report));
                 }
                 continue;
             }
@@ -361,7 +362,7 @@ impl Loop<'_> {
                 // surface 需要重建，这一版先停止渲染并上报
                 self.surface.lost = true;
                 log::error!("surface 丢失，停止渲染");
-                (self.emit)("error", json!({ "message": "surface lost" }));
+                (self.emit)(ENGINE_ERROR.name(), ENGINE_ERROR.encode(&EngineError { message: "surface lost".into() }));
                 return false;
             }
             _ => return false,

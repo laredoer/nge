@@ -5,7 +5,7 @@ fn main() -> impl std::process::Termination {
     use nsh_platform_macos as platform;
     env_logger::init();
     let components = platform::Components::default();
-    components.register(sprites::GAME_COMPONENT, nge_platform::macos::component(sprites::factory()));
+    components.register(nge_core::GAME_COMPONENT, nge_platform::macos::component(sprites::factory()));
     platform::run_app(
         platform::AppSource::Rust(platform::Root::of::<sprites::App>()),
         platform::AppOptions { title: "nge sprites".to_owned(), size: (900, 700), components, ..Default::default() },
@@ -17,7 +17,7 @@ fn main() {
     env_logger::Builder::new().parse_filters("sprites=info,nge_core=info,nge_platform=info,warn").init();
     let factory = sprites::factory();
     nge_platform::ios_app::run_app(nsh_platform_ios::Root::of::<sprites::App>(), move |components| {
-        components.register(sprites::GAME_COMPONENT, nge_platform::ios::component(factory.clone()));
+        components.register(nge_core::GAME_COMPONENT, nge_platform::ios::component(factory.clone()));
     })
 }
 

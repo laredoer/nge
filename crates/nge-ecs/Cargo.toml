@@ -9,5 +9,6 @@ publish.workspace = true
 nge-core.workspace = true
 bevy_ecs.workspace = true
 glam.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 log.workspace = true

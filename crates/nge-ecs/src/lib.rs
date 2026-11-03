@@ -1,9 +1,13 @@
 //! ECS 层：把 `nge_core::Game` 的回调接进 bevy_ecs。
 //!
 //! 每帧顺序：NSH 发来的 command / touch → `PreUpdate` → `Update` → `PostUpdate`
-//! → Outbox 统一 emit → 清掉输入的边沿状态。渲染由插件注册的 [`Renderer`] 完成。
+//! → 推送变化了的 State → Outbox 统一 emit → 清掉输入的边沿状态。
+//!
+//! 和 NSH 的类型化通道见 `nge_core::bridge`：[`App::add_prop`]、[`App::add_command`]、
+//! [`App::add_state`]、[`Outbox::send`]。渲染由插件注册的 [`Renderer`] 完成。
 
 mod app;
+mod bridge;
 mod input;
 mod resources;
 
@@ -11,12 +15,14 @@ pub use app::{App, Plugin, PostUpdate, PreUpdate, Renderer, Startup, Update, fac
 pub use input::{Input, Pointer};
 pub use resources::{NshCommand, Outbox, Props, Screen, Time};
 
+pub use nge_core::bridge::{CommandKey, EventKey, PropKey, StateKey};
+
 pub use bevy_ecs;
 pub use glam;
 
 pub mod prelude {
     pub use crate::{
-        App, Input, NshCommand, Outbox, Plugin, Pointer, PostUpdate, PreUpdate, Props, Screen,
+        App, CommandKey, EventKey, Input, NshCommand, PropKey, StateKey, Outbox, Plugin, Pointer, PostUpdate, PreUpdate, Props, Screen,
         Startup, Time, Update,
     };
     pub use bevy_ecs::prelude::*;

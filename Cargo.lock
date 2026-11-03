@@ -396,6 +396,7 @@ dependencies = [
  "env_logger",
  "log",
  "nge-core",
+ "nge-nsh",
  "nge-platform",
  "nsh-base",
  "nsh-core",
@@ -762,6 +763,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d4b8a88685455ed29a21542a33abd9cb6510b6b129abadabdcef0f4c55bc8f61"
 dependencies = [
  "litrs",
+]
+
+[[package]]
+name = "dodge"
+version = "0.1.0"
+dependencies = [
+ "bevy_ecs",
+ "env_logger",
+ "log",
+ "nge-core",
+ "nge-ecs",
+ "nge-nsh",
+ "nge-platform",
+ "nge-render2d",
+ "nsh-base",
+ "nsh-core",
+ "nsh-platform-ios",
+ "nsh-platform-macos",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -2017,6 +2038,7 @@ dependencies = [
  "log",
  "pollster",
  "raw-window-handle",
+ "serde",
  "serde_json",
  "wgpu",
 ]
@@ -2029,6 +2051,18 @@ dependencies = [
  "glam 0.34.2",
  "log",
  "nge-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "nge-nsh"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "nge-core",
+ "nsh-core",
+ "serde",
  "serde_json",
 ]
 
@@ -3229,12 +3263,14 @@ dependencies = [
  "log",
  "nge-core",
  "nge-ecs",
+ "nge-nsh",
  "nge-platform",
  "nge-render2d",
  "nsh-base",
  "nsh-core",
  "nsh-platform-ios",
  "nsh-platform-macos",
+ "serde",
  "serde_json",
 ]
 

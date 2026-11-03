@@ -4,6 +4,8 @@ use std::collections::HashMap;
 
 use bevy_ecs::prelude::{Message, Resource};
 use glam::Vec2;
+use nge_core::EventKey;
+use serde::Serialize;
 use serde_json::Value as JsonValue;
 
 /// 帧时间。`delta` 已被引擎截断到 50ms 以内。
@@ -27,7 +29,7 @@ impl Default for Screen {
     }
 }
 
-/// NSH 设置的 prop（`native(..).prop(name, value)`）。
+/// NSH 设置的所有 prop 的原始值；注册过的 prop 另外会成为类型化资源。
 #[derive(Resource, Debug, Default)]
 pub struct Props(pub HashMap<String, JsonValue>);
 
@@ -37,7 +39,7 @@ impl Props {
     }
 }
 
-/// NSH 发来的 command（`ElementRef::command`），触摸除外（进 [`crate::Input`]）。
+/// 没有用 `App::add_command` 注册过的 command，原样透传；注册过的只会变成类型化消息，不会再出现在这里（触摸进 [`crate::Input`]）。
 #[derive(Message, Debug, Clone)]
 pub struct NshCommand {
     pub name: String,
@@ -49,6 +51,12 @@ pub struct NshCommand {
 pub struct Outbox(Vec<(String, JsonValue)>);
 
 impl Outbox {
+    /// 发一个类型化事件（NSH 侧用 `.on_game_event(key, ..)` 接收）。
+    pub fn send<T: Serialize>(&mut self, key: EventKey<T>, value: &T) {
+        self.0.push((key.name().to_owned(), key.encode(value)));
+    }
+
+    /// 发一个未类型化的事件。
     pub fn emit(&mut self, name: impl Into<String>, data: JsonValue) {
         self.0.push((name.into(), data));
     }

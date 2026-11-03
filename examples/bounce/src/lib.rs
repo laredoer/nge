@@ -1,17 +1,15 @@
 //! The app's Rust UI: its root component, which `nsh run`, `nsh package`
 //! and `cargo run` mount.
 
+use nge_nsh::{FRAME_STATS, GameViewExt, game_ref, game_view};
 use nsh_base::theme;
 use nsh_core::prelude::*;
-use nsh_core::{TouchEvent, TouchPhase};
 use serde_json::json;
 
 mod game;
 mod render;
 mod sim;
 
-/// 宿主注册的游戏渲染组件名（各平台保持一致）。
-pub const GAME_COMPONENT: &str = "game.view";
 /// 环境变量：每隔这么多毫秒卸载 / 重新挂载一次游戏视图，压测引擎的创建和释放。
 pub const REMOUNT_ENV: &str = "NGE_DEBUG_REMOUNT_MS";
 
@@ -42,32 +40,16 @@ fn control(label: impl IntoReactive<SharedString>, on_press: impl Fn() + 'static
         )
 }
 
-/// 把触摸转发给引擎：只发这次变化的手指，坐标是相对游戏视图的 point。
-fn forward_touch(game: ElementRef, e: &TouchEvent) {
-    let phase = match e.phase {
-        TouchPhase::Start => "start",
-        TouchPhase::Move => "move",
-        TouchPhase::End => "end",
-        TouchPhase::Cancel => "cancel",
-    };
-    for p in e.points.iter().filter(|p| p.changed) {
-        game.command(
-            "touch",
-            json!({ "phase": phase, "id": p.id, "x": p.location.x.0, "y": p.location.y.0, "t": e.timestamp }),
-        );
-    }
-}
-
 /// The application's root component.
 #[component]
 pub fn App() -> impl IntoElement {
     let score = signal(0_u64);
     let balls = signal(0_u64);
-    let fps = signal(0_u64);
-    let worst_ms = signal(0_u64);
+    let fps = signal(0_u32);
+    let worst_ms = signal(0_u32);
     let paused = signal(false);
     let speed = signal(1.0_f64);
-    let game = element_ref();
+    let game = game_ref();
     let mounted = signal(true);
 
     if let Some(ms) = std::env::var(REMOUNT_ENV).ok().and_then(|v| v.parse::<u64>().ok()).filter(|&ms| ms > 0) {
@@ -87,21 +69,20 @@ pub fn App() -> impl IntoElement {
                 .text_size(px(15.0)),
         );
 
-    let canvas = move || native(GAME_COMPONENT)
+    // bounce 直接实现 `Game`（不用 ECS），自己的事件仍按名字手动处理
+    let canvas = move || game_view(game)
         .flex_1()
-        .element_ref(&game)
         .prop("speed", move || json!(speed.get()))
-        .on_touch(move |e: &TouchEvent| forward_touch(game, e))
+        .on_game_event(FRAME_STATS, move |s| {
+            fps.set(s.fps);
+            worst_ms.set(s.worst_ms);
+        })
         .on_native_event(move |e: &NativeEvent| {
             log::debug!("game.view 事件 {} {}", e.name, e.data);
             match &*e.name {
             "score" => {
                 score.set(e.data["score"].as_u64().unwrap_or(0));
                 balls.set(e.data["balls"].as_u64().unwrap_or(0));
-            }
-            "fps" => {
-                fps.set(e.data["fps"].as_u64().unwrap_or(0));
-                worst_ms.set(e.data["worst_ms"].as_u64().unwrap_or(0));
             }
             "state" => paused.set(e.data["paused"].as_bool().unwrap_or(false)),
             "error" => log::error!("引擎错误: {}", e.data),

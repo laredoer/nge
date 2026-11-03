@@ -14,7 +14,7 @@ fn main() -> impl std::process::Termination {
     env_logger::init();
     let components = platform::Components::default();
     #[cfg(target_os = "macos")]
-    components.register(bounce::GAME_COMPONENT, nge_platform::macos::component(bounce::factory()));
+    components.register(nge_core::GAME_COMPONENT, nge_platform::macos::component(bounce::factory()));
     platform::run_app(
         platform::AppSource::Rust(platform::Root::of::<bounce::App>()),
         platform::AppOptions {
@@ -33,7 +33,7 @@ fn main() {
     env_logger::Builder::new().parse_filters("bounce=debug,nge_core=debug,nge_platform=info,warn").init();
     let factory = bounce::factory();
     nge_platform::ios_app::run_app(nsh_platform_ios::Root::of::<bounce::App>(), move |components| {
-        components.register(bounce::GAME_COMPONENT, nge_platform::ios::component(factory.clone()));
+        components.register(nge_core::GAME_COMPONENT, nge_platform::ios::component(factory.clone()));
     })
 }
 
