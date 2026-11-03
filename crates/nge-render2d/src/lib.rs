@@ -10,8 +10,8 @@ mod sprite;
 
 pub use assets::{AtlasId, Assets, Grid, MAX_TEXTURE_SIDE, TextureId};
 pub use camera::{Camera2d, Transform2d};
-pub use renderer::{ClearColor, Render2dPlugin};
-pub use sprite::Sprite;
+pub use renderer::{ClearColor, PointerWorld, Render2dPlugin};
+pub use sprite::{Sprite, SpriteImage};
 
 pub mod prelude {
     pub use crate::{Assets, Camera2d, ClearColor, Grid, Render2dPlugin, Sprite, Transform2d};

@@ -25,3 +25,7 @@ nsh-core.workspace = true
 nsh-engine.workspace = true
 nsh-platform-ios.workspace = true
 objc2-ui-kit.workspace = true
+
+[features]
+# 自写 dev host（`macos::dev_host`），配合 `nsh dev --server-only` 热更新 TSX
+dev = ["nsh-platform-macos/dev"]

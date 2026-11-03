@@ -1,0 +1,13 @@
+[package]
+name = "scene"
+description = "nge 示例：TSX 声明场景（M3 验收）"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+nge-core.workspace = true
+nge-ecs.workspace = true
+nge-render2d.workspace = true
+nge-scene.workspace = true
+nge-platform = { workspace = true, features = ["dev"] }

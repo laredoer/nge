@@ -73,10 +73,14 @@ impl Plugin for Render2dPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(Assets::default())
             .insert_resource(ClearColor::default())
-            .add_systems(PreUpdate, pointer_world)
+            .add_systems(PreUpdate, pointer_world.in_set(PointerWorld))
             .add_renderer(SpriteRenderer::default());
     }
 }
+
+/// 把指针换算成世界坐标的系统（PreUpdate）。同帧要改相机的系统排在它前面。
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PointerWorld;
 
 fn pointer_world(screen: Res<Screen>, cameras: Query<&Camera2d>, mut input: ResMut<Input>) {
     let camera = cameras.iter().next().copied().unwrap_or_default();

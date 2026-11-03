@@ -1,0 +1,19 @@
+[package]
+name = "nge-scene"
+description = "NSH 游戏引擎声明式场景：TSX 描述精灵，按 id 增量同步进 ECS"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+nge-core.workspace = true
+nge-ecs.workspace = true
+nge-render2d.workspace = true
+bevy_ecs.workspace = true
+glam.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+log.workspace = true
+
+[dev-dependencies]
+image.workspace = true
