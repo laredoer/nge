@@ -172,3 +172,89 @@ impl Drop for GameView {
         self.link.invalidate();
     }
 }
+
+/// TSX 开发用的 host：连 `nsh dev --server-only` 起的 dev server，改 TSX 后热更新。
+///
+/// `nsh dev` 自带的 host 没法注册平台组件，所以要自己起一个。参数：
+/// `--dev-server ws://…`（默认本机 8790 端口）、`--window-size 480x800`、`--fps`（性能浮层）。
+#[cfg(feature = "dev")]
+pub fn dev_host(factory: GameFactory) -> std::process::ExitCode {
+    use nsh_platform_macos::{AppOptions, AppSource, Limits, dev, run_app};
+
+    dev::init_logging();
+    let args = DevArgs::parse(std::env::args().skip(1));
+    let options = AppOptions {
+        limits: Limits::standalone(),
+        title: "nge dev".to_owned(),
+        size: args.size.unwrap_or(AppOptions::default().size),
+        fps: args.fps,
+        ..AppOptions::default()
+    };
+    options.components.register(nge_core::GAME_COMPONENT, component(factory));
+    run_app(AppSource::DevServer(args.url), options)
+}
+
+#[cfg(feature = "dev")]
+#[derive(Debug, PartialEq)]
+struct DevArgs {
+    url: String,
+    size: Option<(i32, i32)>,
+    fps: bool,
+}
+
+#[cfg(feature = "dev")]
+impl DevArgs {
+    /// 不认识或不合法的参数记 warn 后跳过。
+    fn parse(args: impl IntoIterator<Item = String>) -> Self {
+        let mut parsed = Self { url: "ws://127.0.0.1:8790/ws".to_owned(), size: None, fps: false };
+        let mut args = args.into_iter();
+        while let Some(arg) = args.next() {
+            match arg.as_str() {
+                "--fps" => parsed.fps = true,
+                "--dev-server" => match args.next() {
+                    Some(url) => parsed.url = url,
+                    None => log::warn!("--dev-server 缺少地址"),
+                },
+                "--window-size" => {
+                    let value = args.next().unwrap_or_default();
+                    match value.split_once('x').and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?))) {
+                        Some(size) => parsed.size = Some(size),
+                        None => log::warn!("--window-size {value:?} 不合法，要写成 480x800"),
+                    }
+                }
+                // AppKit 自己的参数（`-ApplePersistenceIgnoreState YES`）
+                other if other.starts_with('-') && !other.starts_with("--") => {
+                    args.next();
+                }
+                other => log::warn!("未知参数 {other}"),
+            }
+        }
+        parsed
+    }
+}
+
+#[cfg(all(test, feature = "dev"))]
+mod tests {
+    use super::DevArgs;
+
+    fn parse(args: &[&str]) -> DevArgs {
+        DevArgs::parse(args.iter().map(|s| s.to_string()))
+    }
+
+    #[test]
+    fn defaults() {
+        assert_eq!(parse(&[]), DevArgs { url: "ws://127.0.0.1:8790/ws".into(), size: None, fps: false });
+    }
+
+    #[test]
+    fn flags_do_not_swallow_the_next_argument() {
+        let a = parse(&["--fps", "--window-size", "480x800", "--dev-server", "ws://h:1/ws"]);
+        assert_eq!(a, DevArgs { url: "ws://h:1/ws".into(), size: Some((480, 800)), fps: true });
+    }
+
+    #[test]
+    fn bad_values_are_skipped() {
+        let a = parse(&["--window-size", "big", "-AppleFoo", "YES", "--dev-server"]);
+        assert_eq!(a, parse(&[]));
+    }
+}

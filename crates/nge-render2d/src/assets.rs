@@ -3,7 +3,7 @@
 use bevy_ecs::prelude::Resource;
 use glam::{UVec2, Vec2, Vec4};
 
-use crate::sprite::SpriteImage;
+use crate::sprite::{Sprite, SpriteImage};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TextureId(pub(crate) u32);
@@ -92,6 +92,11 @@ impl Assets {
         self.images.get(texture.0 as usize).map(|i| i.size)
     }
 
+    /// 精灵不缩放时的大小（point）：`size` 优先，否则是纹理区域的像素大小。
+    pub fn sprite_size(&self, sprite: &Sprite) -> Vec2 {
+        sprite.size.unwrap_or_else(|| self.region(sprite.image).size)
+    }
+
     pub(crate) fn images(&self) -> &[Image] {
         &self.images
     }
@@ -151,6 +156,14 @@ mod tests {
         let (mut assets, texture) = assets_with(UVec2::new(4, 4));
         let atlas = assets.atlas(texture, Grid { cols: 2, rows: 2 });
         assert_eq!(assets.region(SpriteImage::Atlas(atlas, 4)), assets.region(SpriteImage::Atlas(atlas, 0)));
+    }
+
+    #[test]
+    fn sprite_size_prefers_explicit_size() {
+        let (mut assets, texture) = assets_with(UVec2::new(128, 64));
+        let atlas = assets.atlas(texture, Grid { cols: 4, rows: 2 });
+        assert_eq!(assets.sprite_size(&Sprite::from_atlas(atlas, 0)), Vec2::new(32.0, 32.0));
+        assert_eq!(assets.sprite_size(&Sprite::from_texture(texture).with_size(Vec2::splat(5.0))), Vec2::splat(5.0));
     }
 
     #[test]
