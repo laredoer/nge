@@ -56,3 +56,4 @@
 - **单元测试**：`nge-audio` 10 个（wav 解码、坏文件加载失败、没加载完先排队 / 加载失败丢掉、播完清理而循环的一直在、排队中停掉就不播、一帧里同一个声音最多 4 次 / 同时最多 32 个 / 循环的不受限、线性音量换分贝和总音量 / 静音、没有设备时全是空操作且不排队、pitch / 过渡时间的边界、排队中改音量、循环的不占一帧里的次数）；`nge-scene` 新增 2 个（音乐开始、只改音量不重新开始、换成加载失败的音乐时旧的停掉、去掉 `audio` 就停；`sound` command 和 `preload`）；`examples/physics` 新增 1 个（背景音乐在放、`sound` 能播）。
 - **iOS**：`cargo check --workspace --target aarch64-apple-ios` 通过（含 kira 的 cpal 后端）；没上真机。
 - **TS**：`nsh check` 通过 `examples/physics`、`examples/scene3d`、`examples/scene`。
+- **试听**：在 Mac 上跑 `examples/physics`，确认能听到声音。
