@@ -1,12 +1,16 @@
 import { mount, signal, Text, View, type YNode } from "nsh";
-import { floatText, gameView, tween, type Scene, type SpriteNode, type TilemapNode, type Tween } from "../../ts/nge";
+import { floatText, gameView, sound, tween, type Scene, type SpriteNode, type TilemapNode, type Tween } from "../../ts/nge";
 
-/** Rust 掉出关卡送回起点时发的事件。 */
+/** Rust 发的事件：掉出关卡送回起点、按 R 重新开始。 */
 interface Events {
   respawn: { falls: number };
+  restart: {};
 }
 
-const GameView = gameView<{}, Events>({ events: ["respawn"] });
+const GameView = gameView<{}, Events>({ events: ["respawn", "restart"] });
+
+const COIN_SOUND = "asset:/@platformer/coin.wav";
+const WIN_SOUND = "asset:/@platformer/win.wav";
 
 const TILE = 32;
 const COLS = 80;
@@ -70,10 +74,11 @@ function App() {
   const taken = signal<string[]>([]);
   const falls = signal(0);
   const won = signal<number | null>(null);
-  const started = Date.now();
+  let started = Date.now();
 
   const scene = (): Scene => ({
     background: "#1b2233",
+    audio: { preload: [COIN_SOUND, WIN_SOUND] },
     physics: { gravity: [0, -1800] },
     camera: { follow: "player", y: 60, smooth: 0.15, bounds: { left: 0, right: COLS * TILE, bottom: -160, top: (ROWS - 1) * TILE } },
     tilemaps: [LEVEL],
@@ -90,7 +95,7 @@ function App() {
   return (
     <View class="flex-1 bg-black">
       <Text class="text-white p-4">
-        ← → / A D / 手柄 移动 · 空格 / ↑ / A 跳 · 金币 {taken().length} / {COINS.length} · 掉下去 {falls()} 次
+        ← → / A D / 手柄 移动 · 空格 / ↑ / A 跳 · R 重来 · 金币 {taken().length} / {COINS.length} · 掉下去 {falls()} 次
         {won() === null ? "" : ` · 通关！用时 ${won()} 秒`}
       </Text>
       <GameView
@@ -108,11 +113,19 @@ function App() {
           if (coin && !taken().includes(coin.id)) {
             taken.set([...taken(), coin.id]);
             floatText(game, { x: coin.x, y: coin.y + 10, text: "+1", color: "#ffd93d", duration: 0.6 });
+            sound(game, { src: COIN_SOUND, volume: 0.5 });
           } else if (other === "goal" && won() === null) {
             won.set(Math.round((Date.now() - started) / 100) / 10);
+            sound(game, { src: WIN_SOUND, volume: 0.6 });
           }
         }}
         onRespawn={(e) => falls.set(e.falls)}
+        onRestart={() => {
+          taken.set([]);
+          falls.set(0);
+          won.set(null);
+          started = Date.now();
+        }}
       />
     </View>
   );

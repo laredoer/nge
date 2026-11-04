@@ -1,12 +1,12 @@
 //! 平台跳跃：关卡（瓦片地图）、金币、终点和相机都在 `App.tsx` 里声明；
-//! Rust 只管每帧的角色控制：读键盘、看脚下有没有地、设速度，掉下去了送回起点。
+//! Rust 只管每帧的角色控制：读键盘、看脚下有没有地、设速度，掉下去了送回起点，按 R 重新开始；起跳和掉坑的音效也在这里放。
 
 use bevy_ecs::prelude::*;
-use nge_assets::AssetPlugin;
-use nge_audio::AudioPlugin;
+use nge_assets::{AssetPlugin, AssetServer, Assets, Handle};
+use nge_audio::{Audio, AudioPlugin, Play, Sound};
 use nge_core::EventKey;
 use nge_ecs::glam::Vec2;
-use nge_ecs::{App, Input, Outbox, Time, Update};
+use nge_ecs::{App, Input, Outbox, Startup, Time, Update};
 use nge_physics2d::{Physics, Velocity};
 use nge_render2d::{Render2dPlugin, Transform2d};
 use nge_render3d::Render3dPlugin;
@@ -19,10 +19,16 @@ pub const PLAYER: &str = "player";
 /// 掉出关卡、被送回起点时发给 TSX。
 pub const RESPAWN: EventKey<Respawn> = EventKey::new("respawn");
 
+/// 按 R 重新开始时发给 TSX（角色已经回到起点、掉坑次数清零）。
+pub const RESTART: EventKey<Restart> = EventKey::new("restart");
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Respawn {
     pub falls: u32,
 }
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Restart {}
 
 /// 水平速度上限（point / s）和加速度：地上转向快，空中慢一点。
 const SPEED: f32 = 260.0;
@@ -41,6 +47,30 @@ const FALL_LINE: f32 = -400.0;
 const LEFT: [&str; 4] = ["ArrowLeft", "KeyA", "GamepadLeft", "GamepadLeftStickLeft"];
 const RIGHT: [&str; 4] = ["ArrowRight", "KeyD", "GamepadRight", "GamepadLeftStickRight"];
 const JUMP_KEYS: [&str; 4] = ["Space", "ArrowUp", "KeyW", "GamepadA"];
+/// 手柄的菜单键（Xbox ≡ / PS Options / Switch +）也能重来。
+const RESTART_KEYS: [&str; 2] = ["KeyR", "GamepadMenu"];
+const JUMP_SOUND: &str = "asset:/@platformer/jump.wav";
+const FALL_SOUND: &str = "asset:/@platformer/fall.wav";
+
+/// 起跳、掉坑的音效；没有音频设备时是空的。
+#[derive(Resource, Default)]
+struct Sfx {
+    jump: Option<Handle<Sound>>,
+    fall: Option<Handle<Sound>>,
+}
+
+/// 启动时就加载，第一次起跳不用等解码。
+fn load_sfx(audio: Res<Audio>, mut server: ResMut<AssetServer>, mut sounds: ResMut<Assets<Sound>>, mut sfx: ResMut<Sfx>) {
+    if audio.enabled() {
+        *sfx = Sfx { jump: Some(server.load(&mut sounds, JUMP_SOUND)), fall: Some(server.load(&mut sounds, FALL_SOUND)) };
+    }
+}
+
+fn play(audio: &mut Audio, sound: &Option<Handle<Sound>>, volume: f32) {
+    if let Some(sound) = sound {
+        audio.play(*sound, Play { volume, ..Play::default() });
+    }
+}
 
 #[derive(Resource, Debug)]
 struct Controller {
@@ -63,6 +93,7 @@ fn move_toward(from: f32, to: f32, step: f32) -> f32 {
     if (to - from).abs() <= step { to } else { from + step * (to - from).signum() }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn control(
     time: Res<Time>,
     input: Res<Input>,
@@ -70,12 +101,22 @@ fn control(
     mut ctl: ResMut<Controller>,
     mut players: Query<(Entity, &SceneId, &mut Transform2d, &mut Velocity)>,
     mut outbox: ResMut<Outbox>,
+    mut audio: ResMut<Audio>,
+    sfx: Res<Sfx>,
 ) {
     let Some((entity, _, mut t, mut v)) = players.iter_mut().find(|(_, id, ..)| id.0 == PLAYER) else { return };
     let spawn = *ctl.spawn.get_or_insert(t.translation);
     let dt = time.delta;
     // 暂停（0）或者宿主给了坏的帧时间：不动，免得暂停中起跳、NaN 写进物理
     if !(dt > 0.0) {
+        return;
+    }
+    // 和起跳同一帧时重来优先，这一下跳不算
+    if RESTART_KEYS.iter().any(|k| input.key_pressed(k)) {
+        t.translation = spawn;
+        *v = Velocity::default();
+        *ctl = Controller { spawn: Some(spawn), ..Controller::default() };
+        outbox.send(RESTART, &Restart {});
         return;
     }
     // 脚下的东西（法线朝上）；移动平台有速度，地图的碰撞体没有。同时踩着地面和平台时跟着动得快的那个
@@ -101,6 +142,7 @@ fn control(
         velocity.y = if holding { JUMP } else { JUMP * 0.5 };
         ctl.jump_pressed = f32::INFINITY;
         ctl.airborne = f32::INFINITY;
+        play(&mut audio, &sfx.jump, 0.5);
     } else if velocity.y > 0.0 && !holding && JUMP_KEYS.iter().any(|k| input.key_released(k)) {
         // 上升时跳跃键全松开了：跳得矮
         velocity.y *= 0.5;
@@ -112,8 +154,10 @@ fn control(
     if t.translation.y < FALL_LINE {
         t.translation = spawn;
         *v = Velocity::default();
-        ctl.falls += 1;
+        // 掉坑前按的跳不留到起点
+        *ctl = Controller { spawn: Some(spawn), falls: ctl.falls + 1, ..Controller::default() };
         outbox.send(RESPAWN, &Respawn { falls: ctl.falls });
+        play(&mut audio, &sfx.fall, 0.6);
     }
 }
 
@@ -129,7 +173,10 @@ fn build(audio: AudioPlugin) -> App {
         .add_plugins(Render2dPlugin)
         .add_plugins(ScenePlugin::new())
         .add_event(RESPAWN)
+        .add_event(RESTART)
         .init_resource::<Controller>()
+        .init_resource::<Sfx>()
+        .add_systems(Startup, load_sfx)
         .add_systems(Update, control);
     app
 }
@@ -328,6 +375,84 @@ mod tests {
         assert_eq!(respawn.1, json!({ "falls": 1 }));
         let (p, v) = player(&mut app);
         assert!((p - start).length() < 0.1 && v.length() < 1e-3, "送回起点、速度清零 {p} {v}");
+    }
+
+    fn voices(app: &mut App) -> usize {
+        nge_assets::AssetServer::apply(app.world_mut(), true);
+        run(app, 1);
+        app.world().resource::<nge_audio::Audio>().voices()
+    }
+
+    #[test]
+    fn jumping_and_falling_play_sounds() {
+        let mut app = app();
+        app.prop("scene", Some(&level(Some((22, 24)))));
+        run(&mut app, 20);
+        assert_eq!(voices(&mut app), 0, "站着不出声");
+        key(&mut app, "Space", true);
+        run(&mut app, 1);
+        assert_eq!(voices(&mut app), 1, "起跳");
+        key(&mut app, "Space", false);
+        key(&mut app, "ArrowRight", true);
+        (0..120).find(|_| run(&mut app, 1).iter().any(|(n, _)| n == "respawn")).expect("掉进坑里");
+        assert_eq!(voices(&mut app), 2, "掉坑");
+    }
+
+    #[test]
+    fn restart_wins_over_a_jump_and_is_ignored_while_paused() {
+        let mut app = app();
+        app.prop("scene", Some(&level(None)));
+        run(&mut app, 20);
+        let ground = player(&mut app).0.y;
+        key(&mut app, "Space", true);
+        key(&mut app, "KeyR", true);
+        let events = run(&mut app, 1);
+        assert!(events.iter().any(|(n, _)| n == "restart") && events.iter().all(|(n, _)| n != "respawn"), "{events:?}");
+        run(&mut app, 10);
+        assert!((player(&mut app).0.y - ground).abs() < 1.0, "同一帧的跳不算");
+        assert_eq!(voices(&mut app), 0, "重来不出声");
+        key(&mut app, "Space", false);
+        key(&mut app, "KeyR", false);
+
+        let mut paused = level(None);
+        paused["timeScale"] = json!(0);
+        app.prop("scene", Some(&paused));
+        run(&mut app, 1);
+        key(&mut app, "GamepadMenu", true);
+        assert!(run(&mut app, 5).iter().all(|(n, _)| n != "restart"), "暂停时不重来");
+    }
+
+    /// App.tsx 里用到的声音都在打包的资源里。
+    #[test]
+    fn sounds_are_bundled() {
+        let uris: Vec<_> = assets!().iter().map(|f| f.uri).collect();
+        for name in ["jump", "fall", "coin", "win"] {
+            assert!(uris.contains(&format!("asset:/@platformer/{name}.wav").as_str()), "{name} 不在 {uris:?}");
+        }
+        let tsx = include_str!("../App.tsx");
+        assert!(tsx.contains("asset:/@platformer/coin.wav") && tsx.contains("asset:/@platformer/win.wav"));
+    }
+
+    #[test]
+    fn r_restarts_from_the_spawn() {
+        let mut app = app();
+        app.prop("scene", Some(&level(Some((22, 24)))));
+        run(&mut app, 20);
+        let start = player(&mut app).0;
+        key(&mut app, "ArrowRight", true);
+        (0..120).find(|_| run(&mut app, 1).iter().any(|(n, _)| n == "respawn")).expect("掉进坑里");
+        run(&mut app, 30);
+        key(&mut app, "ArrowRight", false);
+        key(&mut app, "KeyR", true);
+        let events = run(&mut app, 1);
+        assert_eq!(events.iter().filter(|(n, _)| n == "restart").count(), 1, "{events:?}");
+        let (p, v) = player(&mut app);
+        assert!((p - start).length() < 0.1 && v.length() < 1e-3, "回到起点、速度清零 {p} {v}");
+        assert!(run(&mut app, 10).iter().all(|(n, _)| n != "restart"), "按住不重复");
+        key(&mut app, "KeyR", false);
+        key(&mut app, "ArrowRight", true);
+        let respawn = (0..120).find_map(|_| run(&mut app, 1).into_iter().find(|(n, _)| n == "respawn")).expect("又掉进坑里");
+        assert_eq!(respawn.1, json!({ "falls": 1 }), "掉坑次数从 0 重新数");
     }
 
     /// App.tsx 的金币是 sensor、角色开了 collide：走过去时发 collide，金币不挡路。
