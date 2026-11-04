@@ -24,6 +24,8 @@ export interface SpriteNode {
   frame?: number;
   /** 每秒转多少度。 */
   spin?: number;
+  /** 帧动画（只对图集有用）；有它时 `frame` 不起作用。节点别的字段变了不会从头播，`anim` 变了才从头播。 */
+  anim?: AnimNode;
   /** 可点击：按下时发 tap 事件。 */
   tap?: boolean;
   /** 刚体。有了它位置归物理管：声明的 x / y / rotation 只在生成和改了的时候生效（同时重设初速度）。 */
@@ -229,6 +231,64 @@ export function push(game: YNode | undefined, args: { id: string; x: number; y: 
   game?.command("push", args);
 }
 
+export interface AnimNode {
+  /** 依次播的图集格子序号。 */
+  frames: number[];
+  /** 默认 10。 */
+  fps?: number;
+  /** 默认 true；false 时停在最后一帧并发 animEnd。 */
+  loop?: boolean;
+}
+
+export interface TweenProps {
+  x?: number;
+  y?: number;
+  rotation?: number;
+  scale?: number;
+  alpha?: number;
+}
+
+export type Ease = "linear" | "easeIn" | "easeOut" | "easeInOut" | "backOut" | "bounceOut" | "elasticOut";
+
+export interface Tween {
+  /** 精灵节点的 id。 */
+  id: string;
+  /** 显式的起点；不填的属性从开始（delay 过后）时的当前值取。`to` 里没有的属性不起作用。 */
+  from?: TweenProps;
+  /** 变到这里；`rotation` 是度，`alpha` 替换颜色的透明度。写了别的字段整条命令无效。 */
+  to: TweenProps;
+  /** 秒，默认 0.3；不是正数时直接跳到终点。 */
+  duration?: number;
+  delay?: number;
+  /** 默认 "easeOut"。 */
+  ease?: Ease;
+  /** 额外再播几次，-1 是一直播。 */
+  repeat?: number;
+  /** 配合 repeat 来回播：第二、四……次从 to 回到起点。 */
+  yoyo?: boolean;
+  /** 原样带回 tweenEnd 事件。 */
+  tag?: string;
+}
+
+/**
+ * 让精灵在一段时间里平滑地移动 / 旋转 / 缩放 / 渐隐，结束时发 tweenEnd。
+ * 补间开始（delay 过后）时接管它写到的属性，属性全被接管的旧补间发 `cancelled: true` 的 tweenEnd；dynamic 刚体只补间 scale / alpha。
+ */
+export function tween(game: YNode | undefined, args: Tween) {
+  game?.command("tween", args);
+}
+
+export interface AnimEnd {
+  id: string;
+}
+
+export interface TweenEnd {
+  id: string;
+  tag: string | null;
+  /** 被后开始的补间接管，没播完（一直播的补间被接管时也会发）。 */
+  cancelled: boolean;
+}
+
 /** 播一次音效。`pitch` 是播放速度（2 = 高八度，限制在 0.1 到 8），`pan` 从 -1（左）到 1（右）。同时发声数有上限，超出的会被丢掉。 */
 export function sound(game: YNode | undefined, args: { src: string; volume?: number; pitch?: number; pan?: number }) {
   game?.command("sound", args);
@@ -255,6 +315,8 @@ interface BuiltinProps {
 interface BuiltinEvents {
   tap: Tap;
   collide: Collide;
+  animEnd: AnimEnd;
+  tweenEnd: TweenEnd;
   fps: FrameStats;
   error: EngineError;
 }
@@ -265,14 +327,14 @@ export type GameViewProps<P, E> = NativeComponentProps<Partial<BuiltinProps> & P
 
 /**
  * 生成游戏视图组件。`props` / `events` 是游戏自己的通道名（Rust 侧 `add_prop` / `add_state` / `add_event`），
- * 类型由泛型给出；内置 prop `scene`、事件 `tap` / `collide` / `fps` / `error`，触摸自动转成引擎的 `touch` command。
+ * 类型由泛型给出；内置 prop `scene`、事件 `tap` / `collide` / `animEnd` / `tweenEnd` / `fps` / `error`，触摸自动转成引擎的 `touch` command。
  */
 export function gameView<P extends object = {}, E extends object = {}>(
   spec: { props?: readonly (keyof P & string)[]; events?: readonly (keyof E & string)[] } = {},
 ) {
   const Native = nativeComponent<BuiltinProps & P, BuiltinEvents & E>("nge.game", {
     props: [...new Set(["scene", ...(spec.props ?? [])])] as (keyof (BuiltinProps & P) & string)[],
-    events: [...new Set(["tap", "collide", "fps", "error", ...(spec.events ?? [])])] as (keyof (BuiltinEvents & E) & string)[],
+    events: [...new Set(["tap", "collide", "animEnd", "tweenEnd", "fps", "error", ...(spec.events ?? [])])] as (keyof (BuiltinEvents & E) & string)[],
   });
 
   return (props: GameViewProps<P, E>) => {

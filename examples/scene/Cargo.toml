@@ -12,3 +12,7 @@ nge-render2d.workspace = true
 nge-render3d.workspace = true
 nge-scene.workspace = true
 nge-platform = { workspace = true, features = ["dev"] }
+
+[dev-dependencies]
+nge-audio.workspace = true
+serde_json.workspace = true

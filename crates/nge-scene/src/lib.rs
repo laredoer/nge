@@ -1,9 +1,10 @@
 //! 声明式场景：TSX 通过 `scene` prop 描述精灵、文字、粒子、3D 模型和灯光，这里按 id 增量同步成 ECS 实体；
-//! 一次性的效果（炸粒子、飘字、推刚体、音效）走 `burst` / `floatText` / `push` / `sound` command。
+//! 一次性的效果（炸粒子、飘字、推刚体、音效、补间）走 `burst` / `floatText` / `push` / `sound` / `tween` command。
 //!
 //! 节点内容没变的实体不会被改动，所以 Rust 系统可以按 [`SceneId`] 找到实体继续驱动它；
 //! 节点一旦在 TSX 里改了，就以 TSX 声明的为准整体覆盖。
 
+mod anim;
 mod audio;
 mod behave;
 mod nodes;
@@ -24,6 +25,7 @@ use nge_render2d::{Assets, AtlasId, Atlases, Camera2d, Grid, Image, PointerWorld
 use nge_render3d::{Assets3d, Camera3d, Transform3d};
 use nge_text::TextPlugin;
 
+pub use anim::{ANIM_END, AnimEnd, AnimNode, Ease, FrameAnimation, TWEEN, TWEEN_END, Tween, TweenCommand, TweenEnd, TweenProps, Tweens};
 pub use audio::{AudioNode, PlaySound, SOUND};
 pub use behave::{Spin, Tappable};
 pub use nodes::{AmbientNode, AnchorName, BURST, Burst, Camera3dNode, EmitterNode, FLOAT_TEXT, FloatText, LightKind, LightNode, ModelNode, Particles, TextNode};
@@ -120,9 +122,14 @@ impl Plugin for ScenePlugin {
             .add_command(FLOAT_TEXT)
             .add_command(PUSH)
             .add_command(SOUND)
+            .add_command(TWEEN)
+            .add_event(ANIM_END)
+            .add_event(TWEEN_END)
             .add_event(COLLIDE)
             .add_systems(PreUpdate, synced.run_if(resource_changed::<Scene>).before(PointerWorld))
-            .add_systems(Update, (behave::spin, behave::tap, behave::burst, behave::float_text, physics::push, audio::play_sound))
+            .add_systems(Update, (behave::spin, behave::tap, behave::burst, behave::float_text, physics::push, audio::play_sound, anim::animate))
+            // 补间最后写，盖过 spin / push 这一帧的改动
+            .add_systems(Update, (anim::start_tweens, anim::tween).chain().after(behave::spin).after(physics::push))
             .add_systems(PostUpdate, (behave::follow, physics::collide.after(PhysicsStepped)));
     }
 }

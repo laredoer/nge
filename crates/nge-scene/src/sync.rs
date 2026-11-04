@@ -5,8 +5,9 @@ use std::collections::{HashMap, HashSet};
 use bevy_ecs::prelude::*;
 use glam::{Vec2, Vec4};
 use nge_core::wgpu;
-use nge_render2d::{Camera2d, ClearColor, Sprite, Transform2d};
+use nge_render2d::{Camera2d, ClearColor, Sprite, SpriteImage, Transform2d};
 
+use crate::anim::FrameAnimation;
 use crate::behave::{Spin, Tappable};
 use crate::physics::{apply_body, square};
 use crate::protocol::{CameraNode, Color, Scene, SpriteNode};
@@ -91,6 +92,20 @@ pub(crate) fn sync_sprites(mut commands: Commands, scene: Res<Scene>, mut assets
         }
         if node.tap {
             entity.insert(Tappable);
+        }
+        // anim 没变时接着播，不从头开始
+        if before.map(|b| &b.anim) != Some(&node.anim) {
+            let anim = node.anim.as_ref().and_then(|a| FrameAnimation::new(a.frames.clone(), a.fps, a.looped));
+            if node.anim.is_some() && anim.is_none() {
+                log::warn!("节点 {:?} 的 anim 没有帧或 fps 不是正数，不播", node.id);
+            }
+            if anim.is_some() && matches!(image, SpriteImage::Texture(_)) {
+                log::warn!("节点 {:?} 不是图集精灵，anim 不起作用", node.id);
+            }
+            match anim {
+                Some(anim) => entity.insert(anim),
+                None => entity.remove::<FrameAnimation>(),
+            };
         }
     });
 }
