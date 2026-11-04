@@ -94,7 +94,7 @@ fn game_can_teleport_set_velocity_and_push() {
 
     app.world_mut().get_mut::<Velocity>(b).unwrap().linear = Vec2::new(60.0, 0.0);
     steps(&mut app, 60);
-    assert!((pos(&app, b).x - 360.0).abs() < 1.0, "一秒走 60: {}", pos(&app, b));
+    assert!((pos(&app, b).x - 359.0).abs() < 1e-2, "一秒走 60，显示的位置比物理慢一步: {}", pos(&app, b));
 
     let mass = app.world().resource::<Physics>().mass(b).unwrap();
     app.world_mut().get_mut::<Impulse>(b).unwrap().0 = Vec2::new(0.0, 100.0 * mass);
@@ -147,19 +147,70 @@ fn bodies_follow_component_changes_and_despawns() {
     assert_eq!(app.world().resource::<Physics>().len(), (0, 0));
 }
 
+/// 没有重力、以 60 point / s 往右走的动态刚体。
+fn mover(app: &mut App) -> Entity {
+    app.world_mut().resource_mut::<Physics>().set_gravity(Vec2::ZERO);
+    app.world_mut().spawn((RigidBody::Dynamic, at(0.0, 0.0), Velocity { linear: Vec2::new(60.0, 0.0), angular: 0.0 })).id()
+}
+
 #[test]
 fn fixed_step_accumulates_and_caps() {
     let mut app = app();
-    let e = app.world_mut().spawn((RigidBody::Dynamic, at(0.0, 0.0), Velocity { linear: Vec2::new(60.0, 0.0), angular: 0.0 })).id();
-    app.world_mut().resource_mut::<Physics>().set_gravity(Vec2::ZERO);
+    let e = mover(&mut app);
+    // 显示的位置在上一步和这一步之间插值，比物理慢一步
+    app.tick(VIEWPORT, STEP);
+    app.tick(VIEWPORT, STEP);
+    assert!((pos(&app, e).x - 1.0).abs() < 1e-3, "两步后显示第一步: {}", pos(&app, e));
     app.tick(VIEWPORT, STEP / 2.0);
-    assert_eq!(pos(&app, e).x, 0.0, "不够一步不动");
-    app.tick(VIEWPORT, STEP / 2.0);
-    assert!((pos(&app, e).x - 1.0).abs() < 1e-3, "{}", pos(&app, e));
-    app.tick(VIEWPORT, 0.04);
-    assert!((pos(&app, e).x - 3.0).abs() < 1e-3, "40ms 是 2 步多一点: {}", pos(&app, e));
+    assert!((pos(&app, e).x - 1.5).abs() < 1e-3, "不够一步时插值: {}", pos(&app, e));
+    app.tick(VIEWPORT, 1.0);
+    assert!((pos(&app, e).x - (2.0 + MAX_STEPS as f32)).abs() < 1e-3, "卡顿时最多补 MAX_STEPS 步: {}", pos(&app, e));
     // 没有碰撞体的刚体照样能动
     assert_eq!(app.world().resource::<Physics>().len(), (1, 0));
+}
+
+/// 每帧走 `dt`，返回后 `n` 帧每帧的位移。
+fn frame_moves(dt: impl Fn(usize) -> f32, n: usize) -> Vec<(f32, f32)> {
+    let mut app = app();
+    let e = mover(&mut app);
+    for i in 0..10 {
+        app.tick(VIEWPORT, dt(i));
+    }
+    (10..10 + n)
+        .map(|i| {
+            let before = pos(&app, e).x;
+            app.tick(VIEWPORT, dt(i));
+            (pos(&app, e).x - before, 60.0 * dt(i))
+        })
+        .collect()
+}
+
+#[test]
+fn moves_every_frame_at_120hz() {
+    for (moved, expected) in frame_moves(|_| STEP / 2.0, 20) {
+        assert!((moved - expected).abs() < 1e-3, "每帧都走半步，不是一帧一步一帧不动: {moved}");
+    }
+}
+
+#[test]
+fn jittery_frame_times_still_move_evenly() {
+    // 帧时间在一步上下抖：不插值时会一帧走 0 步、下一帧走 2 步
+    for (moved, expected) in frame_moves(|i| if i % 2 == 0 { STEP * 0.97 } else { STEP * 1.03 }, 20) {
+        assert!((moved - expected).abs() < 1e-3, "位移跟着帧时间走: {moved} / {expected}");
+    }
+}
+
+#[test]
+fn teleport_is_not_interpolated() {
+    let mut app = app();
+    let e = mover(&mut app);
+    steps(&mut app, 5);
+    app.world_mut().get_mut::<Transform2d>(e).unwrap().translation.x = 500.0;
+    app.tick(VIEWPORT, STEP / 2.0);
+    assert!((pos(&app, e).x - 500.0).abs() < 1e-3, "不够一步的帧里也不被插值盖掉: {}", pos(&app, e));
+    app.tick(VIEWPORT, STEP);
+    let x = pos(&app, e).x;
+    assert!((500.0..=501.5).contains(&x), "从新位置接着走，不从旧位置滑过来: {x}");
 }
 
 /// `cargo test -p nge-physics2d --release -- --ignored --nocapture`
@@ -304,4 +355,34 @@ fn sensors_are_not_contacts() {
     steps(&mut app, 60);
     let contacts = app.world().resource::<Physics>().contacts(b);
     assert!(!contacts.is_empty() && contacts.iter().all(|c| c.other != zone), "只算地面，不算 sensor {contacts:?}");
+}
+
+/// 两个一样的 600 point / s 动态刚体，`act` 只对第一个做；之后两者的位置应该一样。
+fn same_path_as_untouched(act: impl Fn(&mut App, Entity)) -> (f32, f32) {
+    let mut app = app();
+    app.world_mut().resource_mut::<Physics>().set_gravity(Vec2::ZERO);
+    let spawn = |app: &mut App, y: f32| {
+        app.world_mut().spawn((RigidBody::Dynamic, Collider::circle(5.0), at(0.0, y), Velocity { linear: Vec2::new(600.0, 0.0), angular: 0.0 })).id()
+    };
+    let (a, b) = (spawn(&mut app, 0.0), spawn(&mut app, 100.0));
+    steps(&mut app, 3);
+    // 停在两步之间的一帧：显示的位置落后物理半步
+    app.tick(VIEWPORT, STEP / 2.0);
+    act(&mut app, a);
+    steps(&mut app, 3);
+    (pos(&app, a).x, pos(&app, b).x)
+}
+
+#[test]
+fn rebuilding_a_body_keeps_its_physics_position() {
+    let (rebuilt, untouched) = same_path_as_untouched(|app, e| {
+        app.world_mut().entity_mut(e).insert(Collider { restitution: 0.5, ..Collider::circle(5.0) });
+    });
+    assert!((rebuilt - untouched).abs() < 1e-2, "重建不退回显示的位置: {rebuilt} / {untouched}");
+}
+
+#[test]
+fn setting_only_the_rotation_keeps_the_translation() {
+    let (rotated, untouched) = same_path_as_untouched(|app, e| app.world_mut().get_mut::<Transform2d>(e).unwrap().rotation = 1.0);
+    assert!((rotated - untouched).abs() < 1e-2, "只改角度，位置不被拉回: {rotated} / {untouched}");
 }

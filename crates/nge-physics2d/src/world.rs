@@ -32,6 +32,9 @@ struct Handles {
     locked: bool,
     transform: (Vec2, f32),
     velocity: Velocity,
+    /// 动态刚体在上一步、这一步结束时的位置（角度不折回），显示的位置在两者之间插值。
+    prev: (Vec2, f32),
+    curr: (Vec2, f32),
 }
 
 impl Physics {
@@ -158,10 +161,19 @@ pub(crate) fn create(
         }
         if !physics.entities.get(&entity).is_some_and(|h| h.kind == kind && h.shape == shape) {
             let transform = transform.copied().unwrap_or_default();
+            let shown = (transform.translation, transform.rotation);
             let old = physics.forget(entity);
             // 重建时没有 Velocity 组件就沿用物理里原来的速度
-            let velocity = velocity.copied().or(old.map(|h| h.velocity)).unwrap_or_default();
-            let handles = build(&mut physics.world, entity, kind, shape, (transform.translation, transform.rotation), velocity);
+            let velocity = velocity.copied().or(old.as_ref().map(|h| h.velocity)).unwrap_or_default();
+            // 游戏没挪它时，组件里是插值过的位置：刚体从物理里真实的位置接着走，不退回最多一步
+            let kept = old.filter(|h| h.transform == shown && kind.is_some());
+            let mut handles = build(&mut physics.world, entity, kind, shape, kept.as_ref().map_or(shown, |h| h.curr), velocity);
+            if let Some(old) = kept {
+                handles.transform = shown;
+                if kind == Some(RigidBody::Dynamic) {
+                    (handles.prev, handles.curr) = (old.prev, old.curr);
+                }
+            }
             physics.entities.insert(entity, handles);
         }
         let Some(h) = physics.entities.get_mut(&entity) else { continue };
@@ -219,7 +231,7 @@ fn build(world: &mut PhysicsWorld, entity: Entity, kind: Option<RigidBody>, shap
     {
         body.set_additional_mass(1.0, true);
     }
-    Handles { body, collider, kind, shape, locked: false, transform: at, velocity }
+    Handles { body, collider, kind, shape, locked: false, transform: at, velocity, prev: at, curr: at }
 }
 
 /// 收集 rapier 的碰撞事件。
@@ -239,6 +251,7 @@ impl EventHandler for Events {
 type Synced<'a> = (Entity, &'a mut Transform2d, Option<&'a mut Velocity>, Option<&'a mut Impulse>);
 
 /// 按累计的时间走若干个固定步长：先把游戏改过的位置 / 速度 / 冲量推给物理，走完再写回。
+/// 动态刚体写回的是上一步和这一步之间按剩下的时间插值的位置（比物理慢一步），刷新率比步长高或帧时间抖动时也每帧都动。
 pub(crate) fn step(mut physics: ResMut<Physics>, time: Res<Time>, mut query: Query<Synced>, mut collisions: MessageWriter<Collision>) {
     let physics = &mut *physics;
     if time.delta.is_finite() {
@@ -246,9 +259,22 @@ pub(crate) fn step(mut physics: ResMut<Physics>, time: Res<Time>, mut query: Que
     }
     let steps = ((physics.accumulator / STEP) as u32).min(MAX_STEPS);
     if steps == 0 {
+        let alpha = physics.accumulator / STEP;
+        for (entity, mut transform, ..) in &mut query {
+            if let Some(h) = physics.entities.get_mut(&entity)
+                && h.kind == Some(RigidBody::Dynamic)
+                // 游戏这一帧挪了它：留给下一步推给物理，不拿插值盖掉
+                && (transform.translation, transform.rotation) == h.transform
+            {
+                let t = transform.bypass_change_detection();
+                (t.translation, t.rotation) = lerp(h.prev, h.curr, alpha);
+                h.transform = (t.translation, t.rotation);
+            }
+        }
         return;
     }
     physics.accumulator = (physics.accumulator - steps as f32 * STEP).min(STEP);
+    let alpha = physics.accumulator / STEP;
 
     let mut kinematic = Vec::new();
     for (entity, transform, velocity, impulse) in &mut query {
@@ -265,6 +291,14 @@ pub(crate) fn step(mut physics: ResMut<Physics>, time: Res<Time>, mut query: Que
                 body.set_next_kinematic_rotation(Rotation::new(from.1 + (to.1 - from.1) * f));
             }
         }
+        if i == steps {
+            // 最后一步之前的位置就是插值的起点
+            for h in physics.entities.values_mut() {
+                if let Some(body) = dynamic_body(&physics.world, h) {
+                    h.prev = pose(body, h.curr.1);
+                }
+            }
+        }
         physics.world.step_with_events(&(), &events);
     }
     for (entity, mut transform, velocity, _) in &mut query {
@@ -272,9 +306,13 @@ pub(crate) fn step(mut physics: ResMut<Physics>, time: Res<Time>, mut query: Que
         let Some(body) = h.body.and_then(|b| physics.world.bodies.get(b)) else { continue };
         // 绕过变更检测：下一步只把游戏自己改的当成改动
         let t = transform.bypass_change_detection();
-        t.translation = vec2(body.translation());
-        // rapier 的角度在 (-π, π]，按差值累加，不让游戏看到跳变
-        t.rotation += wrap(body.rotation().angle() - t.rotation);
+        if h.kind == Some(RigidBody::Dynamic) {
+            h.curr = pose(body, h.prev.1);
+            (t.translation, t.rotation) = lerp(h.prev, h.curr, alpha);
+        } else {
+            (t.translation, t.rotation) = pose(body, t.rotation);
+            (h.prev, h.curr) = ((t.translation, t.rotation), (t.translation, t.rotation));
+        }
         h.transform = (t.translation, t.rotation);
         h.velocity = Velocity { linear: vec2(body.linvel()), angular: body.angvel() };
         if let Some(mut v) = velocity {
@@ -293,6 +331,20 @@ pub(crate) fn step(mut physics: ResMut<Physics>, time: Res<Time>, mut query: Que
         }
     }
     physics.removed.clear();
+}
+
+fn dynamic_body<'a>(world: &'a PhysicsWorld, h: &Handles) -> Option<&'a rapier2d::prelude::RigidBody> {
+    h.body.and_then(|b| world.bodies.get(b)).filter(|_| h.kind == Some(RigidBody::Dynamic))
+}
+
+/// 刚体的位置；rapier 的角度在 (-π, π]，按和 `near` 的差值累加，不让游戏看到跳变。
+fn pose(body: &rapier2d::prelude::RigidBody, near: f32) -> (Vec2, f32) {
+    (vec2(body.translation()), near + wrap(body.rotation().angle() - near))
+}
+
+fn lerp(a: (Vec2, f32), b: (Vec2, f32), t: f32) -> (Vec2, f32) {
+    let t = t.clamp(0.0, 1.0);
+    (a.0.lerp(b.0, t), a.1 + (b.1 - a.1) * t)
 }
 
 /// 角度差规范到 (-π, π]。
@@ -325,8 +377,15 @@ fn push(
         if body.is_kinematic() {
             kinematic = h.body.map(|b| (b, from, at));
         } else {
-            body.set_translation(vector(at.0), true);
-            body.set_rotation(Rotation::new(at.1), true);
+            // 位置和角度分开看：游戏只改了一样时，另一样留在物理里的真实值（组件里的是插值过的）
+            if at.0 != from.0 {
+                body.set_translation(vector(at.0), true);
+                (h.prev.0, h.curr.0) = (at.0, at.0);
+            }
+            if at.1 != from.1 {
+                body.set_rotation(Rotation::new(at.1), true);
+                (h.prev.1, h.curr.1) = (at.1, at.1);
+            }
         }
     }
     if let Some(&v) = velocity
