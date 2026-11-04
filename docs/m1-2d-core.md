@@ -92,5 +92,5 @@ fn on_pointer(input: Res<Input>, mut outbox: ResMut<Outbox>) {
 - **10 万精灵规模的 CPU 开销**：改成用 u64 键 `sort_unstable`；z 不变时跳过排序；用 `write_buffer_with` 省掉一次拷贝；加视口剔除。
 - **图集和颜色**：图集格子边缘会渗色（uv 向内缩半个 texel，或者给图集留 padding）；改用预乘 alpha；加 Nearest 采样选项；颜色改成 Unorm16 存，减轻暗部色带。
 - **层叠顺序**：z 相同、纹理相同的精灵，谁在上面取决于 ECS 存储顺序，despawn 之后可能对调。
-- **相机**：`Pointer.world` 用的是上一帧的相机；有多个 Camera2d 时取第一个；`SpriteRenderer` 每帧都会清屏。
+- **相机**：`Pointer.world` 用的是上一帧的相机；有多个 Camera2d 时取第一个。（`SpriteRenderer` 每帧都清屏的问题已在 M4 改成由 `RenderFrame` 决定。）
 - **API 缺失**：Sprite 的 flip / anchor、`world_to_screen`、sRGB 颜色辅助函数、可见性组件、父子变换、固定步长、键盘和鼠标输入。

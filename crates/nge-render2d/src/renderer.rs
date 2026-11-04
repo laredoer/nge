@@ -3,7 +3,7 @@
 use bevy_ecs::prelude::*;
 use glam::{Vec2, Vec4};
 use nge_core::{Gfx, wgpu};
-use nge_ecs::{App, Input, Plugin, PreUpdate, Renderer, Screen};
+use nge_ecs::{App, ClearColor, Input, Plugin, PreUpdate, RenderFrame, Renderer, Screen};
 
 use crate::assets::{Assets, TextureId};
 use crate::batch::{Batch, Instance, Item, batch};
@@ -56,23 +56,12 @@ fn fs(in: Out) -> @location(0) vec4f {
 
 const INITIAL_CAPACITY: u64 = 1024;
 
-/// 每帧的清屏颜色（线性）。
-#[derive(Resource, Debug, Clone, Copy)]
-pub struct ClearColor(pub wgpu::Color);
-
-impl Default for ClearColor {
-    fn default() -> Self {
-        Self(wgpu::Color { r: 0.02, g: 0.02, b: 0.04, a: 1.0 })
-    }
-}
-
-/// 注册 [`Assets`]、[`ClearColor`]、指针世界坐标换算和精灵渲染器。
+/// 注册 [`Assets`]、指针世界坐标换算和精灵渲染器（`ClearColor` 由 `App` 自带）。
 pub struct Render2dPlugin;
 
 impl Plugin for Render2dPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(Assets::default())
-            .insert_resource(ClearColor::default())
             .add_systems(PreUpdate, pointer_world.in_set(PointerWorld))
             .add_renderer(SpriteRenderer::default());
     }
@@ -136,14 +125,15 @@ impl Renderer for SpriteRenderer {
         gfx.queue.write_buffer(&gpu.globals, 0, bytemuck::bytes_of(&view_proj.to_cols_array()));
         gpu.write_instances(gfx, &self.instances);
 
-        let clear = world.resource::<ClearColor>().0;
+        let clear = *world.resource::<ClearColor>();
+        let load = world.resource_mut::<RenderFrame>().color_load(clear);
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("sprites"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: target,
                 depth_slice: None,
                 resolve_target: None,
-                ops: wgpu::Operations { load: wgpu::LoadOp::Clear(clear), store: wgpu::StoreOp::Store },
+                ops: wgpu::Operations { load, store: wgpu::StoreOp::Store },
             })],
             ..Default::default()
         });

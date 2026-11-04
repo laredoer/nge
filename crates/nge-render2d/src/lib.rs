@@ -10,7 +10,8 @@ mod sprite;
 
 pub use assets::{AtlasId, Assets, Grid, MAX_TEXTURE_SIDE, TextureId};
 pub use camera::{Camera2d, Transform2d};
-pub use renderer::{ClearColor, PointerWorld, Render2dPlugin};
+pub use nge_ecs::ClearColor;
+pub use renderer::{PointerWorld, Render2dPlugin};
 pub use sprite::{Sprite, SpriteImage};
 
 pub mod prelude {
