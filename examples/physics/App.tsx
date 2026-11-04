@@ -1,6 +1,6 @@
 import { mount, signal, Text, View, type YNode } from "nsh";
 import { Button } from "nsh/base";
-import { burst, gameView, push, sound, type Burst, type Scene, type SpriteNode } from "../../ts/nge";
+import { burst, gameView, push, sound, type Burst, type Scene, type SpriteNode, type TilemapNode } from "../../ts/nge";
 
 const GameView = gameView();
 
@@ -8,6 +8,7 @@ const SPARK = "asset:/@physics/spark.png";
 const DING = "asset:/@physics/ding.wav";
 const POP = "asset:/@physics/pop.wav";
 const MUSIC = "asset:/@physics/music.wav";
+const TILES = "asset:/@physics/tiles.png";
 const FLOOR = -260;
 const WALL = 320;
 const MAX_BALLS = 1200;
@@ -31,13 +32,33 @@ const SPARKS: Burst = {
   texture: SPARK,
 };
 
-/** 不会动的东西：地面、两面墙；最底下一层透明的「天空」接住点空地的点击。 */
-const STATIC: SpriteNode[] = [
-  { id: "sky", w: 4000, h: 4000, z: -10, color: "#00000000", tap: true },
-  { id: "floor", y: FLOOR - 20, w: WALL * 2 + 40, h: 40, color: "#3a4256", body: { kind: "fixed" } },
-  { id: "wall-l", x: -WALL - 10, y: FLOOR + 480, w: 20, h: 1000, color: "#3a4256", body: { kind: "fixed" } },
-  { id: "wall-r", x: WALL + 10, y: FLOOR + 480, w: 20, h: 1000, color: "#3a4256", body: { kind: "fixed" } },
-];
+/** 最底下一层透明的「天空」接住点空地的点击。 */
+const SKY: SpriteNode = { id: "sky", w: 4000, h: 4000, z: -10, color: "#00000000", tap: true };
+
+/** 关卡：一层地面、两面墙和两块平台，图集里 0 石墙、1 长草的地面、2 木平台。 */
+const TILE = 40;
+const COLS = (WALL + TILE) * 2 / TILE;
+const ROWS = 26;
+/** [行, 起始列, 结束列]：一块在 y = -100，一块在 y = 20。 */
+const PLATFORMS = [[21, 3, 6], [18, 11, 14]];
+const LEVEL: TilemapNode = {
+  id: "level",
+  texture: TILES,
+  grid: [3, 1],
+  tile: TILE,
+  cols: COLS,
+  x: -WALL - TILE,
+  y: FLOOR + TILE * (ROWS - 1),
+  data: Array.from({ length: COLS * ROWS }, (_, i) => {
+    const c = i % COLS;
+    const r = Math.floor(i / COLS);
+    if (r === ROWS - 1) return 1;
+    if (c === 0 || c === COLS - 1) return 0;
+    return PLATFORMS.some(([row, from, to]) => r === row && c >= from && c <= to) ? 2 : -1;
+  }),
+  solid: [0, 1, 2],
+  collide: true,
+};
 
 /** 一开始就有的一摞箱子。 */
 const CRATES: SpriteNode[] = Array.from({ length: 8 }, (_, i) => ({
@@ -88,8 +109,9 @@ function App() {
   const scene = (): Scene => ({
     background: "#10131c",
     audio: { music: MUSIC, musicVolume: 0.5, muted: muted(), preload: [DING, POP] },
+    tilemaps: [LEVEL],
     sprites: [
-      ...STATIC,
+      SKY,
       ...CRATES,
       ...balls().map((b) => ({
         id: b.id,

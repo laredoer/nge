@@ -46,13 +46,7 @@ mod tests {
 
     /// App.tsx 里 `scene()` 的样子（TS 序列化后），`balls` 是 (x, y, r)。
     fn scene(balls: &[(f32, f32, f32)]) -> Value {
-        let wall = |id: &str, x: f32| json!({ "id": id, "x": x, "y": FLOOR + 480.0, "w": 20, "h": 1000, "body": { "kind": "fixed" } });
-        let mut sprites = vec![
-            json!({ "id": "sky", "w": 4000, "h": 4000, "z": -10, "color": "#00000000", "tap": true }),
-            json!({ "id": "floor", "y": FLOOR - 20.0, "w": WALL * 2.0 + 40.0, "h": 40, "body": { "kind": "fixed" } }),
-            wall("wall-l", -WALL - 10.0),
-            wall("wall-r", WALL + 10.0),
-        ];
+        let mut sprites = vec![json!({ "id": "sky", "w": 4000, "h": 4000, "z": -10, "color": "#00000000", "tap": true })];
         sprites.extend((0..8).map(|i| {
             let (x, y) = (120.0 + (i % 2) as f32 * 44.0 - 22.0, FLOOR + 22.0 + (i / 2) as f32 * 44.0);
             json!({ "id": format!("crate-{i}"), "x": x, "y": y, "w": 40, "body": { "friction": 0.8 } })
@@ -61,8 +55,30 @@ mod tests {
             json!({ "id": format!("ball-{i}"), "x": x, "y": y, "w": r * 2.0, "z": 1, "tap": true, "texture": "asset:/@physics/spark.png",
                 "body": { "shape": "circle", "restitution": 0.5, "collide": true } })
         }));
-        json!({ "background": "#10131c", "sprites": sprites,
+        json!({ "background": "#10131c", "sprites": sprites, "tilemaps": [level()],
             "audio": { "music": "asset:/@physics/music.wav", "musicVolume": 0.5, "preload": ["asset:/@physics/ding.wav", "asset:/@physics/pop.wav"] } })
+    }
+
+    /// App.tsx 里的 `LEVEL`：18 列 26 行，最底下一行地面，两边是墙，两块平台。
+    fn level() -> Value {
+        let (tile, cols, rows) = (40.0, 18usize, 26usize);
+        let platforms = [(21, 3, 6), (18, 11, 14)];
+        let data: Vec<i32> = (0..cols * rows)
+            .map(|i| {
+                let (c, r) = (i % cols, i / cols);
+                if r == rows - 1 {
+                    1
+                } else if c == 0 || c == cols - 1 {
+                    0
+                } else if platforms.iter().any(|&(row, from, to)| r == row && (from..=to).contains(&c)) {
+                    2
+                } else {
+                    -1
+                }
+            })
+            .collect();
+        json!({ "id": "level", "texture": "asset:/@physics/tiles.png", "grid": [3, 1], "tile": tile, "cols": cols,
+            "x": -WALL - tile, "y": FLOOR + tile * (rows - 1) as f32, "data": data, "solid": [0, 1, 2], "collide": true })
     }
 
     fn position(app: &mut App, id: &str) -> nge_ecs::glam::Vec2 {
@@ -77,7 +93,7 @@ mod tests {
     #[test]
     fn crates_stay_stacked_and_balls_land_and_collide() {
         let mut app = app();
-        app.prop("scene", Some(&scene(&[(-100.0, 100.0, 10.0)])));
+        app.prop("scene", Some(&scene(&[(0.0, 100.0, 10.0), (-160.0, 100.0, 10.0)])));
         let events = run(&mut app, 180);
         for i in 0..8 {
             let p = position(&mut app, &format!("crate-{i}"));
@@ -86,7 +102,9 @@ mod tests {
         }
         let ball = position(&mut app, "ball-0");
         assert!((ball.y - (FLOOR + 10.0)).abs() < 2.0, "球停在地上: {ball}");
-        assert!(events.iter().any(|(n, d)| n == "collide" && d["started"] == true && (d["a"] == "floor" || d["b"] == "floor")), "撞地面发事件");
+        let ball = position(&mut app, "ball-1");
+        assert!((ball.y - (-100.0 + 10.0)).abs() < 2.0, "球停在平台上: {ball}");
+        assert!(events.iter().any(|(n, d)| n == "collide" && d["started"] == true && (d["a"] == "level" || d["b"] == "level")), "撞地图发事件");
     }
 
     #[test]

@@ -9,6 +9,7 @@ use crate::anim::AnimNode;
 use crate::audio::AudioNode;
 use crate::nodes::{AmbientNode, Camera3dNode, EmitterNode, LightNode, ModelNode, TextNode};
 use crate::physics::{BodyNode, PhysicsNode};
+use crate::tilemap::TilemapNode;
 
 pub const SCENE: PropKey<Scene> = PropKey::new("scene");
 pub const TAP: EventKey<Tap> = EventKey::new("tap");
@@ -19,6 +20,7 @@ pub struct Scene {
     pub background: Option<Color>,
     pub camera: Option<CameraNode>,
     pub sprites: Vec<SpriteNode>,
+    pub tilemaps: Vec<TilemapNode>,
     pub texts: Vec<TextNode>,
     pub emitters: Vec<EmitterNode>,
     pub models: Vec<ModelNode>,

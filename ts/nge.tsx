@@ -169,11 +169,36 @@ export interface Camera2dNode {
   bounds?: { left: number; right: number; bottom: number; top: number };
 }
 
+/**
+ * 瓦片地图。`data` 一行一行从上往下，每格是图集里的帧号（整数），负数是空格；`(x, y)` 是地图左上角（y 朝上，行往下排）。
+ * `solid` 里的帧号是实心的，变成静态碰撞体；被撞时（地图或另一方开了 `collide`）发 `collide`，名字是地图的 id，
+ * 同时碰到好几块只算一次接触。`cols` / `grid` / `solid` 也都是整数。
+ * 任何字段变了整张地图重建，不要每帧改。
+ */
+export interface TilemapNode {
+  id: string;
+  /** 注册的图集名，或 asset:/ 路径配 `grid`。 */
+  texture: string;
+  grid?: [number, number];
+  /** 每格的边长。 */
+  tile: number;
+  cols: number;
+  data: number[];
+  x?: number;
+  y?: number;
+  z?: number;
+  solid?: number[];
+  friction?: number;
+  restitution?: number;
+  collide?: boolean;
+}
+
 export interface Scene {
   /** 清屏色 "#rrggbb"。 */
   background?: string;
   camera?: Camera2dNode;
   sprites?: SpriteNode[];
+  tilemaps?: TilemapNode[];
   texts?: TextNode[];
   emitters?: EmitterNode[];
   models?: ModelNode[];
