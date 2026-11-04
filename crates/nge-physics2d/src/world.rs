@@ -4,7 +4,7 @@ use std::sync::Mutex;
 use bevy_ecs::prelude::*;
 use glam::Vec2;
 use nge_ecs::Time;
-use nge_render2d::Transform2d;
+use nge_render2d::{DrawAt, Transform2d};
 use rapier2d::math::{Rotation, Vector};
 use rapier2d::prelude::{
     ActiveEvents, ColliderBuilder, ColliderHandle, ColliderSet, CollisionEvent, ContactPair, EventHandler, PhysicsWorld, RigidBodyBuilder,
@@ -32,7 +32,7 @@ struct Handles {
     locked: bool,
     transform: (Vec2, f32),
     velocity: Velocity,
-    /// 动态刚体在上一步、这一步结束时的位置（角度不折回），显示的位置在两者之间插值。
+    /// 动态 / kinematic 刚体在上一步、这一步结束时的位置（角度不折回），`DrawAt` 在两者之间插值。
     prev: (Vec2, f32),
     curr: (Vec2, f32),
 }
@@ -58,6 +58,11 @@ impl Physics {
     pub fn mass(&self, entity: Entity) -> Option<f32> {
         let body = self.entities.get(&entity)?.body?;
         Some(self.world.bodies.get(body)?.mass())
+    }
+
+    /// 刚体在上一步结束时的速度（没有 `Velocity` 组件的刚体也有，比如被游戏挪的 kinematic）；只有碰撞体的是 `None`。
+    pub fn velocity(&self, entity: Entity) -> Option<Velocity> {
+        self.entities.get(&entity).filter(|h| h.body.is_some()).map(|h| h.velocity)
     }
 
     /// 上一步结束时正在接触的碰撞体（交给求解器的接触点，含很近还没碰上的预测点；sensor 的重叠不算）。
@@ -123,7 +128,13 @@ pub(crate) fn remove(
             });
         }
     }
-    for entity in bodies.read().chain(colliders.read()) {
+    let bodies: Vec<_> = bodies.read().collect();
+    for &entity in &bodies {
+        if let Ok(mut e) = rebuild.get_entity(entity) {
+            e.try_remove::<DrawAt>();
+        }
+    }
+    for entity in bodies.into_iter().chain(colliders.read()) {
         match left.get(entity) {
             Ok((false, false)) | Err(_) => drop(physics.forget(entity)),
             // 剩下的那个组件标成变了，`create` 下一帧重建
@@ -161,18 +172,14 @@ pub(crate) fn create(
         }
         if !physics.entities.get(&entity).is_some_and(|h| h.kind == kind && h.shape == shape) {
             let transform = transform.copied().unwrap_or_default();
-            let shown = (transform.translation, transform.rotation);
             let old = physics.forget(entity);
             // 重建时没有 Velocity 组件就沿用物理里原来的速度
             let velocity = velocity.copied().or(old.as_ref().map(|h| h.velocity)).unwrap_or_default();
-            // 游戏没挪它时，组件里是插值过的位置：刚体从物理里真实的位置接着走，不退回最多一步
-            let kept = old.filter(|h| h.transform == shown && kind.is_some());
-            let mut handles = build(&mut physics.world, entity, kind, shape, kept.as_ref().map_or(shown, |h| h.curr), velocity);
-            if let Some(old) = kept {
-                handles.transform = shown;
-                if kind == Some(RigidBody::Dynamic) {
-                    (handles.prev, handles.curr) = (old.prev, old.curr);
-                }
+            let at = (transform.translation, transform.rotation);
+            let mut handles = build(&mut physics.world, entity, kind, shape, at, velocity);
+            // 只换了形状、游戏也没挪它：画面接着原来的插值走，不往前跳一步
+            if let Some(old) = old.filter(|h| h.kind == kind && h.transform == at) {
+                (handles.prev, handles.curr) = (old.prev, old.curr);
             }
             physics.entities.insert(entity, handles);
         }
@@ -248,36 +255,31 @@ impl EventHandler for Events {
     fn handle_soft_body_tear_event(&self, _: &SoftBodySet, _: &SoftBodyTearEvent) {}
 }
 
-type Synced<'a> = (Entity, &'a mut Transform2d, Option<&'a mut Velocity>, Option<&'a mut Impulse>);
+type Synced<'a> = (Entity, &'a mut Transform2d, Option<&'a mut Velocity>, Option<&'a mut Impulse>, Option<&'a mut DrawAt>);
 
 /// 按累计的时间走若干个固定步长：先把游戏改过的位置 / 速度 / 冲量推给物理，走完再写回。
-/// 动态刚体写回的是上一步和这一步之间按剩下的时间插值的位置（比物理慢一步），刷新率比步长高或帧时间抖动时也每帧都动。
-pub(crate) fn step(mut physics: ResMut<Physics>, time: Res<Time>, mut query: Query<Synced>, mut collisions: MessageWriter<Collision>) {
+/// 每帧（包括不够一步的帧）给有刚体的实体写 `DrawAt`：动态 / kinematic 刚体在上一步和这一步之间按剩下的时间插值（比物理慢一步），
+/// 刷新率比步长高或帧时间抖动时画面也每帧都动。
+pub(crate) fn step(
+    mut physics: ResMut<Physics>,
+    time: Res<Time>,
+    mut query: Query<Synced>,
+    mut collisions: MessageWriter<Collision>,
+    mut commands: Commands,
+) {
     let physics = &mut *physics;
     if time.delta.is_finite() {
         physics.accumulator += time.delta.max(0.0);
     }
     let steps = ((physics.accumulator / STEP) as u32).min(MAX_STEPS);
     if steps == 0 {
-        let alpha = physics.accumulator / STEP;
-        for (entity, mut transform, ..) in &mut query {
-            if let Some(h) = physics.entities.get_mut(&entity)
-                && h.kind == Some(RigidBody::Dynamic)
-                // 游戏这一帧挪了它：留给下一步推给物理，不拿插值盖掉
-                && (transform.translation, transform.rotation) == h.transform
-            {
-                let t = transform.bypass_change_detection();
-                (t.translation, t.rotation) = lerp(h.prev, h.curr, alpha);
-                h.transform = (t.translation, t.rotation);
-            }
-        }
+        draw(physics, &mut query, &mut commands);
         return;
     }
     physics.accumulator = (physics.accumulator - steps as f32 * STEP).min(STEP);
-    let alpha = physics.accumulator / STEP;
 
     let mut kinematic = Vec::new();
-    for (entity, transform, velocity, impulse) in &mut query {
+    for (entity, transform, velocity, impulse, _) in &mut query {
         let Some(h) = physics.entities.get_mut(&entity) else { continue };
         kinematic.extend(push(&mut physics.world, h, &transform, velocity.as_deref(), impulse));
     }
@@ -294,31 +296,29 @@ pub(crate) fn step(mut physics: ResMut<Physics>, time: Res<Time>, mut query: Que
         if i == steps {
             // 最后一步之前的位置就是插值的起点
             for h in physics.entities.values_mut() {
-                if let Some(body) = dynamic_body(&physics.world, h) {
+                if let Some(body) = moving_body(&physics.world, h) {
                     h.prev = pose(body, h.curr.1);
                 }
             }
         }
         physics.world.step_with_events(&(), &events);
     }
-    for (entity, mut transform, velocity, _) in &mut query {
+    for (entity, mut transform, velocity, ..) in &mut query {
         let Some(h) = physics.entities.get_mut(&entity) else { continue };
         let Some(body) = h.body.and_then(|b| physics.world.bodies.get(b)) else { continue };
         // 绕过变更检测：下一步只把游戏自己改的当成改动
         let t = transform.bypass_change_detection();
-        if h.kind == Some(RigidBody::Dynamic) {
-            h.curr = pose(body, h.prev.1);
-            (t.translation, t.rotation) = lerp(h.prev, h.curr, alpha);
-        } else {
-            (t.translation, t.rotation) = pose(body, t.rotation);
-            (h.prev, h.curr) = ((t.translation, t.rotation), (t.translation, t.rotation));
-        }
+        (t.translation, t.rotation) = pose(body, t.rotation);
         h.transform = (t.translation, t.rotation);
+        if moving_body(&physics.world, h).is_some() {
+            h.curr = h.transform;
+        }
         h.velocity = Velocity { linear: vec2(body.linvel()), angular: body.angvel() };
         if let Some(mut v) = velocity {
             *v.bypass_change_detection() = h.velocity;
         }
     }
+    draw(physics, &mut query, &mut commands);
     let (colliders, removed) = (&physics.world.colliders, &physics.removed);
     let entity = |c: ColliderHandle| colliders.get(c).map(|c| Entity::from_bits(c.user_data as u64)).or(removed.get(&c).copied());
     for event in events.0.into_inner().unwrap_or_else(|e| e.into_inner()) {
@@ -333,8 +333,33 @@ pub(crate) fn step(mut physics: ResMut<Physics>, time: Res<Time>, mut query: Que
     physics.removed.clear();
 }
 
-fn dynamic_body<'a>(world: &'a PhysicsWorld, h: &Handles) -> Option<&'a rapier2d::prelude::RigidBody> {
-    h.body.and_then(|b| world.bodies.get(b)).filter(|_| h.kind == Some(RigidBody::Dynamic))
+/// 动态或 kinematic 刚体（画面要插值的）。
+fn moving_body<'a>(world: &'a PhysicsWorld, h: &Handles) -> Option<&'a rapier2d::prelude::RigidBody> {
+    h.body.and_then(|b| world.bodies.get(b)).filter(|_| matches!(h.kind, Some(RigidBody::Dynamic | RigidBody::Kinematic)))
+}
+
+/// 给有刚体的实体写 `DrawAt`（没有就插上）：动态 / kinematic 按攒下的时间插值，固定刚体画在 `Transform2d` 上。
+fn draw(physics: &Physics, query: &mut Query<Synced>, commands: &mut Commands) {
+    let alpha = physics.accumulator / STEP;
+    for (entity, transform, _, _, draw_at) in query.iter_mut() {
+        let Some(h) = physics.entities.get(&entity).filter(|h| h.body.is_some()) else { continue };
+        let at = (transform.translation, transform.rotation);
+        // 游戏在不够一步的帧里挪了动态刚体（比如每帧拖着走）：直接画在新位置，不等下一步。
+        // kinematic 不这样：它的 Transform2d 是目标，画上去会和站在上面的东西差一步
+        let dragged = h.kind == Some(RigidBody::Dynamic) && at != h.transform;
+        let (translation, rotation) = if moving_body(&physics.world, h).is_some() && !dragged { lerp(h.prev, h.curr, alpha) } else { at };
+        let new = DrawAt { translation, rotation };
+        match draw_at {
+            Some(mut d) => {
+                if *d != new {
+                    *d = new;
+                }
+            }
+            None => {
+                commands.entity(entity).try_insert(new);
+            }
+        }
+    }
 }
 
 /// 刚体的位置；rapier 的角度在 (-π, π]，按和 `near` 的差值累加，不让游戏看到跳变。
@@ -377,15 +402,10 @@ fn push(
         if body.is_kinematic() {
             kinematic = h.body.map(|b| (b, from, at));
         } else {
-            // 位置和角度分开看：游戏只改了一样时，另一样留在物理里的真实值（组件里的是插值过的）
-            if at.0 != from.0 {
-                body.set_translation(vector(at.0), true);
-                (h.prev.0, h.curr.0) = (at.0, at.0);
-            }
-            if at.1 != from.1 {
-                body.set_rotation(Rotation::new(at.1), true);
-                (h.prev.1, h.curr.1) = (at.1, at.1);
-            }
+            body.set_translation(vector(at.0), true);
+            body.set_rotation(Rotation::new(at.1), true);
+            // 瞬移：插值的两头都换成新位置，画面不从旧位置滑过去
+            (h.prev, h.curr) = (at, at);
         }
     }
     if let Some(&v) = velocity

@@ -1,5 +1,5 @@
 import { mount, signal, Text, View, type YNode } from "nsh";
-import { floatText, gameView, type Scene, type SpriteNode, type TilemapNode } from "../../ts/nge";
+import { floatText, gameView, tween, type Scene, type SpriteNode, type TilemapNode, type Tween } from "../../ts/nge";
 
 /** Rust 掉出关卡送回起点时发的事件。 */
 interface Events {
@@ -14,7 +14,7 @@ const ROWS = 15;
 /** 图集：0 石块，1 长草的地面，2 木平台。 */
 const [STONE, GRASS, PLANK] = [0, 1, 2];
 /** 坑：[起始列, 结束列]。 */
-const PITS = [[18, 20], [41, 43], [60, 61]];
+const PITS = [[18, 20], [41, 43], [60, 65]];
 /** 平台：[行, 起始列, 结束列]，行 r 的顶边在 y = (14 - r) × 32。坑边上面留空，免得从地面起跳撞头。 */
 const PLATFORMS = [[11, 10, 13], [9, 16, 19], [11, 24, 27], [8, 30, 33], [10, 36, 39], [10, 56, 59]];
 /** 台阶：[列, 最高的行]。 */
@@ -53,6 +53,14 @@ const COINS: { id: string; x: number; y: number }[] = [
   ...PLATFORMS.map(([, a, b], i) => ({ id: `coin-p${i}`, x: ((a + b + 1) / 2) * TILE, y: standY(Math.floor((a + b) / 2)) + 28 })),
   ...[6, 23, 35, 46, 66, 70].map((c, i) => ({ id: `coin-g${i}`, x: (c + 0.5) * TILE, y: standY(c) + 28 })),
   { id: "coin-s", x: 53.5 * TILE, y: standY(53) + 28 },
+  // 只有坐竖着的移动平台上去才够得着
+  { id: "coin-v", x: 42.5 * TILE, y: 200 },
+];
+
+/** 移动平台：kinematic 精灵 + 来回一直播的补间。横的那块在第三个坑上面来回；竖的那块在第二个坑里上下，把角色送到高处的金币（底下是坑，不会把人压进地里）。 */
+const LIFTS: { node: SpriteNode; to: Tween["to"]; duration: number }[] = [
+  { node: { id: "lift-h", x: 61 * TILE, y: -8, w: 64, h: 16 }, to: { x: 65 * TILE }, duration: 2 },
+  { node: { id: "lift-v", x: 42.5 * TILE, y: -8, w: 64, h: 16 }, to: { y: 152 }, duration: 2.5 },
 ];
 
 const GOAL: SpriteNode = { id: "goal", x: 76 * TILE, y: 40, w: 16, h: 80, color: "#6bcb77", body: { kind: "fixed", sensor: true, collide: true } };
@@ -74,6 +82,7 @@ function App() {
       ...COINS.filter((c) => !taken().includes(c.id)).map(
         (c): SpriteNode => ({ id: c.id, x: c.x, y: c.y, w: 14, z: 2, rotation: 45, color: "#ffd93d", body: { kind: "fixed", sensor: true } }),
       ),
+      ...LIFTS.map(({ node }): SpriteNode => ({ ...node, z: 1, color: "#c08552", body: { kind: "kinematic", friction: 0 } })),
       GOAL,
     ],
   });
@@ -81,12 +90,16 @@ function App() {
   return (
     <View class="flex-1 bg-black">
       <Text class="text-white p-4">
-        ← → / A D 移动 · 空格 / ↑ 跳 · 金币 {taken().length} / {COINS.length} · 掉下去 {falls()} 次
+        ← → / A D / 手柄 移动 · 空格 / ↑ / A 跳 · 金币 {taken().length} / {COINS.length} · 掉下去 {falls()} 次
         {won() === null ? "" : ` · 通关！用时 ${won()} 秒`}
       </Text>
       <GameView
         class="flex-1"
-        ref={(n: YNode) => (game = n)}
+        ref={(n: YNode) => {
+          game = n;
+          // 场景和命令按顺序到引擎：平台先建出来，再开始来回
+          for (const { node, to, duration } of LIFTS) tween(game, { id: node.id, to, duration, ease: "easeInOut", repeat: -1, yoyo: true });
+        }}
         scene={scene()}
         onCollide={(e) => {
           if (!e.started || (e.a !== "player" && e.b !== "player")) return;

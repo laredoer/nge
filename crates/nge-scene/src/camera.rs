@@ -4,7 +4,7 @@ use bevy_ecs::prelude::*;
 use glam::Vec2;
 use nge_core::{CommandKey, wgpu};
 use nge_ecs::{Screen, Time};
-use nge_render2d::{Camera2d, ClearColor, Sprite, Transform2d};
+use nge_render2d::{Camera2d, ClearColor, DrawAt, Sprite, Transform2d};
 use serde::Deserialize;
 
 use crate::SceneCamera;
@@ -118,7 +118,7 @@ pub(crate) fn camera_rig(
     screen: Res<Screen>,
     mut rig: ResMut<CameraRig>,
     mut shakes: MessageReader<Shake>,
-    sprites: Query<(&SceneId, &Transform2d), With<Sprite>>,
+    sprites: Query<(&SceneId, &Transform2d, Option<&DrawAt>), With<Sprite>>,
     mut camera: Query<&mut Camera2d, With<SceneCamera>>,
 ) {
     let rig = &mut *rig;
@@ -138,7 +138,12 @@ pub(crate) fn camera_rig(
     let resized = rig.size != screen.size;
     rig.size = screen.size;
     let current = rig.unshaken(cam.position);
-    let target = node.follow.as_deref().and_then(|id| sprites.iter().find(|(s, _)| s.0 == id)).map(|(_, t)| t.translation + Vec2::new(node.x, node.y));
+    // 有刚体的精灵跟着画的位置（插值过的），不然相机和画面差一步，跟随时一抖一抖
+    let target = node
+        .follow
+        .as_deref()
+        .and_then(|id| sprites.iter().find(|(s, ..)| s.0 == id))
+        .map(|(_, t, draw)| draw.map_or(t.translation, |d| d.translation) + Vec2::new(node.x, node.y));
     // 跟随时（目标在不在都）由场景管相机；不跟随时只在视口变了要重新限制边界时动
     let mut moved = node.follow.is_some() || (resized && node.bounds.is_some()) || rig.applied != Vec2::ZERO;
     let base = match target {
@@ -237,6 +242,17 @@ mod tests {
         world.query::<&mut nge_render2d::Transform2d>().iter_mut(world).for_each(|mut t| t.translation.x = -5.0);
         tick(&mut app, 0.1);
         assert_eq!(camera(&mut app).position.x, -5.0, "Rust 系统改的位置也跟");
+    }
+
+    #[test]
+    fn follow_uses_where_physics_draws_the_sprite() {
+        let mut app = app();
+        frame(&mut app, Some(json!({ "camera": { "follow": "p" }, "sprites": [{ "id": "p", "x": 30 }] })));
+        let world = app.world_mut();
+        let p = world.query_filtered::<bevy_ecs::entity::Entity, bevy_ecs::query::With<nge_render2d::Sprite>>().iter(world).next().unwrap();
+        world.entity_mut(p).insert(nge_render2d::DrawAt { translation: Vec2::new(25.0, 3.0), rotation: 0.0 });
+        tick(&mut app, 0.1);
+        assert_eq!(camera(&mut app).position, Vec2::new(25.0, 3.0), "跟着画的位置，不然插值的刚体在相机里一抖一抖");
     }
 
     #[test]

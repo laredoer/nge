@@ -78,14 +78,23 @@ fn control(
     if !(dt > 0.0) {
         return;
     }
-    // 刚起跳的下一帧可能还有地面的预测接触点：往上走的时候不算着地，免得连跳两次
-    let grounded = v.linear.y <= 1.0 && physics.contacts(entity).iter().any(|c| c.normal.y > GROUND_NORMAL);
+    // 脚下的东西（法线朝上）；移动平台有速度，地图的碰撞体没有。同时踩着地面和平台时跟着动得快的那个
+    let ground = physics
+        .contacts(entity)
+        .iter()
+        .filter(|c| c.normal.y > GROUND_NORMAL)
+        .map(|c| physics.velocity(c.other).map_or(Vec2::ZERO, |g| g.linear))
+        .max_by(|a, b| a.length_squared().total_cmp(&b.length_squared()));
+    // 刚起跳的下一帧可能还有地面的预测接触点：比脚下往上走得快就不算着地，免得连跳两次（上升的平台上照样能跳）
+    let grounded = ground.is_some_and(|g| v.linear.y - g.y <= 1.0);
     ctl.airborne = if grounded { 0.0 } else { ctl.airborne + dt };
     ctl.jump_pressed = if JUMP_KEYS.iter().any(|k| input.key_pressed(k)) { 0.0 } else { ctl.jump_pressed + dt };
 
     let accel = if grounded { GROUND_ACCEL } else { AIR_ACCEL };
     let mut velocity = v.linear;
-    velocity.x = move_toward(velocity.x, input.axis(&LEFT, &RIGHT) * SPEED, accel * dt);
+    // 站在横移的平台上：跟着平台走（关卡没有摩擦，不加的话平台会从脚底下滑走）
+    let carry = ground.filter(|_| grounded).map_or(0.0, |g| g.x);
+    velocity.x = move_toward(velocity.x, input.axis(&LEFT, &RIGHT) * SPEED + carry, accel * dt);
     let holding = JUMP_KEYS.iter().any(|k| input.key_down(k));
     if ctl.jump_pressed <= BUFFER && ctl.airborne <= COYOTE {
         // 缓冲里的跳到落地时键已经松开了：直接按短跳
@@ -221,6 +230,46 @@ mod tests {
         key(&mut app, "GamepadA", true);
         run(&mut app, 10);
         assert!(player(&mut app).0.y > ground + 50.0, "A 跳");
+    }
+
+    /// 地面上方一块 kinematic 平台（顶边 y = 100），角色站在上面；返回平台实体。
+    fn on_a_lift(app: &mut App) -> Entity {
+        let mut scene = level(None);
+        scene["sprites"][0]["y"] = json!(116);
+        scene["sprites"].as_array_mut().unwrap().push(json!({ "id": "lift", "w": 96, "h": 16, "y": 92, "body": { "kind": "kinematic", "friction": 0 } }));
+        app.prop("scene", Some(&scene));
+        run(app, 30);
+        let world = app.world_mut();
+        world.query::<(Entity, &SceneId)>().iter(world).find(|(_, id)| id.0 == "lift").unwrap().0
+    }
+
+    /// 每帧把平台挪 `step`（和补间一样写绝对位置），走 `frames` 帧。
+    fn move_lift(app: &mut App, lift: Entity, step: Vec2, frames: usize) {
+        for _ in 0..frames {
+            app.world_mut().get_mut::<Transform2d>(lift).unwrap().translation += step;
+            run(app, 1);
+        }
+    }
+
+    #[test]
+    fn rides_a_sideways_platform() {
+        let mut app = app();
+        let lift = on_a_lift(&mut app);
+        let start = player(&mut app).0.x;
+        move_lift(&mut app, lift, Vec2::new(100.0 / 60.0, 0.0), 60);
+        let moved = player(&mut app).0.x - start;
+        assert!((moved - 100.0).abs() < 10.0, "跟着平台走，不让平台从脚底下滑走：{moved}");
+    }
+
+    #[test]
+    fn jumps_from_a_rising_platform() {
+        let mut app = app();
+        let lift = on_a_lift(&mut app);
+        move_lift(&mut app, lift, Vec2::new(0.0, 1.0), 20);
+        key(&mut app, "Space", true);
+        move_lift(&mut app, lift, Vec2::new(0.0, 1.0), 15);
+        let (top, lift_top) = (player(&mut app).0.y - 16.0, app.world().get::<Transform2d>(lift).unwrap().translation.y + 8.0);
+        assert!(top - lift_top > 50.0, "上升的平台上也能起跳：比平台高 {}", top - lift_top);
     }
 
     #[test]

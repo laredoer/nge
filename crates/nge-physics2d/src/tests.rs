@@ -2,7 +2,7 @@ use bevy_ecs::message::Messages;
 use glam::Vec2;
 use nge_core::Viewport;
 use nge_ecs::App;
-use nge_render2d::Transform2d;
+use nge_render2d::{DrawAt, Transform2d};
 
 use super::*;
 
@@ -27,6 +27,11 @@ fn steps(app: &mut App, n: usize) {
 
 fn pos(app: &App, e: Entity) -> Vec2 {
     app.world().get::<Transform2d>(e).unwrap().translation
+}
+
+/// 画在哪（插值过的位置）。
+fn drawn(app: &App, e: Entity) -> Vec2 {
+    app.world().get::<DrawAt>(e).expect("有刚体的实体每帧都有 DrawAt").translation
 }
 
 /// 一块宽 1000、顶面在 y = 0 的地面。
@@ -94,7 +99,8 @@ fn game_can_teleport_set_velocity_and_push() {
 
     app.world_mut().get_mut::<Velocity>(b).unwrap().linear = Vec2::new(60.0, 0.0);
     steps(&mut app, 60);
-    assert!((pos(&app, b).x - 359.0).abs() < 1e-2, "一秒走 60，显示的位置比物理慢一步: {}", pos(&app, b));
+    assert!((pos(&app, b).x - 360.0).abs() < 1e-2, "一秒走 60: {}", pos(&app, b));
+    assert!((drawn(&app, b).x - 359.0).abs() < 1e-2, "画的位置比物理慢一步: {}", drawn(&app, b));
 
     let mass = app.world().resource::<Physics>().mass(b).unwrap();
     app.world_mut().get_mut::<Impulse>(b).unwrap().0 = Vec2::new(0.0, 100.0 * mass);
@@ -157,12 +163,14 @@ fn mover(app: &mut App) -> Entity {
 fn fixed_step_accumulates_and_caps() {
     let mut app = app();
     let e = mover(&mut app);
-    // 显示的位置在上一步和这一步之间插值，比物理慢一步
     app.tick(VIEWPORT, STEP);
     app.tick(VIEWPORT, STEP);
-    assert!((pos(&app, e).x - 1.0).abs() < 1e-3, "两步后显示第一步: {}", pos(&app, e));
+    assert!((pos(&app, e).x - 2.0).abs() < 1e-3, "Transform2d 是物理的真实位置: {}", pos(&app, e));
+    // 画的位置在上一步和这一步之间插值，比物理慢一步
+    assert!((drawn(&app, e).x - 1.0).abs() < 1e-3, "两步后画在第一步: {}", drawn(&app, e));
     app.tick(VIEWPORT, STEP / 2.0);
-    assert!((pos(&app, e).x - 1.5).abs() < 1e-3, "不够一步时插值: {}", pos(&app, e));
+    assert_eq!(pos(&app, e).x, 2.0, "不够一步不动");
+    assert!((drawn(&app, e).x - 1.5).abs() < 1e-3, "不够一步时画的位置插值: {}", drawn(&app, e));
     app.tick(VIEWPORT, 1.0);
     assert!((pos(&app, e).x - (2.0 + MAX_STEPS as f32)).abs() < 1e-3, "卡顿时最多补 MAX_STEPS 步: {}", pos(&app, e));
     // 没有碰撞体的刚体照样能动
@@ -178,9 +186,9 @@ fn frame_moves(dt: impl Fn(usize) -> f32, n: usize) -> Vec<(f32, f32)> {
     }
     (10..10 + n)
         .map(|i| {
-            let before = pos(&app, e).x;
+            let before = drawn(&app, e).x;
             app.tick(VIEWPORT, dt(i));
-            (pos(&app, e).x - before, 60.0 * dt(i))
+            (drawn(&app, e).x - before, 60.0 * dt(i))
         })
         .collect()
 }
@@ -207,10 +215,10 @@ fn teleport_is_not_interpolated() {
     steps(&mut app, 5);
     app.world_mut().get_mut::<Transform2d>(e).unwrap().translation.x = 500.0;
     app.tick(VIEWPORT, STEP / 2.0);
-    assert!((pos(&app, e).x - 500.0).abs() < 1e-3, "不够一步的帧里也不被插值盖掉: {}", pos(&app, e));
+    assert_eq!(pos(&app, e).x, 500.0, "不够一步的帧里游戏的改动不被覆盖");
     app.tick(VIEWPORT, STEP);
-    let x = pos(&app, e).x;
-    assert!((500.0..=501.5).contains(&x), "从新位置接着走，不从旧位置滑过来: {x}");
+    let x = drawn(&app, e).x;
+    assert!((500.0..=501.5).contains(&x), "画面从新位置接着走，不从旧位置滑过来: {x}");
 }
 
 /// `cargo test -p nge-physics2d --release -- --ignored --nocapture`
@@ -385,4 +393,86 @@ fn rebuilding_a_body_keeps_its_physics_position() {
 fn setting_only_the_rotation_keeps_the_translation() {
     let (rotated, untouched) = same_path_as_untouched(|app, e| app.world_mut().get_mut::<Transform2d>(e).unwrap().rotation = 1.0);
     assert!((rotated - untouched).abs() < 1e-2, "只改角度，位置不被拉回: {rotated} / {untouched}");
+}
+
+#[test]
+fn a_box_on_a_rising_platform_is_drawn_resting_on_it() {
+    let mut app = app();
+    let lift = app.world_mut().spawn((RigidBody::Kinematic, Collider::rect(Vec2::new(200.0, 20.0)), at(0.0, -10.0), Velocity::default())).id();
+    let crate_ = app.world_mut().spawn((RigidBody::Dynamic, Collider::rect(Vec2::new(20.0, 20.0)), at(0.0, 10.0), Velocity::default())).id();
+    steps(&mut app, 30);
+    // 120 Hz：游戏每帧把平台往上挪（和补间一样写绝对位置）
+    let mut gaps = Vec::new();
+    for frame in 0..120 {
+        app.world_mut().get_mut::<Transform2d>(lift).unwrap().translation.y = -10.0 + 120.0 * frame as f32 / 120.0;
+        app.tick(VIEWPORT, STEP / 2.0);
+        if frame > 20 {
+            gaps.push(drawn(&app, crate_).y - drawn(&app, lift).y);
+        }
+    }
+    for gap in gaps {
+        assert!((gap - 20.0).abs() < 0.5, "画面上箱子贴着平台，不陷进去：间距 {gap}");
+    }
+}
+
+#[test]
+fn draw_at_follows_fixed_bodies_and_goes_away_with_the_body() {
+    let mut app = app();
+    let e = app.world_mut().spawn((RigidBody::Fixed, Collider::circle(5.0), at(3.0, 4.0))).id();
+    steps(&mut app, 1);
+    assert_eq!(drawn(&app, e), Vec2::new(3.0, 4.0));
+    app.world_mut().get_mut::<Transform2d>(e).unwrap().translation.x = 9.0;
+    app.tick(VIEWPORT, STEP / 2.0);
+    assert_eq!(drawn(&app, e).x, 9.0, "固定刚体画在 Transform2d 上");
+    app.world_mut().entity_mut(e).remove::<RigidBody>();
+    steps(&mut app, 2);
+    assert!(app.world().get::<DrawAt>(e).is_none(), "去掉刚体时一起去掉");
+}
+
+#[test]
+fn velocity_of_any_body() {
+    let mut app = app();
+    app.world_mut().resource_mut::<Physics>().set_gravity(Vec2::ZERO);
+    let k = app.world_mut().spawn((RigidBody::Kinematic, Collider::circle(5.0), at(0.0, 0.0))).id();
+    let wall = app.world_mut().spawn(Collider::circle(5.0)).id();
+    steps(&mut app, 1);
+    app.world_mut().get_mut::<Transform2d>(k).unwrap().translation.x = 1.0;
+    steps(&mut app, 1);
+    let v = app.world().resource::<Physics>().velocity(k).unwrap();
+    assert!((v.linear.x - 60.0).abs() < 0.1, "kinematic 没有 Velocity 组件也查得到真实速度: {v:?}");
+    assert_eq!(app.world().resource::<Physics>().velocity(wall), None, "只有碰撞体的没有速度");
+}
+
+#[test]
+fn dragging_a_dynamic_body_every_frame_is_drawn_every_frame() {
+    let mut app = app();
+    app.world_mut().resource_mut::<Physics>().set_gravity(Vec2::ZERO);
+    let e = app.world_mut().spawn((RigidBody::Dynamic, Collider::circle(5.0), at(0.0, 0.0))).id();
+    steps(&mut app, 2);
+    // 120 Hz 下每帧把它挪一点（比如鼠标拖）：不够一步的帧也要画在新位置
+    for frame in 1..=10 {
+        app.world_mut().get_mut::<Transform2d>(e).unwrap().translation.x = frame as f32;
+        app.tick(VIEWPORT, STEP / 2.0);
+        assert_eq!(drawn(&app, e).x, frame as f32, "第 {frame} 帧");
+    }
+}
+
+#[test]
+fn rebuilding_a_body_does_not_jump_the_drawing() {
+    let mut app = app();
+    let e = mover(&mut app);
+    app.world_mut().entity_mut(e).insert(Collider::circle(5.0));
+    // 120 Hz：每帧画面走半步（0.5）
+    for _ in 0..6 {
+        app.tick(VIEWPORT, STEP / 2.0);
+    }
+    for frame in 0..6 {
+        if frame == 2 {
+            app.world_mut().entity_mut(e).insert(Collider::circle(6.0));
+        }
+        let before = drawn(&app, e).x;
+        app.tick(VIEWPORT, STEP / 2.0);
+        let moved = drawn(&app, e).x - before;
+        assert!((moved - 0.5).abs() < 1e-2, "第 {frame} 帧（第 2 帧重建，那一帧不够一步）画面照样走半步，不往前跳: {moved}");
+    }
 }

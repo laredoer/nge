@@ -9,7 +9,7 @@ use nge_assets::{Assets, GpuImages, Image};
 
 use crate::assets::{Atlases, TextureId};
 use crate::batch::{Batch, Instance, Item, batch};
-use crate::camera::{Camera2d, Transform2d};
+use crate::camera::{Camera2d, DrawAt, Transform2d};
 use crate::sprite::{Sprite, SpriteInstances};
 
 const SHADER: &str = r#"
@@ -107,22 +107,23 @@ struct SpriteRenderer {
 impl Renderer for SpriteRenderer {
     fn render(&mut self, world: &mut World, gfx: &Gfx, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView) {
         let gpu = self.gpu.get_or_insert_with(|| Gpu::new(gfx));
-        let mut sprites = world.query::<(&Sprite, &Transform2d)>();
+        let mut sprites = world.query::<(&Sprite, &Transform2d, Option<&DrawAt>)>();
         let camera = world.query::<&Camera2d>().iter(world).next().copied().unwrap_or_default();
         world.resource_scope(|world, mut images: Mut<GpuImages>| images.sync(gfx, world.resource::<Assets<Image>>()));
         let (images, atlases, gpu_images) = (world.resource::<Assets<Image>>(), world.resource::<Atlases>(), world.resource::<GpuImages>());
         let extra = world.resource::<SpriteInstances>();
 
         self.items.clear();
-        for (sprite, transform) in sprites.iter(world) {
+        for (sprite, transform, draw) in sprites.iter(world) {
+            let (pos, rotation) = draw.map_or((transform.translation, transform.rotation), |d| (d.translation, d.rotation));
             let region = atlases.region(images, sprite.image);
             let size = sprite.size.unwrap_or(region.size) * transform.scale;
             self.items.push(Item {
                 texture: region.texture,
                 instance: Instance {
-                    pos: transform.translation.into(),
+                    pos: pos.into(),
                     size: size.into(),
-                    rotation_z: [transform.rotation, transform.z],
+                    rotation_z: [rotation, transform.z],
                     uv: region.uv.into(),
                     color: to_rgba8(sprite.color),
                     _pad: 0,
