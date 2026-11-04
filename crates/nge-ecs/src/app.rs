@@ -8,7 +8,7 @@ use bevy_ecs::prelude::*;
 use bevy_ecs::schedule::{IntoScheduleConfigs, ScheduleLabel};
 use bevy_ecs::system::ScheduleSystem;
 use glam::Vec2;
-use nge_core::bridge::TOUCH;
+use nge_core::bridge::{KEY, TOUCH};
 use nge_core::{Ctx, Game, GameFactory, Gfx, Viewport, wgpu};
 use serde_json::Value as JsonValue;
 
@@ -147,11 +147,16 @@ impl App {
         &mut self.world
     }
 
-    /// 收到 NSH 的 command：触摸进 Input，注册过的变成类型化消息，其余变成 [`NshCommand`]。
+    /// 收到 NSH 的 command：触摸和按键进 Input，注册过的变成类型化消息，其余变成 [`NshCommand`]。
     pub fn command(&mut self, name: &str, args: &JsonValue) {
         if name == TOUCH.name() {
             match TOUCH.decode(args) {
                 Ok(t) => self.world.resource_mut::<Input>().touch(t.phase, t.id, Vec2::new(t.x, t.y)),
+                Err(e) => log::warn!("{e}"),
+            }
+        } else if name == KEY.name() {
+            match KEY.decode(args) {
+                Ok(k) => self.world.resource_mut::<Input>().key(&k.code, k.down, k.repeat),
                 Err(e) => log::warn!("{e}"),
             }
         } else if let Some(handler) = self.commands.get(name) {
@@ -329,6 +334,22 @@ mod tests {
         assert_eq!(app.tick(viewport(), 0.016), vec![("tap".to_owned(), json!({ "x": 5.0, "y": 6.0 }))]);
         assert!(app.tick(viewport(), 0.016).is_empty());
         assert_eq!(app.world().resource::<Input>().pointers_down().count(), 1);
+    }
+
+    #[test]
+    fn key_goes_to_input() {
+        let mut app = App::new();
+        app.add_systems(Update, |input: Res<Input>, mut outbox: ResMut<Outbox>| {
+            if input.key_pressed("Space") {
+                outbox.emit("jump", json!(null));
+            }
+        });
+        app.command("key", &json!({ "code": "Space", "down": true }));
+        assert_eq!(app.tick(viewport(), 0.016), vec![("jump".to_owned(), json!(null))]);
+        assert!(app.tick(viewport(), 0.016).is_empty());
+        assert!(app.world().resource::<Input>().key_down("Space"));
+        app.command("key", &json!({ "code": "Space" }));
+        assert!(app.world().resource::<Input>().key_down("Space"), "缺字段的命令丢掉");
     }
 
     #[derive(Message)]

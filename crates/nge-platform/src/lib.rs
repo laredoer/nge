@@ -6,6 +6,8 @@ mod shared;
 pub use shared::STALL_ENV;
 
 #[cfg(target_os = "macos")]
+mod keys;
+#[cfg(target_os = "macos")]
 pub mod macos;
 
 #[cfg(target_os = "ios")]

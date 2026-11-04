@@ -20,6 +20,7 @@ objc2-quartz-core.workspace = true
 [target.'cfg(target_os = "macos")'.dependencies]
 nsh-platform-macos.workspace = true
 objc2-app-kit.workspace = true
+block2.workspace = true
 
 [target.'cfg(target_os = "ios")'.dependencies]
 nsh-core.workspace = true

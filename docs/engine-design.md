@@ -61,6 +61,7 @@
 | **2D 物理** | `nge-physics2d`（rapier2d）：刚体、碰撞体、碰撞消息；精灵节点的 `body`、`collide` 事件、`push` command；见 [physics2d.md](physics2d.md) | `examples/physics`：箱子堆叠、点击生成弹球、碰撞计数，1000 个刚体一步 < 2 ms |
 | **音频** | `nge-audio`（kira）：`asset:/` 加载音效 / 音乐，播放、循环、音量、同时发声上限；`scene.audio` 声明背景音乐，`sound` command；见 [audio.md](audio.md) | `examples/physics` 有背景音乐、撞击声、点击声和静音按钮 |
 | **动画** | 精灵的帧动画（`anim`）和补间（`tween` command，缓动、delay、repeat / yoyo、接管属性），`animEnd` / `tweenEnd` 事件；见 [animation.md](animation.md) | `examples/scene`：石头按帧换颜色，点飞船补间移动并缩放弹一下，到达后 HUD 计数 |
+| **键盘（Mac）** | AppKit 本地事件监听，键名用 Web `KeyboardEvent.code`；`Input` 的按着 / 刚按下 / 刚松开 / `axis`，TSX 的 `onKey`，`captureKeys`；见 [keyboard.md](keyboard.md) | `examples/dodge` 用 ← → / A D 控制，`examples/scene` 用方向键移动飞船；输入框打字、切走窗口时不卡键 |
 | **M6 Android** | SurfaceView 和 Vulkan，JNI 胶水层 | 示例游戏在 Android 真机上能跑 |
 
 ## 待定

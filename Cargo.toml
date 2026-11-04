@@ -37,7 +37,8 @@ serde_json = "1"
 log = "0.4"
 env_logger = "0.11"
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", features = ["NSRunLoop", "NSObject", "NSString", "NSThread"] }
+objc2-foundation = { version = "0.3", features = ["NSRunLoop", "NSObject", "NSString", "NSThread", "NSNotification", "NSOperation", "block2"] }
 objc2-quartz-core = { version = "0.3", features = ["CADisplayLink", "CAFrameRateRange"] }
-objc2-app-kit = { version = "0.3", features = ["NSView", "objc2-quartz-core"] }
+objc2-app-kit = { version = "0.3", features = ["NSView", "objc2-quartz-core", "NSEvent", "NSResponder", "NSWindow", "NSText", "NSTextInputClient", "block2"] }
+block2 = "0.6"
 objc2-ui-kit = { version = "0.3", features = ["UIApplication", "UIColor", "UIResponder", "UIScene", "UISceneDefinitions", "UISceneOptions", "UISceneSession", "UITraitCollection", "UIView", "UIViewController", "UIWindow", "UIWindowScene"] }

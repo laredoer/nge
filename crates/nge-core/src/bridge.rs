@@ -19,6 +19,10 @@ pub const GAME_COMPONENT: &str = "nge.game";
 
 /// 内置：触摸，`game_view()` 自动转发。
 pub const TOUCH: CommandKey<Touch> = CommandKey::new("touch");
+/// 内置：键盘（Mac），平台层自己转发给游戏。
+pub const KEY: CommandKey<KeyInput> = CommandKey::new("key");
+/// 内置：同一次按键也发给 NSH（TSX 的 `onKey`）。
+pub const KEY_EVENT: EventKey<KeyInput> = EventKey::new("key");
 /// 内置：每秒一次的帧率和最长帧间隔。
 pub const FRAME_STATS: EventKey<FrameReport> = EventKey::new("fps");
 /// 内置：渲染线程出错（初始化失败、panic、surface 丢失）。`game_view()` 默认记日志。
@@ -34,9 +38,9 @@ pub struct EngineError {
 /// 游戏不能用来注册的通道名：`outbound` 为 true 指游戏 → NSH（State / Event），否则指 command。
 pub fn is_reserved(name: &str, outbound: bool) -> bool {
     if outbound {
-        name == FRAME_STATS.name() || name == ENGINE_ERROR.name()
+        name == FRAME_STATS.name() || name == ENGINE_ERROR.name() || name == KEY_EVENT.name()
     } else {
-        name == TOUCH.name() || name.starts_with(RESERVED_COMMAND_PREFIX)
+        name == TOUCH.name() || name == KEY.name() || name.starts_with(RESERVED_COMMAND_PREFIX)
     }
 }
 
@@ -59,6 +63,16 @@ pub struct Touch {
     /// 事件时间戳（毫秒，起点任意，即 NSH 的 `TouchEvent::timestamp`），算甩动速度用。
     #[serde(default)]
     pub t: f64,
+}
+
+/// 一次按键变化。`code` 是 Web `KeyboardEvent.code` 的键名（`KeyA`、`ArrowLeft`、`Space`），按键盘上的位置，和布局无关。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeyInput {
+    pub code: String,
+    pub down: bool,
+    /// 按住不放时系统自动重复的按下。
+    #[serde(default)]
+    pub repeat: bool,
 }
 
 macro_rules! key {
@@ -187,8 +201,15 @@ mod tests {
 
     #[test]
     fn reserved_names() {
-        assert!(is_reserved("fps", true) && is_reserved("error", true) && !is_reserved("hud", true));
-        assert!(is_reserved("touch", false) && is_reserved("nge.stall_main", false) && !is_reserved("fps", false));
+        assert!(is_reserved("fps", true) && is_reserved("error", true) && is_reserved("key", true) && !is_reserved("hud", true));
+        assert!(is_reserved("touch", false) && is_reserved("key", false) && is_reserved("nge.stall_main", false) && !is_reserved("fps", false));
+    }
+
+    #[test]
+    fn key_wire_format() {
+        let k = KEY.decode(&json!({ "code": "ArrowLeft", "down": true })).unwrap();
+        assert_eq!(k, KeyInput { code: "ArrowLeft".into(), down: true, repeat: false });
+        assert_eq!(KEY_EVENT.encode(&k), json!({ "code": "ArrowLeft", "down": true, "repeat": false }));
     }
 
     #[test]
