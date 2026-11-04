@@ -42,12 +42,13 @@ mod tests {
         (*t, *s)
     }
 
-    /// 和 App.tsx 一样的声明：石头按帧换颜色，点飞船后补间到目标位置并发 tweenEnd。
+    /// 和 App.tsx 一样的声明：石头按帧换颜色，点飞船后补间到目标位置并发 tweenEnd，相机跟着飞船。
     #[test]
     fn rocks_animate_and_ship_tweens() {
         let mut app = app();
         let frames: Vec<u32> = (0..8).map(|k| 4 + k % 8).collect();
-        app.prop("scene", Some(&json!({ "sprites": [
+        let camera = json!({ "follow": "ship", "y": 120, "smooth": 0.25, "bounds": { "left": -400, "right": 400, "bottom": -500, "top": 500 } });
+        app.prop("scene", Some(&json!({ "camera": camera, "sprites": [
             { "id": "rock-0", "texture": "ships", "anim": { "frames": frames, "fps": 4 }, "w": 40 },
             { "id": "ship", "texture": "ships", "frame": 0, "w": 64, "y": -200, "rotation": 180, "z": 10, "tap": true },
         ] })));
@@ -60,6 +61,7 @@ mod tests {
             app.command("tween", &json!({ "id": "ship", "to": { "x": x, "y": -150 }, "duration": 0.6, "ease": "easeOut", "tag": "move" }));
             let pulse = json!({ "id": "ship", "from": { "scale": 1 }, "to": { "scale": 1.4 }, "duration": 0.15, "ease": "easeOut", "yoyo": true, "repeat": 1 });
             app.command("tween", &pulse);
+            app.command("shake", &json!({ "strength": 6, "duration": 0.25 }));
         };
         let mut ends = Vec::new();
         let mut run = |app: &mut App, frames: usize| {
@@ -75,5 +77,11 @@ mod tests {
         assert_eq!(ends, [end(Some("move"), true), end(None, true), end(None, false), end(Some("move"), false)]);
         let t = sprite(&mut app, "ship").0;
         assert_eq!((t.translation.x, t.translation.y, t.scale.x), (-80.0, -150.0, 1.0), "停在第二次的目标，大小复原");
+        for _ in 0..60 {
+            app.tick(VIEWPORT, 1.0 / 60.0);
+        }
+        let world = app.world_mut();
+        let cam = world.query::<&nge_render2d::Camera2d>().single(world).unwrap().position;
+        assert!((cam - nge_ecs::glam::Vec2::new(-80.0, -30.0)).length() < 0.5, "相机追上飞船（偏移 y 120），震屏已停 {cam}");
     }
 }

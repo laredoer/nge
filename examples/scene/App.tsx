@@ -1,5 +1,5 @@
 import { mount, signal, Text, View, type YNode } from "nsh";
-import { gameView, tween, type Scene, type SpriteNode } from "../../ts/nge";
+import { gameView, shake, tween, type Scene, type SpriteNode } from "../../ts/nge";
 
 const GameView = gameView();
 
@@ -26,6 +26,8 @@ function App() {
     });
     return {
       background: "#0a0a20",
+      // 相机平滑地跟着飞船，飞船在画面偏下；走到边上不拍出这片区域
+      camera: { follow: "ship", y: 120, smooth: 0.25, bounds: { left: -400, right: 400, bottom: -500, top: 500 } },
       sprites: [
         { id: "sun", color: "#ffcc33", w: 60, y: 60, spin: 30, z: 1 },
         ...rocks,
@@ -50,6 +52,7 @@ function App() {
           move(0.6, "move");
           // 写明起点，连点打断时也会回到原来大小
           tween(game, { id: "ship", from: { scale: 1 }, to: { scale: 1.4 }, duration: 0.15, ease: "easeOut", yoyo: true, repeat: 1 });
+          shake(game, { strength: 6, duration: 0.25 });
         }}
         onKey={(e) => {
           const dir = ARROWS[e.code];

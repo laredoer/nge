@@ -32,15 +32,31 @@ pub struct Scene {
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct CameraNode {
+    /// 跟随时是相对目标的偏移。
     pub x: f32,
     pub y: f32,
     pub zoom: f32,
+    /// 跟随的精灵 id。
+    pub follow: Option<String>,
+    /// 跟随的平滑时间（秒），0 是每帧对准。
+    pub smooth: f32,
+    pub bounds: Option<Bounds>,
 }
 
 impl Default for CameraNode {
     fn default() -> Self {
-        Self { x: 0.0, y: 0.0, zoom: 1.0 }
+        Self { x: 0.0, y: 0.0, zoom: 1.0, follow: None, smooth: 0.0, bounds: None }
     }
+}
+
+/// 相机能拍到的世界范围。
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Bounds {
+    pub left: f32,
+    pub right: f32,
+    pub bottom: f32,
+    pub top: f32,
 }
 
 /// 一个精灵。角度用度（逆时针），`spin` 是度 / 秒。

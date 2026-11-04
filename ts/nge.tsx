@@ -156,10 +156,23 @@ export interface LightNode {
   range?: number;
 }
 
+/**
+ * 2D 相机。填了 `follow` 时相机跟着那个精灵，`x` / `y` 变成相对它的偏移；
+ * `smooth` 是跟随的平滑时间（秒，0 每帧对准）；`bounds` 是相机能拍到的世界范围。
+ */
+export interface Camera2dNode {
+  x?: number;
+  y?: number;
+  zoom?: number;
+  follow?: string;
+  smooth?: number;
+  bounds?: { left: number; right: number; bottom: number; top: number };
+}
+
 export interface Scene {
   /** 清屏色 "#rrggbb"。 */
   background?: string;
-  camera?: { x?: number; y?: number; zoom?: number };
+  camera?: Camera2dNode;
   sprites?: SpriteNode[];
   texts?: TextNode[];
   emitters?: EmitterNode[];
@@ -276,6 +289,16 @@ export interface Tween {
  */
 export function tween(game: YNode | undefined, args: Tween) {
   game?.command("tween", args);
+}
+
+/** 震屏：幅度 `strength`（屏幕 point，默认 8）在 `duration` 秒（默认 0.3）里衰减到 0。 */
+export interface Shake {
+  strength?: number;
+  duration?: number;
+}
+
+export function shake(game: YNode | undefined, args: Shake = {}) {
+  game?.command("shake", args);
 }
 
 export interface AnimEnd {
