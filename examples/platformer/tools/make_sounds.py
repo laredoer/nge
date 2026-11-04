@@ -46,5 +46,6 @@ def notes(freqs, step, decay, volume):
 
 save("jump.wav", sweep(300, 700, 0.15, 12, 0.5))
 save("coin.wav", notes([988, 1319], 0.08, 10, 0.4) + notes([1319], 0.2, 14, 0.4))
+save("stomp.wav", sweep(500, 150, 0.12, 20, 0.6))
 save("fall.wav", sweep(600, 120, 0.5, 4, 0.5))
 save("win.wav", notes([523, 659, 784, 1047], 0.12, 8, 0.4) + notes([1047], 0.5, 5, 0.4))
