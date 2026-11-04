@@ -5,6 +5,7 @@ use glam::Vec4;
 use nge_core::{EventKey, PropKey};
 use serde::{Deserialize, Serialize};
 
+use crate::anim::AnimNode;
 use crate::audio::AudioNode;
 use crate::nodes::{AmbientNode, Camera3dNode, EmitterNode, LightNode, ModelNode, TextNode};
 use crate::physics::{BodyNode, PhysicsNode};
@@ -66,6 +67,8 @@ pub struct SpriteNode {
     pub frame: u32,
     #[serde(default)]
     pub spin: f32,
+    /// 帧动画；有它时 `frame` 不起作用。
+    pub anim: Option<AnimNode>,
     #[serde(default)]
     pub tap: bool,
     pub body: Option<BodyNode>,

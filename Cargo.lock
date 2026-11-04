@@ -5188,12 +5188,14 @@ dependencies = [
 name = "scene"
 version = "0.1.0"
 dependencies = [
+ "nge-audio",
  "nge-core",
  "nge-ecs",
  "nge-platform",
  "nge-render2d",
  "nge-render3d",
  "nge-scene",
+ "serde_json",
 ]
 
 [[package]]
