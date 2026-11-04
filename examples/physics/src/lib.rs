@@ -143,9 +143,9 @@ mod tests {
         assert_eq!(app.world().resource::<nge_audio::Audio>().voices(), 2);
     }
 
+    /// 这一帧的调试绘制有几块。
     fn overlays(app: &mut App) -> usize {
-        let world = app.world_mut();
-        world.query_filtered::<(), bevy_ecs::query::With<queries::Overlay>>().iter(world).count()
+        app.world().resource::<nge_render2d::SpriteInstances>().iter().filter(|(_, i)| i.z == nge_render2d::GIZMO_Z).count()
     }
 
     #[test]

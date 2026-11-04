@@ -120,6 +120,15 @@ impl Physics {
         (self.world.bodies.len(), self.world.colliders.len())
     }
 
+    /// 每个碰撞体：（实体，形状，刚体种类，是不是 sensor，物理里的位置和角度）。
+    pub(crate) fn outlines(&self) -> impl Iterator<Item = (Entity, Shape, Option<RigidBody>, bool, (Vec2, f32))> + '_ {
+        self.entities.iter().filter_map(|(&entity, h)| {
+            let (shape, collider) = (h.shape?, self.world.colliders.get(h.collider?)?);
+            let pose = collider.position();
+            Some((entity, shape.shape, h.kind, shape.sensor, (vec2(pose.translation), pose.rotation.angle())))
+        })
+    }
+
     fn filter(&self, filter: QueryFilter) -> RapierFilter<'static> {
         let mut f = RapierFilter::default();
         if !filter.sensors {

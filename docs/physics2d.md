@@ -54,7 +54,7 @@
   - 查的是物理的真实位置，画面画的是插值过的位置（`DrawAt`，慢最多一步）：用来点选快速运动的刚体时会差一点。
 - 返回的实体是碰撞体所在的实体：碰到瓦片地图时是地图下面的碰撞体子实体（和 `contacts` 一样）。
 - 只给 Rust 用：TSX 不跑每帧逻辑，没有需要查询的地方。
-- 看效果：`examples/physics` 的「查询」按钮（TSX prop `queries`）打开可视化：扫来扫去的射线画出交点和法线，左右扫的框和绕圈的点标出重叠的刚体（`src/queries.rs`，每帧删掉重画的白色纹理精灵）；平台跳跃按 Q 看角色身边的查询（见 [platformer.md](platformer.md)）。
+- 看效果：`examples/physics` 的「查询」按钮（TSX prop `queries`）打开可视化：扫来扫去的射线画出交点和法线，左右扫的框和绕圈的点标出重叠的刚体（`src/queries.rs`，用 [`Gizmos`](gizmos.md) 每帧画）；平台跳跃按 Q 看角色身边的查询（见 [platformer.md](platformer.md)）。
 
 ### 碰撞消息
 

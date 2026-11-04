@@ -8,7 +8,7 @@ use nge_core::PropKey;
 use nge_ecs::Time;
 use nge_ecs::glam::{Vec2, Vec4};
 use nge_physics2d::{Physics, QueryFilter};
-use nge_render2d::{DrawAt, Sprite, TextureId, Transform2d};
+use nge_render2d::{DrawAt, Gizmos};
 use serde::Deserialize;
 
 /// TSX 的 `queries` prop：开着时画查询。
@@ -16,10 +16,6 @@ pub const SHOW_QUERIES: PropKey<ShowQueries> = PropKey::new("queries");
 
 #[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub struct ShowQueries(pub bool);
-
-/// 这一帧画的标记，下一帧删掉重画。
-#[derive(Component)]
-pub struct Overlay;
 
 /// 射线从这里往下扫。
 const RAY_ORIGIN: Vec2 = Vec2::new(0.0, 260.0);
@@ -30,7 +26,6 @@ const BOX_HALF: Vec2 = Vec2::new(60.0, 50.0);
 const BOX_RANGE: f32 = 240.0;
 const POINT_CENTER: Vec2 = Vec2::new(0.0, -60.0);
 const POINT_RADIUS: Vec2 = Vec2::new(200.0, 120.0);
-const Z: f32 = 100.0;
 
 const RED: Vec4 = Vec4::new(1.0, 0.25, 0.2, 1.0);
 const YELLOW: Vec4 = Vec4::new(1.0, 0.85, 0.2, 1.0);
@@ -43,18 +38,13 @@ pub fn show_queries(
     show: Res<ShowQueries>,
     physics: Res<Physics>,
     drawn: Query<&DrawAt>,
-    old: Query<Entity, With<Overlay>>,
-    mut commands: Commands,
+    mut draw: Gizmos,
 ) {
-    for e in &old {
-        commands.entity(e).despawn();
-    }
     if !show.0 {
         return;
     }
     // 真实时间：暂停时也在扫，看得出查询还能用
     let t = time.elapsed as f32;
-    let mut draw = Draw(&mut commands);
 
     let dir = Vec2::from_angle(-FRAC_PI_2 + 1.1 * (t * 0.6).sin());
     match physics.raycast(RAY_ORIGIN, dir, RAY_LENGTH, QueryFilter::default()) {
@@ -81,23 +71,5 @@ pub fn show_queries(
         if let Ok(at) = drawn.get(e) {
             draw.rect(at.translation, Vec2::splat(14.0), MAGENTA);
         }
-    }
-}
-
-struct Draw<'a, 'w, 's>(&'a mut Commands<'w, 's>);
-
-impl Draw<'_, '_, '_> {
-    fn rect(&mut self, center: Vec2, size: Vec2, color: Vec4) {
-        self.rotated(center, size, 0.0, color);
-    }
-
-    fn line(&mut self, a: Vec2, b: Vec2, width: f32, color: Vec4) {
-        let d = b - a;
-        self.rotated((a + b) / 2.0, Vec2::new(d.length(), width), d.to_angle(), color);
-    }
-
-    fn rotated(&mut self, center: Vec2, size: Vec2, rotation: f32, color: Vec4) {
-        let sprite = Sprite { color, ..Sprite::from_texture(TextureId::WHITE).with_size(size) };
-        self.0.spawn((Overlay, sprite, Transform2d { translation: center, rotation, z: Z, ..Default::default() }));
     }
 }
