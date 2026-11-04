@@ -34,7 +34,7 @@
 ```ts
 interface Scene {
   background?: string;          // "#rrggbb"，清屏色
-  camera?: { x?: number; y?: number; zoom?: number };
+  camera?: { x?: number; y?: number; zoom?: number };  // 跟随、边界见 camera.md
   sprites: SpriteNode[];
 }
 interface SpriteNode {
@@ -60,7 +60,7 @@ interface SpriteNode {
 - `scene` 变化时（PreUpdate）：新 id → spawn；已有 id 且节点内容变了 → 整体覆盖 `Transform2d` / `Sprite` 等组件；不在新场景里的 id → despawn。节点没变就不碰，`spin` 推进的角度得以保留。
 - 重复的 id 只保留第一个，记 warn。
 - 未知的纹理名用白色纹理，记 warn。
-- 相机和背景：场景自己维护一个 `Camera2d` 实体，游戏不要再放别的相机（渲染只用第一个）。和精灵一样，`camera` / `background` 的声明没变就不碰，Rust 系统可以自己驱动相机；声明一变就以声明为准。
+- 相机和背景：场景自己维护一个 `Camera2d` 实体，游戏不要再放别的相机（渲染只用第一个）。和精灵一样，`camera` / `background` 的声明没变就不碰，Rust 系统可以自己驱动相机；声明一变就以声明为准。相机跟随（`follow`）时由场景每帧写相机，震屏期间也会写，见 [camera.md](camera.md)。
 
 ## API 形态
 

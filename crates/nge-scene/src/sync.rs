@@ -4,15 +4,13 @@ use std::collections::{HashMap, HashSet};
 
 use bevy_ecs::prelude::*;
 use glam::{Vec2, Vec4};
-use nge_core::wgpu;
-use nge_render2d::{Camera2d, ClearColor, Sprite, SpriteImage, Transform2d};
+use nge_render2d::{Sprite, SpriteImage, Transform2d};
 
 use crate::anim::FrameAnimation;
 use crate::behave::{Spin, Tappable};
 use crate::physics::{apply_body, square};
-use crate::protocol::{CameraNode, Color, Scene, SpriteNode};
+use crate::protocol::{Scene, SpriteNode};
 use crate::resolve::SceneAssets;
-use crate::SceneCamera;
 
 /// 节点 id。Rust 系统用它找到 TSX 声明的实体。不同种类的节点各用各的 id 空间。
 #[derive(Component, Debug, Clone, PartialEq, Eq, Hash)]
@@ -110,28 +108,6 @@ pub(crate) fn sync_sprites(mut commands: Commands, scene: Res<Scene>, mut assets
     });
 }
 
-/// 2D 相机和背景色。和节点一样：声明没变就不碰，Rust 系统可以自己驱动相机。
-pub(crate) fn sync_camera(
-    scene: Res<Scene>,
-    mut camera: Query<&mut Camera2d, With<SceneCamera>>,
-    mut clear: ResMut<ClearColor>,
-    mut last: Local<Option<(Option<CameraNode>, Option<Color>)>>,
-) {
-    let declared = (scene.camera.clone(), scene.background);
-    if last.as_ref() == Some(&declared) {
-        return;
-    }
-    let cam = declared.0.clone().unwrap_or_default();
-    for mut camera in &mut camera {
-        *camera = Camera2d { position: Vec2::new(cam.x, cam.y), zoom: cam.zoom, ..*camera };
-    }
-    *clear = declared.1.map_or_else(ClearColor::default, |c| {
-        let c = c.0.as_dvec4();
-        ClearColor(wgpu::Color { r: c.x, g: c.y, b: c.z, a: c.w })
-    });
-    *last = Some(declared);
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -222,38 +198,6 @@ mod tests {
         let all = sprites(&mut app);
         assert_eq!(all.len(), 1);
         assert_eq!(all["a"].0.translation.x, 1.0);
-    }
-
-    #[test]
-    fn camera_and_background() {
-        let mut app = app();
-        frame(&mut app, Some(json!({ "background": "#ffffff", "camera": { "x": 3, "zoom": 2 }, "sprites": [] })));
-        {
-            let world = app.world_mut();
-            let cams: Vec<Camera2d> = world.query::<&Camera2d>().iter(world).copied().collect();
-            assert_eq!(cams.len(), 1);
-            assert_eq!((cams[0].position, cams[0].zoom), (Vec2::new(3.0, 0.0), 2.0));
-            assert_eq!(world.resource::<ClearColor>().0.r, 1.0);
-        }
-        frame(&mut app, Some(json!({ "sprites": [] })));
-        let world = app.world_mut();
-        assert_eq!(world.query::<&Camera2d>().single(world).unwrap().zoom, 1.0);
-        assert_eq!(world.resource::<ClearColor>().0, ClearColor::default().0);
-    }
-
-    #[test]
-    fn camera_untouched_when_only_sprites_change() {
-        let mut app = app();
-        frame(&mut app, Some(json!({ "sprites": [{ "id": "a" }] })));
-        {
-            let world = app.world_mut();
-            world.query::<&mut Camera2d>().single_mut(world).unwrap().position.x = 77.0;
-            world.resource_mut::<ClearColor>().0.r = 0.5;
-        }
-        frame(&mut app, Some(json!({ "sprites": [{ "id": "a", "y": 1 }] })));
-        let world = app.world_mut();
-        assert_eq!(world.query::<&Camera2d>().single(world).unwrap().position.x, 77.0, "Rust 驱动的相机不被重置");
-        assert_eq!(world.resource::<ClearColor>().0.r, 0.5);
     }
 
     #[test]
