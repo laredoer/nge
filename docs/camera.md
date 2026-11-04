@@ -50,4 +50,4 @@ shake(game, { strength = 8, duration = 0.3 })
 - **修过的问题**：修了 Rust 驱动的相机被震屏 / 视口变化拉回声明位置、跟随目标没出现时边界不生效、换目标不对准、按声明而不是实际 `zoom` 算、`shake` 收 Infinity、比一帧短的不抖、绝对赋值时多减一次偏移。
 - **TS**：`nsh check` 通过 `examples/scene`、`examples/physics`、`examples/scene3d`。
 - **iOS**：`cargo check --workspace --target aarch64-apple-ios` 通过。
-- **实跑**：`scene`（`nsh dev --server-only`）在 Mac 上启动，dev server 显示 macOS host 已连接。画面效果（跟随的手感、边上停住、震屏力度）还没手测。
+- **实跑**：`scene`（`nsh dev --server-only`）在 Mac 上启动，dev server 显示 macOS host 已连接。手测：跟随、边上停住和震屏效果可以。
