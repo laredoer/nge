@@ -60,6 +60,17 @@ pub struct Velocity {
     pub angular: f32,
 }
 
+/// 锁住刚体的旋转：碰撞不会让它转起来（比如平台游戏的角色）。
+#[derive(Component, Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct LockRotation;
+
+/// 正在接触的另一个碰撞体。`normal` 是从对方指向这个实体的单位向量（站在地上时朝上）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Contact {
+    pub other: Entity,
+    pub normal: Vec2,
+}
+
 /// 冲量，下一步施加到刚体上后清零。
 #[derive(Component, Debug, Default, Clone, Copy, PartialEq)]
 pub struct Impulse(pub Vec2);
@@ -104,7 +115,7 @@ impl Plugin for PhysicsPlugin {
 }
 
 pub mod prelude {
-    pub use crate::{Collider, Collision, Impulse, Physics, PhysicsPlugin, RigidBody, Shape, Velocity};
+    pub use crate::{Collider, Collision, Contact, Impulse, LockRotation, Physics, PhysicsPlugin, RigidBody, Shape, Velocity};
 }
 
 #[cfg(test)]

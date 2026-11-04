@@ -8,12 +8,30 @@ use nge_core::EventKey;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
 
-/// 帧时间。`delta` 已被引擎截断到 50ms 以内。
-#[derive(Resource, Debug, Default, Clone, Copy)]
+/// 帧时间。真实时间已被引擎截断到 50ms 以内；`delta` 和 `elapsed` 是乘过 `scale` 的游戏时间。
+/// 场景插件会在 PreUpdate 按 `scene.timeScale` 重算当帧的 `delta`，自己的 PreUpdate 系统读 `delta` 时可能还是旧值。
+#[derive(Resource, Debug, Clone, Copy)]
 pub struct Time {
     pub delta: f32,
     pub elapsed: f64,
     pub frame: u64,
+    /// 时间缩放：1 正常，0 暂停。改了从下一帧起生效。
+    pub scale: f32,
+    /// 这一帧的真实时间，暂停时也在走。
+    pub real_delta: f32,
+}
+
+impl Time {
+    /// 实际用的缩放：负数当暂停，NaN / 无穷当 1，不让时间倒流。
+    pub fn sanitize(scale: f32) -> f32 {
+        if scale.is_finite() { scale.max(0.0) } else { 1.0 }
+    }
+}
+
+impl Default for Time {
+    fn default() -> Self {
+        Self { delta: 0.0, elapsed: 0.0, frame: 0, scale: 1.0, real_delta: 0.0 }
+    }
 }
 
 /// 游戏视图的大小（point）和像素密度。

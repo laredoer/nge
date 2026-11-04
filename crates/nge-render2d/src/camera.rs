@@ -58,6 +58,13 @@ impl Default for Transform2d {
     }
 }
 
+/// 画在哪：物理每帧给有刚体的实体写的插值位置。有它时精灵和相机跟随用它的平移和旋转（缩放、z 照样取 [`Transform2d`]）。
+#[derive(Component, Debug, Clone, Copy, PartialEq)]
+pub struct DrawAt {
+    pub translation: Vec2,
+    pub rotation: f32,
+}
+
 impl Transform2d {
     pub fn from_xy(x: f32, y: f32) -> Self {
         Self { translation: Vec2::new(x, y), ..Default::default() }

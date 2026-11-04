@@ -4,7 +4,7 @@ use bevy_ecs::prelude::*;
 use glam::{Mat4, Quat, Vec2, Vec3, Vec4};
 use nge_ecs::{Input, Outbox, Screen, Time};
 use nge_particles::ParticleEmitter;
-use nge_render2d::{Assets, Atlases, Image, Sprite, Transform2d};
+use nge_render2d::{Assets, Atlases, DrawAt, Image, Sprite, Transform2d};
 use nge_render3d::{Assets3d, Camera3d, Model3d, Transform3d};
 use nge_text::{FloatingText, Text2d};
 
@@ -57,16 +57,18 @@ pub(crate) fn tap(
     images: Res<Assets<Image>>,
     atlases: Res<Atlases>,
     assets3d: Res<Assets3d>,
-    sprites: Query<(&SceneId, &Transform2d, &Sprite), With<Tappable>>,
+    sprites: Query<(&SceneId, &Transform2d, &Sprite, Option<&DrawAt>), With<Tappable>>,
     models: Query<(&SceneId, &Transform3d, &Model3d), With<Tappable>>,
     camera: Query<(&Camera3d, &Transform3d), With<SceneCamera>>,
     mut outbox: ResMut<Outbox>,
 ) {
     for p in input.pointers_pressed() {
         // 精灵画在 3D 上面，先看精灵
+        // 按画面上的位置点（有刚体的精灵画在插值过的位置上）
+        let drawn = |t: &Transform2d, d: Option<&DrawAt>| d.map_or(*t, |d| Transform2d { translation: d.translation, rotation: d.rotation, ..*t });
         let sprite = sprites
             .iter()
-            .filter(|(_, t, s)| contains(t, atlases.sprite_size(&images, s), p.world))
+            .filter(|(_, t, s, d)| contains(&drawn(t, *d), atlases.sprite_size(&images, s), p.world))
             .max_by(|a, b| a.1.z.total_cmp(&b.1.z));
         if let Some((id, ..)) = sprite {
             outbox.send(TAP, &Tap { id: id.0.clone(), x: p.world.x, y: p.world.y, point: None });
@@ -218,6 +220,19 @@ mod tests {
         let t = world.query::<&Transform2d>().iter(world).find(|t| t.rotation != 0.0).copied().unwrap();
         // 每帧 0.5s，两帧共 90°
         assert!((t.rotation - FRAC_PI_2).abs() < 1e-5, "{}", t.rotation);
+    }
+
+    #[test]
+    fn tap_hits_where_the_sprite_is_drawn() {
+        let mut app = app();
+        frame(&mut app, Some(json!({ "sprites": [{ "id": "p", "w": 10, "tap": true }] })));
+        let world = app.world_mut();
+        let p = world.query_filtered::<bevy_ecs::entity::Entity, bevy_ecs::query::With<Sprite>>().iter(world).next().unwrap();
+        world.entity_mut(p).insert(nge_render2d::DrawAt { translation: Vec2::new(30.0, 0.0), rotation: 0.0 });
+        // 视口 100×100：(80, 50) 是世界 (30, 0)
+        app.command("touch", &json!({ "phase": "start", "id": 1, "x": 80, "y": 50 }));
+        let events = frame(&mut app, None);
+        assert!(events.iter().any(|(n, _)| n == "tap"), "点画面上的位置能点中（有刚体的精灵画的位置比 Transform2d 慢一步）");
     }
 
     #[test]

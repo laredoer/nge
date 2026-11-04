@@ -35,6 +35,7 @@
 interface Scene {
   background?: string;          // "#rrggbb"，清屏色
   camera?: { x?: number; y?: number; zoom?: number };  // 跟随、边界见 camera.md
+  timeScale?: number;           // 时间缩放，0 暂停，见 time.md
   sprites: SpriteNode[];
 }
 interface SpriteNode {

@@ -56,6 +56,8 @@ export interface BodyNode {
   angularVelocity?: number;
   /** 碰撞开始 / 结束时发 collide 事件。 */
   collide?: boolean;
+  /** 不让碰撞把它转起来（平台游戏的角色）。 */
+  fixedRotation?: boolean;
 }
 
 export type Anchor = "top-left" | "top" | "top-right" | "left" | "center" | "right" | "bottom-left" | "bottom" | "bottom-right";
@@ -169,11 +171,36 @@ export interface Camera2dNode {
   bounds?: { left: number; right: number; bottom: number; top: number };
 }
 
+/**
+ * 瓦片地图。`data` 一行一行从上往下，每格是图集里的帧号（整数），负数是空格；`(x, y)` 是地图左上角（y 朝上，行往下排）。
+ * `solid` 里的帧号是实心的，变成静态碰撞体；被撞时（地图或另一方开了 `collide`）发 `collide`，名字是地图的 id，
+ * 同时碰到好几块只算一次接触。`cols` / `grid` / `solid` 也都是整数。
+ * 任何字段变了整张地图重建，不要每帧改。
+ */
+export interface TilemapNode {
+  id: string;
+  /** 注册的图集名，或 asset:/ 路径配 `grid`。 */
+  texture: string;
+  grid?: [number, number];
+  /** 每格的边长。 */
+  tile: number;
+  cols: number;
+  data: number[];
+  x?: number;
+  y?: number;
+  z?: number;
+  solid?: number[];
+  friction?: number;
+  restitution?: number;
+  collide?: boolean;
+}
+
 export interface Scene {
   /** 清屏色 "#rrggbb"。 */
   background?: string;
   camera?: Camera2dNode;
   sprites?: SpriteNode[];
+  tilemaps?: TilemapNode[];
   texts?: TextNode[];
   emitters?: EmitterNode[];
   models?: ModelNode[];
@@ -183,6 +210,8 @@ export interface Scene {
   /** 重力（point / s²），默认 [0, -981]。 */
   physics?: { gravity?: [number, number] };
   audio?: AudioNode;
+  /** 时间缩放，默认 1；0 暂停（物理、补间、动画、粒子、相机平滑都停），0.5 慢一半。声音不受影响。 */
+  timeScale?: number;
 }
 
 /** 背景音乐和总音量。音量是线性的：0 静音，1 原音量。 */
@@ -323,8 +352,8 @@ export function floatText(game: YNode | undefined, args: FloatText) {
 }
 
 /**
- * 一次按键（Mac）。`code` 是 Web `KeyboardEvent.code` 的键名（"KeyA"、"ArrowLeft"、"Space"），按键盘上的位置，和布局无关。
- * 输入框在打字、按着 ⌘ 时不发；切到别的窗口时按着的键都补发一次松开。
+ * 一次按键（Mac）。`code` 是 Web `KeyboardEvent.code` 的键名（"KeyA"、"ArrowLeft"、"Space"），按键盘上的位置，和布局无关；手柄的按钮和摇杆方向是 "GamepadA"、"GamepadLeft"、"GamepadLeftStickRight" 这类（见 docs/gamepad.md）。
+ * 键盘：输入框在打字、按着 ⌘ 时不发（手柄照样发）；切到别的窗口时按着的键（含手柄）都补发一次松开。
  */
 export interface KeyInput {
   code: string;

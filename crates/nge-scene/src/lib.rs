@@ -14,6 +14,7 @@ mod protocol;
 mod resolve;
 mod sync;
 mod sync_nodes;
+mod tilemap;
 
 use std::collections::HashMap;
 
@@ -34,6 +35,7 @@ pub use nodes::{AmbientNode, AnchorName, BURST, Burst, Camera3dNode, EmitterNode
 pub use physics::{BodyKind, BodyNode, COLLIDE, Collide, PUSH, PhysicsNode, Push, ShapeName};
 pub use protocol::{Bounds, CameraNode, Color, SCENE, Scene, SpriteNode, TAP, Tap};
 pub use sync::SceneId;
+pub use tilemap::TilemapNode;
 
 /// 注册 `scene` prop、`tap` 等事件、`burst` / `floatText` / `push` / `sound` / `tween` / `shake` command 和命名纹理。
 /// 要在 `Render3dPlugin`、`Render2dPlugin` 之后添加（先 3D 后 2D，否则模型会盖住精灵）；没加 `ParticlePlugin` / `TextPlugin` / `PhysicsPlugin` / `AudioPlugin` 时自己补上。
@@ -107,6 +109,8 @@ impl Plugin for ScenePlugin {
         }
         let synced = (
             sync::sync_sprites,
+            sync::sync_time_scale,
+            tilemap::sync_tilemaps,
             camera::sync_camera,
             sync_nodes::sync_texts,
             sync_nodes::sync_emitters,

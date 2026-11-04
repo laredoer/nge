@@ -24,14 +24,20 @@
 | `Collider` | `shape: Shape::Rect(Vec2)`（整个宽高）或 `Shape::Circle(f32)`（半径），`restitution`（默认 0）、`friction`（0.5）、`density`（1）、`sensor`（false）、`events`（false，碰撞时发消息） |
 | `Velocity` | `linear: Vec2`、`angular: f32`（弧度 / 秒）。动态刚体每步写回；游戏改了就推给 rapier |
 | `Impulse` | `Vec2`，下一步施加到刚体上后清零 |
+| `LockRotation` | 锁住旋转（平台游戏的角色），加上去掉都不重建刚体；见 [platformer.md](platformer.md) |
 
 - 单位：世界坐标的 point。`PhysicsPlugin` 的 `pixels_per_meter`（默认 100）交给 rapier 的 `length_unit`，让它的容差按 point 缩放；重力默认 `(0, -981)` point / s²。
 - 同步方向：
   - 每步之前：游戏或场景改过 `Transform2d`（和上一步写回的值不一样）就把刚体挪过去（动态刚体相当于瞬移，`Kinematic` 用 `set_next_kinematic_position` 平滑移动）；`Velocity` 同理。
   - 每步之后：把动态刚体的位置、速度写回 `Transform2d` / `Velocity`。
 - 实体删除或去掉 `RigidBody` 时删除刚体和它的碰撞体；只有 `Collider` 没有 `RigidBody` 的实体当成固定碰撞体。
-- 固定步长 1/60 秒，每帧按 `Time.delta` 累计，最多补 4 步（卡顿时宁可变慢也不越补越多）。不做插值。
+- 固定步长 1/60 秒，每帧按 `Time.delta` 累计，最多补 4 步（卡顿时宁可变慢也不越补越多）。
+- 画面插值：`Transform2d` 是真实值（动态刚体是物理这一步结束时的位置，kinematic / 固定刚体是游戏给的），物理每帧另外给有刚体的实体写 `DrawAt`（画在哪）：动态和 kinematic 在上一步和这一步之间按攒下没走的时间插值（比物理慢一步，约 16 ms，两种刚体慢的一样多，站在移动平台上贴得住），固定刚体就是 `Transform2d`。精灵渲染和相机跟随用 `DrawAt`。不插值时 Mac 的 120 Hz 屏幕上刚体一帧动一帧不动，帧时间在 1/60 上下抖时会一帧走 0 步、下一帧走 2 步。详见 [moving-platforms.md](moving-platforms.md)（第一版把插值直接写进了 `Transform2d`，游戏读到的位置慢一步，kinematic 没法跟着插值，改掉了）。
 - 系统排在 `PostUpdate` 的 `PhysicsStepped` 里：游戏在 `Update` 里改速度、施加冲量，这一帧就生效。
+
+### 接触查询
+
+`Physics::contacts(entity)` 返回上一步结束时正在接触的碰撞体和法线（从对方指向自己），用来判断站没站在地上；见 [platformer.md](platformer.md)。
 
 ### 碰撞消息
 
@@ -77,7 +83,7 @@
 ## 范围外
 
 - 关节、射线 / 形状查询给 TSX、3D 物理
-- 物理插值、确定性回放
+- 确定性回放
 - 多边形 / 胶囊碰撞体、按贴图轮廓生成碰撞体
 
 ## 验收记录（2026-11-04，Mac）
@@ -91,6 +97,6 @@
 ## 已知限制 / 后续
 
 - 碰撞体不跟着 `Transform2d.scale` 变（场景节点在生成时按 `scale` 算好尺寸，之后改 `scale` 会整体重建）。
-- 没有插值：渲染帧率高于 60 时，刚体每两帧动一次（120 Hz 屏上能看出来就加插值）。
+- 没有插值：渲染帧率高于 60 时，刚体每两帧动一次（120 Hz 屏上能看出来就加插值）。（后来加了，见 [moving-platforms.md](moving-platforms.md)。）
 - 掉出世界的刚体不会自动删除。
 - `collide` 事件不带接触点和力度。

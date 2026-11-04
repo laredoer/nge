@@ -8,7 +8,7 @@ use bevy_ecs::prelude::*;
 use bevy_ecs::schedule::{IntoScheduleConfigs, ScheduleLabel};
 use bevy_ecs::system::ScheduleSystem;
 use glam::Vec2;
-use nge_core::bridge::{KEY, TOUCH};
+use nge_core::bridge::{GAMEPAD, KEY, TOUCH};
 use nge_core::{Ctx, Game, GameFactory, Gfx, Viewport, wgpu};
 use serde_json::Value as JsonValue;
 
@@ -147,7 +147,7 @@ impl App {
         &mut self.world
     }
 
-    /// 收到 NSH 的 command：触摸和按键进 Input，注册过的变成类型化消息，其余变成 [`NshCommand`]。
+    /// 收到 NSH 的 command：触摸、按键和手柄摇杆进 Input，注册过的变成类型化消息，其余变成 [`NshCommand`]。
     pub fn command(&mut self, name: &str, args: &JsonValue) {
         if name == TOUCH.name() {
             match TOUCH.decode(args) {
@@ -157,6 +157,11 @@ impl App {
         } else if name == KEY.name() {
             match KEY.decode(args) {
                 Ok(k) => self.world.resource_mut::<Input>().key(&k.code, k.down, k.repeat),
+                Err(e) => log::warn!("{e}"),
+            }
+        } else if name == GAMEPAD.name() {
+            match GAMEPAD.decode(args) {
+                Ok(g) => self.world.resource_mut::<Input>().sticks(g.left, g.right),
                 Err(e) => log::warn!("{e}"),
             }
         } else if let Some(handler) = self.commands.get(name) {
@@ -185,8 +190,9 @@ impl App {
         }
         {
             let mut time = self.world.resource_mut::<Time>();
-            time.delta = dt;
-            time.elapsed += f64::from(dt);
+            time.delta = dt * Time::sanitize(time.scale);
+            time.real_delta = dt;
+            time.elapsed += f64::from(time.delta);
             time.frame += 1;
         }
         if !self.started {
@@ -245,6 +251,8 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    use crate::input::Stick;
+
     fn viewport() -> Viewport {
         Viewport { size: [400.0, 300.0], pixels: [800, 600] }
     }
@@ -294,6 +302,26 @@ mod tests {
         app.tick(viewport(), 0.016);
         app.tick(viewport(), 0.016);
         assert_eq!(app.world().resource::<Log>().0, ["startup", "update", "update"]);
+    }
+
+    #[test]
+    fn time_scale_pauses_and_slows() {
+        let mut app = App::new();
+        app.tick(viewport(), 0.5);
+        app.world_mut().resource_mut::<Time>().scale = 0.5;
+        app.tick(viewport(), 0.2);
+        let time = *app.world().resource::<Time>();
+        assert_eq!((time.delta, time.real_delta), (0.1, 0.2));
+        assert!((time.elapsed - 0.6).abs() < 1e-6, "elapsed 按缩放后的时间累计");
+        app.world_mut().resource_mut::<Time>().scale = 0.0;
+        app.tick(viewport(), 0.2);
+        let time = *app.world().resource::<Time>();
+        assert_eq!((time.delta, time.real_delta, time.frame), (0.0, 0.2, 3), "暂停时 frame 照样加");
+        for (scale, delta) in [(-1.0, 0.0), (f32::NAN, 0.2), (f32::INFINITY, 0.2)] {
+            app.world_mut().resource_mut::<Time>().scale = scale;
+            app.tick(viewport(), 0.2);
+            assert_eq!(app.world().resource::<Time>().delta, delta, "scale {scale}");
+        }
     }
 
     #[test]
@@ -350,6 +378,17 @@ mod tests {
         assert!(app.world().resource::<Input>().key_down("Space"));
         app.command("key", &json!({ "code": "Space" }));
         assert!(app.world().resource::<Input>().key_down("Space"), "缺字段的命令丢掉");
+    }
+
+    #[test]
+    fn gamepad_sticks_go_to_input() {
+        let mut app = App::new();
+        app.command("gamepad", &json!({ "left": [0.5, -0.5], "right": [0.0, 1.0] }));
+        app.tick(viewport(), 0.016);
+        let input = app.world().resource::<Input>();
+        assert_eq!((input.stick(Stick::Left), input.stick(Stick::Right)), (Vec2::new(0.5, -0.5), Vec2::new(0.0, 1.0)), "摇杆是状态，不在帧末清掉");
+        app.command("gamepad", &json!({ "left": "nope" }));
+        assert_eq!(app.world().resource::<Input>().stick(Stick::Left), Vec2::new(0.5, -0.5), "坏的命令丢掉");
     }
 
     #[derive(Message)]

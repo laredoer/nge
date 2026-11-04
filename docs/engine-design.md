@@ -63,6 +63,11 @@
 | **动画** | 精灵的帧动画（`anim`）和补间（`tween` command，缓动、delay、repeat / yoyo、接管属性），`animEnd` / `tweenEnd` 事件；见 [animation.md](animation.md) | `examples/scene`：石头按帧换颜色，点飞船补间移动并缩放弹一下，到达后 HUD 计数 |
 | **键盘（Mac）** | AppKit 本地事件监听，键名用 Web `KeyboardEvent.code`；`Input` 的按着 / 刚按下 / 刚松开 / `axis`，TSX 的 `onKey`，`captureKeys`；见 [keyboard.md](keyboard.md) | `examples/dodge` 用 ← → / A D 控制，`examples/scene` 用方向键移动飞船；输入框打字、切走窗口时不卡键 |
 | **相机（2D）** | `scene.camera` 的 `follow` / `smooth` / `bounds`，`shake` command；见 [camera.md](camera.md) | `examples/scene`：相机平滑跟着飞船、到边上停住，点飞船时震屏 |
+| **暂停和时间缩放** | `Time.scale` / `real_delta`，`scene.timeScale`；见 [time.md](time.md) | `examples/scene`：空格暂停 / 继续，暂停时补间、动画、旋转都停住 |
+| **瓦片地图** | `scene.tilemaps`：按图集格子画，实心格子合并成静态碰撞体，`collide` 报地图 id；见 [tilemap.md](tilemap.md) | `examples/physics`：地面、墙和两块平台是瓦片地图，球和箱子落在上面 |
+| **平台跳跃示例** | 物理加接触查询（`Physics::contacts`）和锁旋转（`fixedRotation`）；Rust 角色控制 + TSX 关卡；见 [platformer.md](platformer.md) | `examples/platformer`：键盘跑跳、相机跟随、吃金币、掉坑重来、到终点通关 |
+| **手柄（Mac）** | GameController 每帧读一遍：按钮和摇杆方向当成 `Gamepad*` 键名走 `key`，摇杆模拟量走 `gamepad` command 进 `Input::stick`；见 [gamepad.md](gamepad.md) | `examples/platformer` 用十字键 / 左摇杆跑、A 跳；`examples/dodge` 按摇杆推的力度移动 |
+| **移动平台和渲染插值** | `DrawAt`：动态 / kinematic 刚体画在插值过的位置，`Transform2d` 保持真实值；`Physics::velocity`；平台跳跃的横移 / 升降平台；见 [moving-platforms.md](moving-platforms.md) | `examples/platformer`：站在移动平台上跟着走、不陷不抖，120 Hz 下每帧都动 |
 | **M6 Android** | SurfaceView 和 Vulkan，JNI 胶水层 | 示例游戏在 Android 真机上能跑 |
 
 ## 待定

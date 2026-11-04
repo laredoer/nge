@@ -1,6 +1,7 @@
 //! 文字渲染器：每段文字缓存一个排好版的 glyphon `Buffer`，内容、字号、字体没变就不重排。
 
 use std::collections::{HashMap, HashSet};
+use std::sync::mpsc::{Receiver, TryRecvError};
 
 use bevy_ecs::prelude::*;
 use glam::Vec2;
@@ -60,18 +61,32 @@ pub(crate) struct TextRenderer {
     fonts: FontSystem,
     /// 已注册进字体库的字体（解析失败的是 None）。
     faces: HashMap<FontId, Option<Face>>,
-    system_fonts: bool,
+    /// 后台扫描中的系统字体；`None` 是已经并进字体库了。
+    system_fonts: Option<Receiver<Vec<fontdb::FaceInfo>>>,
     shaped: HashMap<Entity, Shaped>,
 }
 
 impl Default for TextRenderer {
     fn default() -> Self {
-        // 空字体库：系统字体等到真的用到时才扫描
+        // 扫描系统字体在 Mac 上要几百毫秒：一开始就放到后台线程，不卡渲染线程
+        let (tx, rx) = std::sync::mpsc::channel();
+        let spawned = std::thread::Builder::new().name("nge-system-fonts".into()).spawn(move || {
+            let mut db = fontdb::Database::new();
+            db.load_system_fonts();
+            let _ = tx.send(db.faces().cloned().collect());
+        });
+        let system_fonts = match spawned {
+            Ok(_) => Some(rx),
+            Err(e) => {
+                log::warn!("起不了扫描系统字体的线程，不指定字体的文字不会画出来: {e}");
+                None
+            }
+        };
         Self {
             gpu: None,
             fonts: FontSystem::new_with_locale_and_db("en-US".into(), fontdb::Database::new()),
             faces: HashMap::new(),
-            system_fonts: false,
+            system_fonts,
             shaped: HashMap::new(),
         }
     }
@@ -153,8 +168,28 @@ impl TextRenderer {
         }
     }
 
+    /// 后台扫好的系统字体并进字体库（只读元数据，不重新解析），再排一段字预热：第一次用默认字体找字形要几十毫秒，在开头做掉。
+    fn system_fonts_ready(&mut self) -> bool {
+        let Some(rx) = &self.system_fonts else { return true };
+        match rx.try_recv() {
+            Ok(faces) => {
+                let db = self.fonts.db_mut();
+                for face in faces {
+                    db.push_face_info(face);
+                }
+                shape(&mut self.fonts, Key { text: "0123456789+-".into(), face: None, px: 16.0, width: None });
+            }
+            Err(TryRecvError::Empty) => return false,
+            Err(TryRecvError::Disconnected) => log::warn!("扫描系统字体失败，不指定字体的文字不会画出来"),
+        }
+        self.system_fonts = None;
+        true
+    }
+
     /// 排版并算出每段文字的位置；字体没加载完的跳过。删掉已经不存在的文字的缓存。
     fn layout(&mut self, world: &mut World, gfx: &Gfx) -> Vec<Placed> {
+        // 每帧都看一眼：扫完就马上合并、预热，不等到第一段用默认字体的文字出现（那往往是游戏中途）
+        let system_ready = self.system_fonts_ready();
         let camera = world.query::<&Camera2d>().iter(world).next().copied().unwrap_or_default();
         let view = Vec2::from(gfx.viewport.size);
         let scale = gfx.viewport.scale();
@@ -167,12 +202,9 @@ impl TextRenderer {
                     Some(Some(face)) => Some(face),
                     _ => continue,
                 },
-                None => {
-                    if !std::mem::replace(&mut self.system_fonts, true) {
-                        self.fonts.db_mut().load_system_fonts();
-                    }
-                    None
-                }
+                // 系统字体还在后台扫描：先不画，免得落到空字体库里排出一片空白
+                None if !system_ready => continue,
+                None => None,
             };
             let zoom = if on_screen { 1.0 } else { camera.zoom };
             let px = (text.size * zoom * scale).max(1.0);
@@ -227,5 +259,24 @@ mod tests {
         let key = Key { text: "a".into(), face: Some(face.clone()), px: 10.0, width: None };
         let regular = Face { weight: fontdb::Weight::NORMAL, ..face };
         assert!(!key.matches("a", Some(&regular), 10.0, None), "同名不同字重要重排");
+    }
+
+    #[test]
+    fn system_fonts_load_in_the_background() {
+        let started = std::time::Instant::now();
+        let mut renderer = TextRenderer::default();
+        assert!(started.elapsed() < std::time::Duration::from_millis(50), "建渲染器不等扫描系统字体：{:?}", started.elapsed());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !renderer.system_fonts_ready() {
+            assert!(std::time::Instant::now() < deadline, "系统字体一直没加载完");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        #[cfg(target_os = "macos")]
+        {
+            assert!(renderer.fonts.db().len() > 0, "扫到的系统字体并进了字体库");
+            let shaped = shape(&mut renderer.fonts, Key { text: "+1".into(), face: None, px: 16.0, width: None });
+            assert!(shaped.buffer.layout_runs().map(|run| run.glyphs.len()).sum::<usize>() > 0, "默认字体排得出字形");
+        }
+        assert!(renderer.system_fonts_ready(), "加载完以后一直是 ready");
     }
 }

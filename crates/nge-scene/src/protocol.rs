@@ -9,6 +9,7 @@ use crate::anim::AnimNode;
 use crate::audio::AudioNode;
 use crate::nodes::{AmbientNode, Camera3dNode, EmitterNode, LightNode, ModelNode, TextNode};
 use crate::physics::{BodyNode, PhysicsNode};
+use crate::tilemap::TilemapNode;
 
 pub const SCENE: PropKey<Scene> = PropKey::new("scene");
 pub const TAP: EventKey<Tap> = EventKey::new("tap");
@@ -19,6 +20,7 @@ pub struct Scene {
     pub background: Option<Color>,
     pub camera: Option<CameraNode>,
     pub sprites: Vec<SpriteNode>,
+    pub tilemaps: Vec<TilemapNode>,
     pub texts: Vec<TextNode>,
     pub emitters: Vec<EmitterNode>,
     pub models: Vec<ModelNode>,
@@ -27,6 +29,9 @@ pub struct Scene {
     pub ambient: Option<AmbientNode>,
     pub physics: Option<PhysicsNode>,
     pub audio: Option<AudioNode>,
+    /// 时间缩放，1 正常、0 暂停。
+    #[serde(rename = "timeScale")]
+    pub time_scale: Option<f32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]

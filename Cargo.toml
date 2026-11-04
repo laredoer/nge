@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/nge-assets", "crates/nge-audio", "crates/nge-core", "crates/nge-ecs", "crates/nge-nsh", "crates/nge-particles", "crates/nge-physics2d", "crates/nge-platform", "crates/nge-render2d", "crates/nge-render3d", "crates/nge-scene", "crates/nge-text", "examples/bounce", "examples/sprites", "examples/dodge", "examples/scene", "examples/model", "examples/effects", "examples/scene3d", "examples/physics"]
+members = ["crates/nge-assets", "crates/nge-audio", "crates/nge-core", "crates/nge-ecs", "crates/nge-nsh", "crates/nge-particles", "crates/nge-physics2d", "crates/nge-platform", "crates/nge-render2d", "crates/nge-render3d", "crates/nge-scene", "crates/nge-text", "examples/bounce", "examples/sprites", "examples/dodge", "examples/scene", "examples/model", "examples/effects", "examples/scene3d", "examples/physics", "examples/platformer"]
 
 [workspace.package]
 version = "0.1.0"
@@ -38,6 +38,7 @@ log = "0.4"
 env_logger = "0.11"
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSRunLoop", "NSObject", "NSString", "NSThread", "NSNotification", "NSOperation", "block2"] }
+objc2-game-controller = { version = "0.3", features = ["GCController", "GCExtendedGamepad", "GCPhysicalInputProfile", "GCControllerElement", "GCControllerButtonInput", "GCControllerAxisInput", "GCControllerDirectionPad"] }
 objc2-quartz-core = { version = "0.3", features = ["CADisplayLink", "CAFrameRateRange"] }
 objc2-app-kit = { version = "0.3", features = ["NSView", "objc2-quartz-core", "NSEvent", "NSResponder", "NSWindow", "NSText", "NSTextInputClient", "block2"] }
 block2 = "0.6"

@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet};
 
 use bevy_ecs::prelude::*;
 use glam::{Vec2, Vec4};
+use nge_ecs::Time;
 use nge_render2d::{Sprite, SpriteImage, Transform2d};
 
 use crate::anim::FrameAnimation;
@@ -108,6 +109,20 @@ pub(crate) fn sync_sprites(mut commands: Commands, scene: Res<Scene>, mut assets
     });
 }
 
+/// `scene.timeScale`：声明变了才写 `Time.scale`，并且这一帧就按新的缩放重算 `delta`。
+/// 一直没声明时不碰，Rust 自己设的缩放不会被第一次同步覆盖；声明去掉时回到 1。
+pub(crate) fn sync_time_scale(scene: Res<Scene>, mut time: ResMut<Time>, mut last: Local<Option<f32>>) {
+    if *last == scene.time_scale {
+        return;
+    }
+    *last = scene.time_scale;
+    let scale = Time::sanitize(scene.time_scale.unwrap_or(1.0));
+    let old = time.delta;
+    time.scale = scale;
+    time.delta = time.real_delta * scale;
+    time.elapsed += f64::from(time.delta) - f64::from(old);
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -198,6 +213,65 @@ mod tests {
         let all = sprites(&mut app);
         assert_eq!(all.len(), 1);
         assert_eq!(all["a"].0.translation.x, 1.0);
+    }
+
+    #[test]
+    fn time_scale_pauses_this_frame_and_rust_can_override() {
+        let mut app = app();
+        frame(&mut app, Some(json!({ "timeScale": 0, "sprites": [{ "id": "a", "spin": 90 }] })));
+        assert_eq!(sprites(&mut app)["a"].0.rotation, 0.0, "声明暂停的这一帧就停");
+        assert_eq!(app.world().resource::<Time>().delta, 0.0);
+        app.world_mut().resource_mut::<Time>().scale = 0.5;
+        frame(&mut app, Some(json!({ "timeScale": 0, "sprites": [{ "id": "a", "spin": 90 }] })));
+        assert_eq!(app.world().resource::<Time>().delta, 0.25, "声明没变，Rust 改的缩放生效");
+        frame(&mut app, Some(json!({ "sprites": [{ "id": "a", "spin": 90 }] })));
+        let time = *app.world().resource::<Time>();
+        assert_eq!((time.scale, time.delta), (1.0, 0.5), "去掉 timeScale 回到 1");
+        assert!((time.elapsed - 0.75).abs() < 1e-6, "elapsed 按改过的 delta 算 {}", time.elapsed);
+    }
+
+    #[test]
+    fn rust_time_scale_survives_scenes_without_time_scale() {
+        let mut app = app();
+        app.world_mut().resource_mut::<Time>().scale = 0.0;
+        frame(&mut app, Some(json!({ "sprites": [] })));
+        let time = *app.world().resource::<Time>();
+        assert_eq!((time.scale, time.delta), (0.0, 0.0), "没声明 timeScale 时不覆盖 Rust 的缩放");
+        frame(&mut app, Some(json!({ "timeScale": 0.5 })));
+        frame(&mut app, Some(json!({ "timeScale": -2 })));
+        assert_eq!(app.world().resource::<Time>().scale, 0.0, "负数当暂停");
+        frame(&mut app, Some(json!({ "timeScale": 0.5 })));
+        app.prop("scene", None);
+        frame(&mut app, None);
+        assert_eq!(app.world().resource::<Time>().scale, 1.0, "scene 整个去掉时回到 1");
+    }
+
+    /// 暂停几帧再继续：物理、补间（含 delay）、帧动画都停在原处，继续后接着走。
+    #[test]
+    fn pause_freezes_physics_tweens_and_animation() {
+        let mut app = app();
+        let scene = |scale: f32| json!({ "timeScale": scale, "sprites": [
+            { "id": "ball", "w": 10, "y": 100, "body": { "kind": "dynamic" } },
+            { "id": "t", "w": 10, "texture": "grid", "anim": { "frames": [0, 1, 2, 3, 4, 5, 6, 7], "fps": 10 } },
+        ] });
+        let at = |app: &mut nge_ecs::App| {
+            let s = sprites(app);
+            (s["ball"].0.translation.y, s["t"].0.translation.x, s["t"].1.image)
+        };
+        frame(&mut app, Some(scene(1.0)));
+        app.command("tween", &json!({ "id": "t", "to": { "x": 100 }, "duration": 1, "delay": 0.2, "ease": "linear" }));
+        frame(&mut app, Some(scene(0.0)));
+        let before = at(&mut app);
+        for _ in 0..5 {
+            frame(&mut app, None);
+        }
+        let paused = at(&mut app);
+        assert_eq!((paused.0, paused.1), (before.0, before.1), "暂停时球不落、补间不走");
+        assert!(matches!((paused.2, before.2), (SpriteImage::Atlas(_, a), SpriteImage::Atlas(_, b)) if a == b), "帧动画不换帧");
+        frame(&mut app, Some(scene(1.0)));
+        let resumed = at(&mut app);
+        assert!(resumed.0 < paused.0, "继续后接着落");
+        assert!((resumed.1 - 30.0).abs() < 1e-3, "delay 没被暂停吃掉：0.5 秒里先等 0.2 秒再走 0.3 {}", resumed.1);
     }
 
     #[test]

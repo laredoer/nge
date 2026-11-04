@@ -1,5 +1,6 @@
 //! 统一的 Pointer 输入：NSH 的 touch command 转成按 id 跟踪的指针，带本帧边沿状态；
-//! 平台层的 key command 记成按着的键（键名是 Web `KeyboardEvent.code`，如 `KeyA`、`ArrowLeft`）。
+//! 平台层的 key command 记成按着的键（键名是 Web `KeyboardEvent.code`，如 `KeyA`、`ArrowLeft`；手柄按钮是 `GamepadA` 这类）；
+//! gamepad command 记两根摇杆的模拟量。
 
 use std::collections::BTreeSet;
 
@@ -21,12 +22,19 @@ pub struct Pointer {
     pub just_released: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stick {
+    Left,
+    Right,
+}
+
 #[derive(Resource, Debug, Default)]
 pub struct Input {
     pointers: Vec<Pointer>,
     keys_down: BTreeSet<String>,
     keys_pressed: BTreeSet<String>,
     keys_released: BTreeSet<String>,
+    sticks: [Vec2; 2],
 }
 
 impl Input {
@@ -110,6 +118,17 @@ impl Input {
     pub fn axis(&self, negative: &[&str], positive: &[&str]) -> f32 {
         let any = |codes: &[&str]| codes.iter().any(|c| self.key_down(c));
         f32::from(i8::from(any(positive)) - i8::from(any(negative)))
+    }
+
+    /// 收到手柄摇杆的新值：每个分量限制在 −1 … 1，不是有限数的当 0。
+    pub fn sticks(&mut self, left: [f32; 2], right: [f32; 2]) {
+        let clean = |v: [f32; 2]| Vec2::from(v.map(|c| if c.is_finite() { c.clamp(-1.0, 1.0) } else { 0.0 }));
+        self.sticks = [clean(left), clean(right)];
+    }
+
+    /// 手柄摇杆：x 向右、y 向上，各在 −1 … 1；没连手柄时是 0。
+    pub fn stick(&self, stick: Stick) -> Vec2 {
+        self.sticks[stick as usize]
     }
 
     /// 相机插件用它把 screen 换算成 world。
@@ -239,4 +258,15 @@ mod tests {
         input.map_world(|s| s * 2.0);
         assert_eq!(input.pointers().next().unwrap().world, Vec2::new(4.0, 6.0));
     }
+
+    #[test]
+    fn sticks_are_clamped_and_bad_values_are_zero() {
+        let mut input = Input::default();
+        input.sticks([2.0, f32::NAN], [-0.25, f32::NEG_INFINITY]);
+        assert_eq!(input.stick(Stick::Left), Vec2::new(1.0, 0.0));
+        assert_eq!(input.stick(Stick::Right), Vec2::new(-0.25, 0.0));
+        input.end_frame();
+        assert_eq!(input.stick(Stick::Right), Vec2::new(-0.25, 0.0), "帧末不清");
+    }
+
 }
