@@ -9,5 +9,6 @@ publish.workspace = true
 nge-core.workspace = true
 nge-ecs.workspace = true
 nge-render2d.workspace = true
+nge-render3d.workspace = true
 nge-scene.workspace = true
 nge-platform = { workspace = true, features = ["dev"] }

@@ -1,55 +1,96 @@
-//! 场景 → ECS 实体的增量同步。
+//! 场景 → ECS 实体的增量同步：每种节点按 id 对比上一次的声明，没变的不碰，变了整体覆盖，没了就删。
 
 use std::collections::{HashMap, HashSet};
 
 use bevy_ecs::prelude::*;
-use bevy_ecs::system::EntityCommands;
 use glam::{Vec2, Vec4};
 use nge_core::wgpu;
-use nge_render2d::{Camera2d, ClearColor, Sprite, TextureId, Transform2d};
+use nge_render2d::{Camera2d, ClearColor, Sprite, Transform2d};
 
 use crate::behave::{Spin, Tappable};
 use crate::protocol::{CameraNode, Color, Scene, SpriteNode};
-use crate::{NamedTexture, SceneCamera, SceneTextures};
+use crate::resolve::SceneAssets;
+use crate::SceneCamera;
 
-/// 节点 id。Rust 系统用它找到 TSX 声明的实体。
+/// 节点 id。Rust 系统用它找到 TSX 声明的实体。不同种类的节点各用各的 id 空间。
 #[derive(Component, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SceneId(pub String);
 
+pub(crate) trait Node: Clone + PartialEq + Send + Sync + 'static {
+    fn id(&self) -> &str;
+}
+
 /// 上一次同步时的声明，用来判断节点有没有变。
 #[derive(Component)]
-pub(crate) struct Declared(SpriteNode);
+pub(crate) struct Declared<N: Node>(pub N);
 
-pub(crate) fn sync(
-    mut commands: Commands,
+/// 按 id 对比 `nodes` 和已有实体：新的 spawn，变了的调 `apply`（带上旧声明），没了的删掉。
+pub(crate) fn sync_list<N: Node>(
+    commands: &mut Commands,
+    nodes: &[N],
+    existing: &Query<(Entity, &Declared<N>)>,
+    mut apply: impl FnMut(&mut Commands, Entity, Option<&N>, &N),
+) {
+    let mut old: HashMap<&str, (Entity, &N)> = existing.iter().map(|(e, d)| (d.0.id(), (e, &d.0))).collect();
+    let mut seen = HashSet::new();
+    for node in nodes {
+        if !seen.insert(node.id()) {
+            log::warn!("场景里有重复的 id {:?}，只保留第一个", node.id());
+            continue;
+        }
+        let (entity, before) = match old.remove(node.id()) {
+            Some((_, before)) if before == node => continue,
+            Some((entity, before)) => (entity, Some(before)),
+            None => (commands.spawn(SceneId(node.id().to_owned())).id(), None),
+        };
+        apply(commands, entity, before, node);
+        commands.entity(entity).insert(Declared(node.clone()));
+    }
+    for (entity, _) in old.into_values() {
+        commands.entity(entity).despawn();
+    }
+}
+
+impl Node for SpriteNode {
+    fn id(&self) -> &str {
+        &self.id
+    }
+}
+
+pub(crate) fn sync_sprites(mut commands: Commands, scene: Res<Scene>, mut assets: SceneAssets, nodes: Query<(Entity, &Declared<SpriteNode>)>) {
+    sync_list(&mut commands, &scene.sprites, &nodes, |commands, entity, _, node| {
+        let image = assets.texture(&node.id, node.texture.as_deref(), node.grid, node.frame);
+        // 只给 w 或 h 时按正方形；都不给时纯色块按 1×1、纹理按像素大小
+        let size = match (node.w, node.h) {
+            (Some(w), Some(h)) => Some(Vec2::new(w, h)),
+            (Some(s), None) | (None, Some(s)) => Some(Vec2::splat(s)),
+            (None, None) => None,
+        };
+        let sprite = Sprite { image, size, color: node.color.map_or(Vec4::ONE, |c| c.0) };
+        let transform = Transform2d {
+            translation: Vec2::new(node.x, node.y),
+            rotation: node.rotation.to_radians(),
+            scale: Vec2::splat(node.scale),
+            z: node.z,
+        };
+        let mut entity = commands.entity(entity);
+        entity.remove::<(Spin, Tappable)>().insert((sprite, transform));
+        if node.spin != 0.0 {
+            entity.insert(Spin(node.spin.to_radians()));
+        }
+        if node.tap {
+            entity.insert(Tappable);
+        }
+    });
+}
+
+/// 2D 相机和背景色。和节点一样：声明没变就不碰，Rust 系统可以自己驱动相机。
+pub(crate) fn sync_camera(
     scene: Res<Scene>,
-    textures: Res<SceneTextures>,
-    nodes: Query<(Entity, &SceneId, &Declared)>,
     mut camera: Query<&mut Camera2d, With<SceneCamera>>,
     mut clear: ResMut<ClearColor>,
     mut last: Local<Option<(Option<CameraNode>, Option<Color>)>>,
 ) {
-    if !scene.is_changed() {
-        return;
-    }
-    let mut existing: HashMap<&str, (Entity, &SpriteNode)> = nodes.iter().map(|(e, id, d)| (id.0.as_str(), (e, &d.0))).collect();
-    let mut seen = HashSet::new();
-    for node in &scene.sprites {
-        if !seen.insert(node.id.as_str()) {
-            log::warn!("场景里有重复的 id {:?}，只保留第一个", node.id);
-            continue;
-        }
-        match existing.remove(node.id.as_str()) {
-            Some((_, old)) if old == node => {}
-            Some((entity, _)) => apply(commands.entity(entity), node, &textures),
-            None => apply(commands.spawn(SceneId(node.id.clone())), node, &textures),
-        }
-    }
-    for (entity, _) in existing.into_values() {
-        commands.entity(entity).despawn();
-    }
-
-    // 和精灵一样：声明没变就不碰，Rust 系统可以自己驱动相机
     let declared = (scene.camera.clone(), scene.background);
     if last.as_ref() == Some(&declared) {
         return;
@@ -63,38 +104,6 @@ pub(crate) fn sync(
         ClearColor(wgpu::Color { r: c.x, g: c.y, b: c.z, a: c.w })
     });
     *last = Some(declared);
-}
-
-fn apply(mut entity: EntityCommands, node: &SpriteNode, textures: &SceneTextures) {
-    let image = match node.texture.as_deref().map(|name| (name, textures.0.get(name))) {
-        None => Sprite::from_texture(TextureId::WHITE),
-        Some((_, Some(NamedTexture::Texture(t)))) => Sprite::from_texture(*t),
-        Some((_, Some(NamedTexture::Atlas(a)))) => Sprite::from_atlas(*a, node.frame),
-        Some((name, None)) => {
-            log::warn!("节点 {:?} 引用了未注册的纹理 {name:?}", node.id);
-            Sprite::from_texture(TextureId::WHITE)
-        }
-    };
-    // 只给 w 或 h 时按正方形；都不给时纯色块按 1×1、纹理按像素大小
-    let size = match (node.w, node.h) {
-        (Some(w), Some(h)) => Some(Vec2::new(w, h)),
-        (Some(s), None) | (None, Some(s)) => Some(Vec2::splat(s)),
-        (None, None) => None,
-    };
-    let sprite = Sprite { size, color: node.color.map_or(Vec4::ONE, |c| c.0), ..image };
-    let transform = Transform2d {
-        translation: Vec2::new(node.x, node.y),
-        rotation: node.rotation.to_radians(),
-        scale: Vec2::splat(node.scale),
-        z: node.z,
-    };
-    entity.remove::<(Spin, Tappable)>().insert((sprite, transform, Declared(node.clone())));
-    if node.spin != 0.0 {
-        entity.insert(Spin(node.spin.to_radians()));
-    }
-    if node.tap {
-        entity.insert(Tappable);
-    }
 }
 
 #[cfg(test)]
