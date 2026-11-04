@@ -46,4 +46,6 @@
 - **修过的问题**：修了解锁旋转的测试太弱、第二个坑上方的平台会撞头、控制没挡住暂停和坏帧时间、起跳后一帧的预测接触点导致连跳、截短的测试上界和整跳贴在一起测不出截断。
 - **TS**：`nsh check` 通过 `examples/scene`、`examples/physics`、`examples/scene3d`、`examples/platformer`。
 - **iOS**：`cargo check --workspace --target aarch64-apple-ios` 通过。
-- **实跑**：`platformer`（release + `nsh dev --server-only`）在 Mac 上启动，dev server 显示 macOS host 已连接、热重载正常；从起点玩到终点的手感还没手测。
+- **实跑**：`platformer`（release + `nsh dev --server-only`）在 Mac 上启动，dev server 显示 macOS host 已连接、热重载正常；手测时发现两处卡顿，都修了，复测不卡：
+  - 同时按跳和前进时一卡一卡：物理固定 1/60 步长、没插值，120 Hz 屏上一帧动一帧不动。动态刚体改成插值显示（见 [physics2d.md](physics2d.md)）。
+  - 碰到金币时卡一下：第一次飘「+1」时渲染线程当场扫描系统字体（约 1/3 秒）。改成启动时在后台扫描（见 [m5-extensions.md](m5-extensions.md)）。
