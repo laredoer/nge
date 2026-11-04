@@ -3112,9 +3112,13 @@ dependencies = [
  "glam 0.34.2",
  "image",
  "log",
+ "nge-assets",
  "nge-core",
  "nge-ecs",
+ "nge-particles",
  "nge-render2d",
+ "nge-render3d",
+ "nge-text",
  "serde",
  "serde_json",
 ]
@@ -4641,7 +4645,25 @@ dependencies = [
  "nge-ecs",
  "nge-platform",
  "nge-render2d",
+ "nge-render3d",
  "nge-scene",
+]
+
+[[package]]
+name = "scene3d"
+version = "0.1.0"
+dependencies = [
+ "nge-assets",
+ "nge-core",
+ "nge-ecs",
+ "nge-particles",
+ "nge-platform",
+ "nge-render2d",
+ "nge-render3d",
+ "nge-scene",
+ "nge-text",
+ "nsh-core",
+ "serde_json",
 ]
 
 [[package]]

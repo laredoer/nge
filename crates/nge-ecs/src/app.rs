@@ -36,7 +36,7 @@ pub(crate) struct Last;
 pub(crate) type PropHandler = Box<dyn Fn(&mut World, Option<&JsonValue>)>;
 pub(crate) type CommandHandler = Box<dyn Fn(&mut World, &JsonValue)>;
 
-pub trait Plugin {
+pub trait Plugin: 'static {
     fn build(&self, app: &mut App);
 }
 
@@ -54,6 +54,7 @@ pub struct App {
     pub(crate) commands: HashMap<&'static str, CommandHandler>,
     /// 已注册的游戏 → NSH 通道名（State 和 Event 共用 NSH 的事件名空间）。
     pub(crate) outbound: HashSet<&'static str>,
+    plugins: HashSet<std::any::TypeId>,
     started: bool,
 }
 
@@ -83,6 +84,7 @@ impl App {
             props: HashMap::new(),
             commands: HashMap::new(),
             outbound: HashSet::new(),
+            plugins: HashSet::new(),
             started: false,
         };
         app.add_message::<NshCommand>();
@@ -103,9 +105,19 @@ impl App {
         self
     }
 
-    pub fn add_plugins(&mut self, plugin: impl Plugin) -> &mut Self {
+    /// 同一种插件只 build 一次，重复添加记 warn 后跳过。
+    pub fn add_plugins<P: Plugin>(&mut self, plugin: P) -> &mut Self {
+        if !self.plugins.insert(std::any::TypeId::of::<P>()) {
+            log::warn!("{} 已经加过，跳过", std::any::type_name::<P>());
+            return self;
+        }
         plugin.build(self);
         self
+    }
+
+    /// 某种插件加过没有（插件自己补依赖时用，避免重复添加）。
+    pub fn is_plugin_added<P: Plugin>(&self) -> bool {
+        self.plugins.contains(&std::any::TypeId::of::<P>())
     }
 
     pub fn add_systems<M>(
@@ -234,6 +246,39 @@ mod tests {
 
     #[derive(Resource, Default)]
     struct Log(Vec<String>);
+
+    #[test]
+    fn remembers_added_plugins() {
+        struct A;
+        impl Plugin for A {
+            fn build(&self, _: &mut App) {}
+        }
+        struct B;
+        impl Plugin for B {
+            fn build(&self, app: &mut App) {
+                assert!(app.is_plugin_added::<B>(), "build 时已经算加过，插件互相补依赖不会递归");
+            }
+        }
+        let mut app = App::new();
+        assert!(!app.is_plugin_added::<A>());
+        app.add_plugins(A).add_plugins(B);
+        assert!(app.is_plugin_added::<A>());
+    }
+
+    #[test]
+    fn adding_a_plugin_twice_builds_it_once() {
+        #[derive(Resource, Default)]
+        struct Builds(u32);
+        struct A;
+        impl Plugin for A {
+            fn build(&self, app: &mut App) {
+                app.world_mut().get_resource_or_insert_with(Builds::default).0 += 1;
+            }
+        }
+        let mut app = App::new();
+        app.add_plugins(A).add_plugins(A);
+        assert_eq!(app.world().resource::<Builds>().0, 1);
+    }
 
     #[test]
     fn startup_runs_once_before_update() {

@@ -34,8 +34,6 @@ pub const STRESS: PropKey<Stress> = PropKey::new("stress");
 /// 压力测试发射器的发射速度：寿命 1 秒左右，存活数被上限卡在 10k。
 const STRESS_RATE: f32 = 12_000.0;
 const BURST: u32 = 300;
-const FLOAT_SECONDS: f32 = 1.0;
-const FLOAT_SPEED: f32 = 60.0;
 const SPIN_SPEED: f32 = 0.6;
 const BADGE_SIZE: f32 = 72.0;
 const BADGE_MARGIN: f32 = 16.0;
@@ -55,12 +53,6 @@ struct Badge;
 
 #[derive(Component)]
 struct StressEmitter;
-
-/// 往上飘、渐渐消失的文字。
-#[derive(Component, Default)]
-struct Floater {
-    age: f32,
-}
 
 /// 点击次数，用来编飘字。
 #[derive(Resource, Default)]
@@ -84,7 +76,7 @@ pub fn with_assets(assets: AssetPlugin) -> App {
         .init_resource::<Taps>()
         .insert_resource(ClearColor(nge_core::wgpu::Color { r: 0.02, g: 0.03, b: 0.06, a: 1.0 }))
         .add_systems(Startup, setup)
-        .add_systems(Update, (tap, float_text, spin, place_badge, stress))
+        .add_systems(Update, (tap, spin, place_badge, stress))
         .add_systems(PostUpdate, status.after(nge_particles::ParticlesSimulated));
     app
 }
@@ -157,22 +149,10 @@ fn tap(mut commands: Commands, input: Res<Input>, handles: Res<Handles>, mut tap
         };
         commands.spawn((emitter, Transform2d::from_xy(p.world.x, p.world.y).with_z(10.0)));
         commands.spawn((
-            Floater::default(),
+            FloatingText::default(),
             Text2d::new(format!("BOOM x{}", taps.0)).with_font(handles.font).with_size(24.0),
             Transform2d::from_xy(p.world.x, p.world.y + 24.0),
         ));
-    }
-}
-
-fn float_text(mut commands: Commands, time: Res<Time>, mut q: Query<(Entity, &mut Floater, &mut Transform2d, &mut Text2d)>) {
-    for (entity, mut floater, mut t, mut text) in &mut q {
-        floater.age += time.delta;
-        if floater.age >= FLOAT_SECONDS {
-            commands.entity(entity).despawn();
-            continue;
-        }
-        t.translation.y += FLOAT_SPEED * time.delta;
-        text.color.w = 1.0 - floater.age / FLOAT_SECONDS;
     }
 }
 
@@ -270,7 +250,7 @@ mod tests {
         app.tick(VIEWPORT, 0.016);
         assert_eq!(app.world().resource::<Status>().particles, BURST);
         let world = app.world_mut();
-        let (text, t) = world.query_filtered::<(&Text2d, &Transform2d), With<Floater>>().single(world).unwrap();
+        let (text, t) = world.query_filtered::<(&Text2d, &Transform2d), With<FloatingText>>().single(world).unwrap();
         assert_eq!(text.text, "BOOM x1");
         assert_eq!(t.translation, Vec2::new(0.0, 24.0), "视图中心是世界原点");
 
@@ -279,7 +259,7 @@ mod tests {
             app.tick(VIEWPORT, 0.05);
         }
         let world = app.world_mut();
-        assert_eq!(world.query::<&Floater>().iter(world).count(), 0, "飘字一秒后消失");
+        assert_eq!(world.query::<&FloatingText>().iter(world).count(), 0, "飘字一秒后消失");
         assert_eq!(world.query::<&ParticleEmitter>().iter(world).count(), 0, "爆炸发射器死完后删除");
         assert_eq!(app.world().resource::<Status>().particles, 0);
     }

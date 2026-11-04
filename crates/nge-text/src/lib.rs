@@ -3,14 +3,16 @@
 //! [`Text2d`] 的位置取 `Transform2d`：默认是世界坐标（跟着 2D 相机走），带 [`ScreenText`] 时是视图内坐标
 //! （左上角原点、y 朝下，单位 point，不跟相机）。字体是资源（[`Font`]），加载完之前这段文字不画。
 
+mod floating;
 mod layout;
 mod renderer;
 
 use bevy_ecs::prelude::*;
 use glam::Vec4;
 use nge_assets::{Asset, AssetApp, Handle, LoadContext};
-use nge_ecs::{App, Plugin};
+use nge_ecs::{App, Plugin, Update};
 
+pub use floating::FloatingText;
 pub use layout::Anchor;
 
 /// 字体文件（`.ttf` / `.otf`）。字体名在渲染线程注册进字体库时才读。
@@ -79,12 +81,12 @@ pub struct TextPlugin;
 impl Plugin for TextPlugin {
     fn build(&self, app: &mut App) {
         nge_assets::ensure_plugin(app);
-        app.init_asset::<Font>().add_renderer(renderer::TextRenderer::default());
+        app.init_asset::<Font>().add_systems(Update, floating::float).add_renderer(renderer::TextRenderer::default());
     }
 }
 
 pub mod prelude {
-    pub use crate::{Anchor, Font, FontId, ScreenText, Text2d, TextPlugin};
+    pub use crate::{Anchor, FloatingText, Font, FontId, ScreenText, Text2d, TextPlugin};
 }
 
 #[cfg(test)]

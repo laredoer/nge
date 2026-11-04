@@ -8,7 +8,11 @@ publish.workspace = true
 [dependencies]
 nge-core.workspace = true
 nge-ecs.workspace = true
+nge-assets.workspace = true
 nge-render2d.workspace = true
+nge-render3d.workspace = true
+nge-text.workspace = true
+nge-particles.workspace = true
 bevy_ecs.workspace = true
 glam.workspace = true
 serde.workspace = true

@@ -5,6 +5,8 @@ use glam::Vec4;
 use nge_core::{EventKey, PropKey};
 use serde::{Deserialize, Serialize};
 
+use crate::nodes::{AmbientNode, Camera3dNode, EmitterNode, LightNode, ModelNode, TextNode};
+
 pub const SCENE: PropKey<Scene> = PropKey::new("scene");
 pub const TAP: EventKey<Tap> = EventKey::new("tap");
 
@@ -14,6 +16,12 @@ pub struct Scene {
     pub background: Option<Color>,
     pub camera: Option<CameraNode>,
     pub sprites: Vec<SpriteNode>,
+    pub texts: Vec<TextNode>,
+    pub emitters: Vec<EmitterNode>,
+    pub models: Vec<ModelNode>,
+    pub camera3d: Option<Camera3dNode>,
+    pub lights: Vec<LightNode>,
+    pub ambient: Option<AmbientNode>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -47,7 +55,9 @@ pub struct SpriteNode {
     pub w: Option<f32>,
     pub h: Option<f32>,
     pub color: Option<Color>,
+    /// 注册过的纹理名，或 `asset:/` 路径（配 `grid` 当图集）。
     pub texture: Option<String>,
+    pub grid: Option<[u32; 2]>,
     #[serde(default)]
     pub frame: u32,
     #[serde(default)]
@@ -60,12 +70,14 @@ fn one() -> f32 {
     1.0
 }
 
-/// 点中了可点击的精灵。x / y 是世界坐标。
+/// 点中了可点击的精灵或模型。x / y 是指针的 2D 世界坐标；点中模型时 `point` 是 3D 命中点。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Tap {
     pub id: String,
     pub x: f32,
     pub y: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub point: Option<[f32; 3]>,
 }
 
 /// `"#rrggbb"` / `"#rrggbbaa"`（sRGB），解析后存线性 RGBA。

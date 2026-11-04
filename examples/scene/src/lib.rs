@@ -2,12 +2,13 @@
 
 use nge_ecs::App;
 use nge_render2d::{Grid, Render2dPlugin};
+use nge_render3d::Render3dPlugin;
 use nge_scene::ScenePlugin;
 
 pub fn factory() -> nge_core::GameFactory {
     nge_ecs::factory(|| {
         let mut app = App::new();
-        app.add_plugins(Render2dPlugin).add_plugins(ScenePlugin::new().atlas(
+        app.add_plugins(Render3dPlugin).add_plugins(Render2dPlugin).add_plugins(ScenePlugin::new().atlas(
             "ships",
             include_bytes!("../assets/ships.png"),
             Grid { cols: 4, rows: 4 },
