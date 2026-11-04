@@ -65,6 +65,7 @@
 | **相机（2D）** | `scene.camera` 的 `follow` / `smooth` / `bounds`，`shake` command；见 [camera.md](camera.md) | `examples/scene`：相机平滑跟着飞船、到边上停住，点飞船时震屏 |
 | **暂停和时间缩放** | `Time.scale` / `real_delta`，`scene.timeScale`；见 [time.md](time.md) | `examples/scene`：空格暂停 / 继续，暂停时补间、动画、旋转都停住 |
 | **瓦片地图** | `scene.tilemaps`：按图集格子画，实心格子合并成静态碰撞体，`collide` 报地图 id；见 [tilemap.md](tilemap.md) | `examples/physics`：地面、墙和两块平台是瓦片地图，球和箱子落在上面 |
+| **平台跳跃示例** | 物理加接触查询（`Physics::contacts`）和锁旋转（`fixedRotation`）；Rust 角色控制 + TSX 关卡；见 [platformer.md](platformer.md) | `examples/platformer`：键盘跑跳、相机跟随、吃金币、掉坑重来、到终点通关 |
 | **M6 Android** | SurfaceView 和 Vulkan，JNI 胶水层 | 示例游戏在 Android 真机上能跑 |
 
 ## 待定

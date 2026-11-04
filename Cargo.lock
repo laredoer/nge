@@ -4431,6 +4431,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
 
 [[package]]
+name = "platformer"
+version = "0.1.0"
+dependencies = [
+ "bevy_ecs",
+ "nge-assets",
+ "nge-audio",
+ "nge-core",
+ "nge-ecs",
+ "nge-physics2d",
+ "nge-platform",
+ "nge-render2d",
+ "nge-render3d",
+ "nge-scene",
+ "nsh-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "png"
 version = "0.17.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"

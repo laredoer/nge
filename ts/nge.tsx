@@ -56,6 +56,8 @@ export interface BodyNode {
   angularVelocity?: number;
   /** 碰撞开始 / 结束时发 collide 事件。 */
   collide?: boolean;
+  /** 不让碰撞把它转起来（平台游戏的角色）。 */
+  fixedRotation?: boolean;
 }
 
 export type Anchor = "top-left" | "top" | "top-right" | "left" | "center" | "right" | "bottom-left" | "bottom" | "bottom-right";

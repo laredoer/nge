@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/nge-assets", "crates/nge-audio", "crates/nge-core", "crates/nge-ecs", "crates/nge-nsh", "crates/nge-particles", "crates/nge-physics2d", "crates/nge-platform", "crates/nge-render2d", "crates/nge-render3d", "crates/nge-scene", "crates/nge-text", "examples/bounce", "examples/sprites", "examples/dodge", "examples/scene", "examples/model", "examples/effects", "examples/scene3d", "examples/physics"]
+members = ["crates/nge-assets", "crates/nge-audio", "crates/nge-core", "crates/nge-ecs", "crates/nge-nsh", "crates/nge-particles", "crates/nge-physics2d", "crates/nge-platform", "crates/nge-render2d", "crates/nge-render3d", "crates/nge-scene", "crates/nge-text", "examples/bounce", "examples/sprites", "examples/dodge", "examples/scene", "examples/model", "examples/effects", "examples/scene3d", "examples/physics", "examples/platformer"]
 
 [workspace.package]
 version = "0.1.0"

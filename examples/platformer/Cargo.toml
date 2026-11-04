@@ -1,0 +1,24 @@
+[package]
+name = "platformer"
+description = "nge 示例：平台跳跃（瓦片地图关卡 + 相机跟随 + 键盘控制的角色）"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+nge-core.workspace = true
+nge-ecs.workspace = true
+nge-assets.workspace = true
+nge-audio.workspace = true
+nge-physics2d.workspace = true
+nge-render2d.workspace = true
+nge-render3d.workspace = true
+nge-scene.workspace = true
+nge-platform = { workspace = true, features = ["dev"] }
+nsh-core.workspace = true
+# derive(Resource) 展开时需要 bevy_ecs 路径
+bevy_ecs.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

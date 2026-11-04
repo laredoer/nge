@@ -11,7 +11,7 @@ use rapier2d::prelude::{
     RigidBodyHandle, RigidBodySet, SoftBodySet, SoftBodyTearEvent,
 };
 
-use crate::{Collider, Collision, Impulse, MAX_STEPS, RigidBody, STEP, Shape, Velocity};
+use crate::{Collider, Collision, Contact, Impulse, LockRotation, MAX_STEPS, RigidBody, STEP, Shape, Velocity};
 
 /// rapier 的世界，加上实体和刚体 / 碰撞体的对应关系。
 #[derive(Resource)]
@@ -29,6 +29,7 @@ struct Handles {
     collider: Option<ColliderHandle>,
     kind: Option<RigidBody>,
     shape: Option<Collider>,
+    locked: bool,
     transform: (Vec2, f32),
     velocity: Velocity,
 }
@@ -54,6 +55,24 @@ impl Physics {
     pub fn mass(&self, entity: Entity) -> Option<f32> {
         let body = self.entities.get(&entity)?.body?;
         Some(self.world.bodies.get(body)?.mass())
+    }
+
+    /// 上一步结束时正在接触的碰撞体（交给求解器的接触点，含很近还没碰上的预测点；sensor 的重叠不算）。
+    /// 实体还没建到物理里时是空的。`other` 是碰撞体所在的实体（瓦片地图是它下面的子实体）。
+    pub fn contacts(&self, entity: Entity) -> Vec<Contact> {
+        let Some(collider) = self.entities.get(&entity).and_then(|h| h.collider) else { return Vec::new() };
+        let entity_of = |c: ColliderHandle| self.world.colliders.get(c).map(|c| Entity::from_bits(c.user_data as u64));
+        self.world
+            .contact_pairs_with(collider)
+            .filter(|pair| pair.has_any_active_contact())
+            .filter_map(|pair| {
+                // 和 has_any_active_contact 看同一组：交给求解器的接触点（含预测距离以内的）
+                let manifold = pair.solver_manifolds().iter().find(|m| !m.data.solver_contacts.is_empty())?;
+                // rapier 的法线从 collider1 指向 collider2
+                let (other, normal) = if pair.collider1 == collider { (pair.collider2, -manifold.data.normal) } else { (pair.collider1, manifold.data.normal) };
+                Some(Contact { other: entity_of(other)?, normal: vec2(normal) })
+            })
+            .collect()
     }
 
     /// （刚体数，碰撞体数）。
@@ -88,8 +107,19 @@ pub(crate) fn remove(
     mut bodies: RemovedComponents<RigidBody>,
     mut colliders: RemovedComponents<Collider>,
     left: Query<(Has<RigidBody>, Has<Collider>)>,
+    mut unlocked: RemovedComponents<LockRotation>,
     mut rebuild: Commands,
 ) {
+    // 去掉了锁：标成变了，`create` 里解锁
+    for entity in unlocked.read() {
+        if let Ok(mut e) = rebuild.get_entity(entity) {
+            e.queue(|mut e: EntityWorldMut| {
+                if let Some(mut b) = e.get_mut::<RigidBody>() {
+                    b.set_changed();
+                }
+            });
+        }
+    }
     for entity in bodies.read().chain(colliders.read()) {
         match left.get(entity) {
             Ok((false, false)) | Err(_) => drop(physics.forget(entity)),
@@ -112,24 +142,39 @@ pub(crate) fn remove(
     }
 }
 
-type Changed2 = Or<(Changed<RigidBody>, Changed<Collider>)>;
+type Changed2 = Or<(Changed<RigidBody>, Changed<Collider>, Changed<LockRotation>)>;
 
 /// 新加的刚体 / 碰撞体，或者种类、形状变了的：（重新）建到物理里。值没变的重新插入不动。
 pub(crate) fn create(
     mut physics: ResMut<Physics>,
-    query: Query<(Entity, Option<&RigidBody>, Option<&Collider>, Option<&Transform2d>, Option<&Velocity>), Changed2>,
+    query: Query<(Entity, Option<&RigidBody>, Option<&Collider>, Option<&Transform2d>, Option<&Velocity>, Has<LockRotation>), Changed2>,
 ) {
-    for (entity, kind, shape, transform, velocity) in &query {
+    let physics = &mut *physics;
+    for (entity, kind, shape, transform, velocity, locked) in &query {
         let (kind, shape) = (kind.copied(), shape.copied());
-        if physics.entities.get(&entity).is_some_and(|h| h.kind == kind && h.shape == shape) {
+        // 只挂了 LockRotation、还没有刚体和碰撞体的实体不建
+        if kind.is_none() && shape.is_none() && !physics.entities.contains_key(&entity) {
             continue;
         }
-        let transform = transform.copied().unwrap_or_default();
-        let old = physics.forget(entity);
-        // 重建时没有 Velocity 组件就沿用物理里原来的速度
-        let velocity = velocity.copied().or(old.map(|h| h.velocity)).unwrap_or_default();
-        let handles = build(&mut physics.world, entity, kind, shape, (transform.translation, transform.rotation), velocity);
-        physics.entities.insert(entity, handles);
+        if !physics.entities.get(&entity).is_some_and(|h| h.kind == kind && h.shape == shape) {
+            let transform = transform.copied().unwrap_or_default();
+            let old = physics.forget(entity);
+            // 重建时没有 Velocity 组件就沿用物理里原来的速度
+            let velocity = velocity.copied().or(old.map(|h| h.velocity)).unwrap_or_default();
+            let handles = build(&mut physics.world, entity, kind, shape, (transform.translation, transform.rotation), velocity);
+            physics.entities.insert(entity, handles);
+        }
+        let Some(h) = physics.entities.get_mut(&entity) else { continue };
+        if h.locked != locked {
+            if let Some(body) = h.body.and_then(|b| physics.world.bodies.get_mut(b)) {
+                body.lock_rotations(locked, true);
+                // rapier 锁旋转只把转动惯量当成无穷大，不管已有的角速度：一起停下
+                if locked {
+                    body.set_angvel(0.0, true);
+                }
+            }
+            h.locked = locked;
+        }
     }
 }
 
@@ -174,7 +219,7 @@ fn build(world: &mut PhysicsWorld, entity: Entity, kind: Option<RigidBody>, shap
     {
         body.set_additional_mass(1.0, true);
     }
-    Handles { body, collider, kind, shape, transform: at, velocity }
+    Handles { body, collider, kind, shape, locked: false, transform: at, velocity }
 }
 
 /// 收集 rapier 的碰撞事件。

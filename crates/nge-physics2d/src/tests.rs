@@ -241,3 +241,67 @@ fn bad_frame_times_do_not_freeze_the_simulation() {
     steps(&mut app, 5);
     assert!(pos(&app, e).y < 0.0);
 }
+
+#[test]
+fn contacts_report_the_other_side_and_its_normal() {
+    let mut app = app();
+    let g = ground(&mut app);
+    let wall = app.world_mut().spawn((Collider::rect(Vec2::new(20.0, 200.0)), at(-20.0, 100.0))).id();
+    let b = app.world_mut().spawn((RigidBody::Dynamic, Collider::rect(Vec2::splat(20.0)), at(0.0, 30.0))).id();
+    assert!(app.world().resource::<Physics>().contacts(b).is_empty(), "还没建到物理里");
+    steps(&mut app, 60);
+    let contacts = app.world().resource::<Physics>().contacts(b);
+    let on = |e: Entity| contacts.iter().find(|c| c.other == e).map(|c| c.normal);
+    let up = on(g).expect("站在地上");
+    assert!((up - Vec2::Y).length() < 1e-3, "法线从对方指向自己：地面朝上 {up}");
+    let side = on(wall).expect("贴着墙");
+    assert!((side - Vec2::X).length() < 1e-3, "墙在左边，法线朝右 {side}");
+    let theirs = app.world().resource::<Physics>().contacts(g);
+    assert!(theirs.iter().any(|c| c.other == b && (c.normal + Vec2::Y).length() < 1e-3), "从地面看，法线朝下");
+    let air = app.world_mut().spawn((RigidBody::Dynamic, Collider::circle(5.0), at(300.0, 300.0))).id();
+    steps(&mut app, 1);
+    assert!(app.world().resource::<Physics>().contacts(air).is_empty());
+}
+
+#[test]
+fn locked_rotation_keeps_a_box_upright() {
+    let mut app = app();
+    ground(&mut app);
+    // 偏心落在台阶边上的箱子会翻；锁住旋转的不翻
+    app.world_mut().spawn((RigidBody::Fixed, Collider::rect(Vec2::splat(20.0)), at(0.0, 10.0)));
+    let free = app.world_mut().spawn((RigidBody::Dynamic, Collider::rect(Vec2::splat(20.0)), at(14.0, 40.0))).id();
+    let locked = app.world_mut().spawn((RigidBody::Dynamic, LockRotation, Collider::rect(Vec2::splat(20.0)), at(-14.0, 40.0))).id();
+    steps(&mut app, 120);
+    let rot = |app: &App, e: Entity| app.world().get::<Transform2d>(e).unwrap().rotation;
+    assert!(rot(&app, free).abs() > 0.3, "没锁的翻了 {}", rot(&app, free));
+    assert!(rot(&app, locked).abs() < 1e-3, "锁住的不转 {}", rot(&app, locked));
+    // 去掉锁，再放回台阶边上（不给角速度）：这回碰撞会让它翻
+    app.world_mut().entity_mut(locked).remove::<LockRotation>().insert(at(-14.0, 40.0));
+    steps(&mut app, 120);
+    assert!(rot(&app, locked).abs() > 0.3, "去掉锁以后会翻 {}", rot(&app, locked));
+}
+
+#[test]
+fn locking_stops_existing_spin() {
+    let mut app = app();
+    let b = app.world_mut().spawn((RigidBody::Dynamic, LockRotation, Collider::rect(Vec2::splat(10.0)), at(0.0, 0.0), Velocity { linear: Vec2::ZERO, angular: 5.0 })).id();
+    steps(&mut app, 30);
+    assert!(app.world().get::<Transform2d>(b).unwrap().rotation.abs() < 1e-3, "锁住时原来的角速度也停");
+    let only_lock = app.world_mut().spawn(LockRotation).id();
+    steps(&mut app, 1);
+    let before = app.world().resource::<Physics>().contacts(only_lock).len();
+    app.world_mut().despawn(only_lock);
+    steps(&mut app, 1);
+    assert_eq!(before, 0);
+}
+
+#[test]
+fn sensors_are_not_contacts() {
+    let mut app = app();
+    ground(&mut app);
+    let zone = app.world_mut().spawn((Collider { sensor: true, ..Collider::rect(Vec2::splat(40.0)) }, at(0.0, 10.0))).id();
+    let b = app.world_mut().spawn((RigidBody::Dynamic, Collider::rect(Vec2::splat(20.0)), at(0.0, 30.0))).id();
+    steps(&mut app, 60);
+    let contacts = app.world().resource::<Physics>().contacts(b);
+    assert!(!contacts.is_empty() && contacts.iter().all(|c| c.other != zone), "只算地面，不算 sensor {contacts:?}");
+}

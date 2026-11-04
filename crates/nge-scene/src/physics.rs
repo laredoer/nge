@@ -7,7 +7,7 @@ use bevy_ecs::system::EntityCommands;
 use glam::Vec2;
 use nge_core::{CommandKey, EventKey};
 use nge_ecs::Outbox;
-use nge_physics2d::{Collider, Collision, Impulse, Physics, RigidBody, Velocity};
+use nge_physics2d::{Collider, Collision, Impulse, LockRotation, Physics, RigidBody, Velocity};
 use nge_render2d::Sprite;
 use serde::{Deserialize, Serialize};
 
@@ -51,6 +51,8 @@ pub struct BodyNode {
     /// 度 / 秒。
     pub angular_velocity: f32,
     pub collide: bool,
+    /// 不让碰撞把它转起来（平台游戏的角色）。
+    pub fixed_rotation: bool,
 }
 
 impl Default for BodyNode {
@@ -68,6 +70,7 @@ impl Default for BodyNode {
             velocity: [0.0; 2],
             angular_velocity: 0.0,
             collide: false,
+            fixed_rotation: false,
         }
     }
 }
@@ -96,7 +99,7 @@ pub struct Push {
 /// 按精灵节点的 `body` 挂上或拿掉物理组件。`size` 是精灵声明的大小（没乘缩放）。
 pub(crate) fn apply_body(entity: &mut EntityCommands, before: Option<&SpriteNode>, node: &SpriteNode, size: Option<Vec2>) {
     let Some(body) = &node.body else {
-        entity.remove::<(RigidBody, Collider, Velocity, Impulse)>();
+        entity.remove::<(RigidBody, Collider, Velocity, Impulse, LockRotation)>();
         return;
     };
     let kind = match body.kind {
@@ -106,6 +109,11 @@ pub(crate) fn apply_body(entity: &mut EntityCommands, before: Option<&SpriteNode
     };
     // 不覆盖 Rust 系统设了还没用掉的冲量
     entity.insert(kind).insert_if_new(Impulse::default());
+    if body.fixed_rotation {
+        entity.insert(LockRotation);
+    } else {
+        entity.remove::<LockRotation>();
+    }
     match collider(body, size, node.scale) {
         Some(c) => entity.insert(c),
         None => {
@@ -288,6 +296,16 @@ mod tests {
         assert!(first.started);
         assert_eq!([first.a.as_str(), first.b.as_str()].map(|s| s == "ball" || s == "wall"), [true, true]);
         assert!(get::<Transform2d>(&mut app, "ball").unwrap().translation.x < 30.0, "被墙挡住");
+    }
+
+    #[test]
+    fn fixed_rotation_locks_and_unlocks() {
+        let mut app = app();
+        let scene = |fixed: bool| json!({ "sprites": [{ "id": "p", "w": 10, "body": { "fixedRotation": fixed } }] });
+        frame(&mut app, Some(scene(true)));
+        assert!(get::<LockRotation>(&mut app, "p").is_some());
+        frame(&mut app, Some(scene(false)));
+        assert!(get::<LockRotation>(&mut app, "p").is_none());
     }
 
     #[test]

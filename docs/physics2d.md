@@ -24,6 +24,7 @@
 | `Collider` | `shape: Shape::Rect(Vec2)`（整个宽高）或 `Shape::Circle(f32)`（半径），`restitution`（默认 0）、`friction`（0.5）、`density`（1）、`sensor`（false）、`events`（false，碰撞时发消息） |
 | `Velocity` | `linear: Vec2`、`angular: f32`（弧度 / 秒）。动态刚体每步写回；游戏改了就推给 rapier |
 | `Impulse` | `Vec2`，下一步施加到刚体上后清零 |
+| `LockRotation` | 锁住旋转（平台游戏的角色），加上去掉都不重建刚体；见 [platformer.md](platformer.md) |
 
 - 单位：世界坐标的 point。`PhysicsPlugin` 的 `pixels_per_meter`（默认 100）交给 rapier 的 `length_unit`，让它的容差按 point 缩放；重力默认 `(0, -981)` point / s²。
 - 同步方向：
@@ -32,6 +33,10 @@
 - 实体删除或去掉 `RigidBody` 时删除刚体和它的碰撞体；只有 `Collider` 没有 `RigidBody` 的实体当成固定碰撞体。
 - 固定步长 1/60 秒，每帧按 `Time.delta` 累计，最多补 4 步（卡顿时宁可变慢也不越补越多）。不做插值。
 - 系统排在 `PostUpdate` 的 `PhysicsStepped` 里：游戏在 `Update` 里改速度、施加冲量，这一帧就生效。
+
+### 接触查询
+
+`Physics::contacts(entity)` 返回上一步结束时正在接触的碰撞体和法线（从对方指向自己），用来判断站没站在地上；见 [platformer.md](platformer.md)。
 
 ### 碰撞消息
 
