@@ -97,9 +97,9 @@ fn playing(hud: Res<Hud>) -> bool {
     !hud.paused && !hud.over
 }
 
-fn setup(mut commands: Commands, mut assets: ResMut<Assets>) {
-    let texture = assets.load_png(include_bytes!("../assets/ships.png")).expect("内置图集");
-    let atlas = assets.atlas(texture, Grid { cols: 4, rows: 4 });
+fn setup(mut commands: Commands, mut images: ResMut<Assets<Image>>, mut atlases: ResMut<Atlases>) {
+    let texture = images.load_png(include_bytes!("../assets/ships.png")).expect("内置图集");
+    let atlas = atlases.add(texture, Grid { cols: 4, rows: 4 });
     commands.insert_resource(ClearColor(nge_core::wgpu::Color { r: 0.01, g: 0.01, b: 0.03, a: 1.0 }));
     commands.spawn(Camera2d::default());
     commands.spawn((

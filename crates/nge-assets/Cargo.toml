@@ -1,0 +1,16 @@
+[package]
+name = "nge-assets"
+description = "NSH 游戏引擎资源层：asset:/ 路径、后台加载、2D / 3D 共用的贴图"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+nge-core.workspace = true
+nge-ecs.workspace = true
+bevy_ecs.workspace = true
+glam.workspace = true
+image = { workspace = true, features = ["jpeg"] }
+ureq = { version = "3", default-features = false }
+percent-encoding = "2"
+log.workspace = true

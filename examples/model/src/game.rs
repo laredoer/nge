@@ -54,8 +54,8 @@ pub fn app() -> App {
     app
 }
 
-fn setup(mut commands: Commands, mut assets: ResMut<Assets3d>) {
-    let model = assets.load_gltf(include_bytes!("../assets/crate.glb")).expect("内置模型");
+fn setup(mut commands: Commands, mut assets: ResMut<Assets3d>, mut images: ResMut<Assets<Image>>) {
+    let model = assets.load_gltf(&mut images, include_bytes!("../assets/crate.glb")).expect("内置模型");
     let ground = assets.add_mesh(Mesh::plane(8.0)).expect("内置网格");
     let grass = assets.add_material(Material { base_color: Vec4::new(0.2, 0.35, 0.2, 1.0), roughness: 0.9, ..Default::default() });
     commands.spawn((Model3d(model), Spinner, Transform3d::from_xyz(0.0, 0.5, 0.0)));

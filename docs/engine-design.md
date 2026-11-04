@@ -56,7 +56,7 @@
 | **M2 NSH 绑定（Rust）** | `game()` 元素、场景和 NSH signal 绑定、事件回传 | 用纯 Rust 写的示例游戏，HUD 用 NSH 写 |
 | **M3 TSX** | `<GameView>`（`gameView()`）、声明式场景（`nge-scene`）、TS 类型、热更新（自写 dev host） | 改 TSX 后热更新场景，不重启 |
 | **M4 基础 3D** | 网格、深度缓冲、3D 相机、简化 PBR 材质、方向光/点光源、glTF（`nge-render3d`） | 加载并显示一个带贴图的 glTF 模型 |
-| **M5 扩展** | 文字、粒子、音频、物理（可选） | — |
+| **M5 扩展** | 资源层（`nge-assets`，`asset:/` 异步加载，2D / 3D 共用贴图）、文字（`nge-text`）、2D 粒子（`nge-particles`）；音频、物理放到之后 | 贴图 / 字体 / glTF 异步加载，点击炸粒子并飘字，Mac 上 10k 粒子 120fps |
 | **M6 Android** | SurfaceView 和 Vulkan，JNI 胶水层 | 示例游戏在 Android 真机上能跑 |
 
 ## 待定

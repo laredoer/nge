@@ -3,7 +3,7 @@
 use bevy_ecs::prelude::*;
 use glam::Vec2;
 use nge_ecs::{Input, Outbox, Time};
-use nge_render2d::{Assets, Sprite, Transform2d};
+use nge_render2d::{Assets, Atlases, Image, Sprite, Transform2d};
 
 use crate::protocol::{TAP, Tap};
 use crate::sync::SceneId;
@@ -24,14 +24,15 @@ pub(crate) fn spin(time: Res<Time>, mut q: Query<(&Spin, &mut Transform2d)>) {
 
 pub(crate) fn tap(
     input: Res<Input>,
-    assets: Res<Assets>,
+    images: Res<Assets<Image>>,
+    atlases: Res<Atlases>,
     sprites: Query<(&SceneId, &Transform2d, &Sprite), With<Tappable>>,
     mut outbox: ResMut<Outbox>,
 ) {
     for p in input.pointers_pressed() {
         let hit = sprites
             .iter()
-            .filter(|(_, t, s)| contains(t, assets.sprite_size(s), p.world))
+            .filter(|(_, t, s)| contains(t, atlases.sprite_size(&images, s), p.world))
             .max_by(|a, b| a.1.z.total_cmp(&b.1.z));
         if let Some((id, ..)) = hit {
             outbox.send(TAP, &Tap { id: id.0.clone(), x: p.world.x, y: p.world.y });

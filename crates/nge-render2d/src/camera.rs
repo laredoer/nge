@@ -35,6 +35,12 @@ impl Camera2d {
         let local = (screen - size / 2.0) * Vec2::new(1.0, -1.0) / self.zoom.max(MIN_ZOOM);
         Vec2::from_angle(self.rotation).rotate(local) + self.position
     }
+
+    /// 世界坐标 → 视图内坐标（左上角原点，y 朝下），[`Self::screen_to_world`] 的逆。
+    pub fn world_to_screen(&self, size: Vec2, world: Vec2) -> Vec2 {
+        let local = Vec2::from_angle(-self.rotation).rotate(world - self.position) * self.zoom.max(MIN_ZOOM);
+        local * Vec2::new(1.0, -1.0) + size / 2.0
+    }
 }
 
 /// 精灵的位置、旋转（弧度，逆时针）、缩放和绘制顺序（z 大的在上面）。
@@ -93,6 +99,15 @@ mod tests {
         let size = Vec2::new(390.0, 844.0);
         for world in [Vec2::ZERO, Vec2::new(12.0, 34.0), Vec2::new(-50.0, 8.0)] {
             assert_close(cam.screen_to_world(size, project(&cam, size, world)), world);
+        }
+    }
+
+    #[test]
+    fn world_to_screen_matches_the_projection() {
+        let cam = Camera2d { position: Vec2::new(30.0, -20.0), zoom: 2.5, rotation: 0.7 };
+        let size = Vec2::new(390.0, 844.0);
+        for world in [Vec2::ZERO, Vec2::new(12.0, 34.0), Vec2::new(-50.0, 8.0)] {
+            assert_close(cam.world_to_screen(size, world), project(&cam, size, world));
         }
     }
 

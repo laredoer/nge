@@ -60,9 +60,9 @@ pub fn app() -> App {
     app
 }
 
-fn setup(mut commands: Commands, mut assets: ResMut<Assets>, mut rng: ResMut<Rng>, screen: Res<Screen>) {
-    let texture = assets.load_png(include_bytes!("../assets/ships.png")).expect("内置图集");
-    let atlas = assets.atlas(texture, Grid { cols: 4, rows: 4 });
+fn setup(mut commands: Commands, mut images: ResMut<Assets<Image>>, mut atlases: ResMut<Atlases>, mut rng: ResMut<Rng>, screen: Res<Screen>) {
+    let texture = images.load_png(include_bytes!("../assets/ships.png")).expect("内置图集");
+    let atlas = atlases.add(texture, Grid { cols: 4, rows: 4 });
     commands.spawn(Camera2d::default());
     let count = std::env::var(COUNT_ENV).ok().and_then(|v| v.parse().ok()).unwrap_or(DEFAULT_COUNT);
     let half = screen.size / 2.0;

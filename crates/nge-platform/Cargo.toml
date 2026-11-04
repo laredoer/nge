@@ -7,6 +7,7 @@ publish.workspace = true
 
 [dependencies]
 nge-core.workspace = true
+nge-assets.workspace = true
 serde_json.workspace = true
 log.workspace = true
 raw-window-handle.workspace = true

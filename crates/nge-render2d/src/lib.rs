@@ -8,12 +8,13 @@ mod camera;
 mod renderer;
 mod sprite;
 
-pub use assets::{AtlasId, Assets, Grid, MAX_TEXTURE_SIDE, TextureId};
+pub use assets::{AtlasId, Atlases, Grid, TextureId};
+pub use nge_assets::{AssetPlugin, AssetServer, Assets, Image, ImageId, MAX_TEXTURE_SIDE};
 pub use camera::{Camera2d, Transform2d};
 pub use nge_ecs::ClearColor;
 pub use renderer::{PointerWorld, Render2dPlugin};
-pub use sprite::{Sprite, SpriteImage};
+pub use sprite::{Sprite, SpriteImage, SpriteInstance, SpriteInstances};
 
 pub mod prelude {
-    pub use crate::{Assets, Camera2d, ClearColor, Grid, Render2dPlugin, Sprite, Transform2d};
+    pub use crate::{AssetServer, Assets, Atlases, Camera2d, ClearColor, Grid, Image, Render2dPlugin, Sprite, Transform2d};
 }

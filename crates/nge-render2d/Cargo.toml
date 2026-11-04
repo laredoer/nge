@@ -8,9 +8,9 @@ publish.workspace = true
 [dependencies]
 nge-core.workspace = true
 nge-ecs.workspace = true
+nge-assets.workspace = true
 bevy_ecs.workspace = true
 glam.workspace = true
-image.workspace = true
 bytemuck.workspace = true
 log.workspace = true
 
