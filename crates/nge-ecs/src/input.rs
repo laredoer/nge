@@ -1,4 +1,7 @@
-//! 统一的 Pointer 输入：NSH 的 touch command 转成按 id 跟踪的指针，带本帧边沿状态。
+//! 统一的 Pointer 输入：NSH 的 touch command 转成按 id 跟踪的指针，带本帧边沿状态；
+//! 平台层的 key command 记成按着的键（键名是 Web `KeyboardEvent.code`，如 `KeyA`、`ArrowLeft`）。
+
+use std::collections::BTreeSet;
 
 use bevy_ecs::prelude::Resource;
 use glam::Vec2;
@@ -21,6 +24,9 @@ pub struct Pointer {
 #[derive(Resource, Debug, Default)]
 pub struct Input {
     pointers: Vec<Pointer>,
+    keys_down: BTreeSet<String>,
+    keys_pressed: BTreeSet<String>,
+    keys_released: BTreeSet<String>,
 }
 
 impl Input {
@@ -71,6 +77,41 @@ impl Input {
         self.pointers.iter().filter(|p| p.down)
     }
 
+    /// 收到一次按键变化。自动重复（`repeat`）不改状态；没按过的松开不算。
+    pub fn key(&mut self, code: &str, down: bool, repeat: bool) {
+        if down && !repeat && self.keys_down.insert(code.to_owned()) {
+            self.keys_pressed.insert(code.to_owned());
+        } else if !down && self.keys_down.remove(code) {
+            self.keys_released.insert(code.to_owned());
+        }
+    }
+
+    /// 现在按着。
+    pub fn key_down(&self, code: &str) -> bool {
+        self.keys_down.contains(code)
+    }
+
+    /// 这一帧刚按下。
+    pub fn key_pressed(&self, code: &str) -> bool {
+        self.keys_pressed.contains(code)
+    }
+
+    /// 这一帧刚松开（同一帧里按下又松开时 `key_pressed` 也是 true）。
+    pub fn key_released(&self, code: &str) -> bool {
+        self.keys_released.contains(code)
+    }
+
+    pub fn keys_down(&self) -> impl Iterator<Item = &str> {
+        self.keys_down.iter().map(String::as_str)
+    }
+
+    /// `negative` 里有键按着时 -1，`positive` 里有键按着时 1，都按或都没按是 0。
+    /// 只看现在按着的：同一帧里按下又松开的短按要用 `key_pressed` 兜底。
+    pub fn axis(&self, negative: &[&str], positive: &[&str]) -> f32 {
+        let any = |codes: &[&str]| codes.iter().any(|c| self.key_down(c));
+        f32::from(i8::from(any(positive)) - i8::from(any(negative)))
+    }
+
     /// 相机插件用它把 screen 换算成 world。
     pub fn map_world(&mut self, f: impl Fn(Vec2) -> Vec2) {
         for p in &mut self.pointers {
@@ -84,6 +125,8 @@ impl Input {
         for p in &mut self.pointers {
             p.just_pressed = false;
         }
+        self.keys_pressed.clear();
+        self.keys_released.clear();
     }
 }
 
@@ -152,6 +195,41 @@ mod tests {
         input.touch(End, 1, Vec2::ONE);
         input.end_frame();
         assert_eq!(input.pointers().count(), 0);
+    }
+
+    #[test]
+    fn keys_down_pressed_released() {
+        let mut input = Input::default();
+        input.key("KeyA", true, false);
+        assert!(input.key_down("KeyA") && input.key_pressed("KeyA") && !input.key_released("KeyA"));
+        input.end_frame();
+        input.key("KeyA", true, true);
+        assert!(input.key_down("KeyA") && !input.key_pressed("KeyA"), "自动重复不算新按下");
+        input.end_frame();
+        input.key("KeyA", false, false);
+        assert!(!input.key_down("KeyA") && input.key_released("KeyA"));
+        input.end_frame();
+        assert!(!input.key_released("KeyA"));
+
+        input.key("Space", true, false);
+        input.key("Space", false, false);
+        assert!(input.key_pressed("Space") && input.key_released("Space") && !input.key_down("Space"), "同一帧按下又松开");
+        input.key("KeyQ", false, false);
+        assert!(!input.key_released("KeyQ"), "没按过的松开不算");
+    }
+
+    #[test]
+    fn axis_and_keys_down() {
+        let mut input = Input::default();
+        let (left, right) = (["ArrowLeft", "KeyA"], ["ArrowRight", "KeyD"]);
+        assert_eq!(input.axis(&left, &right), 0.0);
+        input.key("KeyA", true, false);
+        assert_eq!(input.axis(&left, &right), -1.0);
+        input.key("ArrowRight", true, false);
+        assert_eq!(input.axis(&left, &right), 0.0, "两边都按着");
+        input.key("KeyA", false, false);
+        assert_eq!(input.axis(&left, &right), 1.0);
+        assert_eq!(input.keys_down().collect::<Vec<_>>(), ["ArrowRight"]);
     }
 
     #[test]

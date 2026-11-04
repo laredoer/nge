@@ -1,4 +1,4 @@
-//! 游戏逻辑（ECS，渲染线程）：手指左右拖动飞船，躲开下落的陨石。
+//! 游戏逻辑（ECS，渲染线程）：手指左右拖动飞船（Mac 上也可以用 ← → / A D），躲开下落的陨石。
 
 use nge_ecs::prelude::*;
 use nge_render2d::prelude::*;
@@ -12,6 +12,10 @@ const PLAYER_RADIUS: f32 = 16.0;
 const PLAYER_BOTTOM: f32 = 70.0;
 /// 飞船追手指的速度（越大越跟手）。
 const STEER: f32 = 14.0;
+/// 按住方向键时目标位置移动的速度（point / s）。
+const KEY_SPEED: f32 = 420.0;
+const LEFT_KEYS: [&str; 2] = ["ArrowLeft", "KeyA"];
+const RIGHT_KEYS: [&str; 2] = ["ArrowRight", "KeyD"];
 const INVULNERABLE_SECS: f32 = 1.2;
 const POINTS_PER_SEC: f32 = 10.0;
 /// 每过这么多秒，陨石速度 +100%。
@@ -143,8 +147,12 @@ fn control(
 fn steer(time: Res<Time>, screen: Res<Screen>, input: Res<Input>, mut player: Query<(&mut Player, &mut Transform2d)>) {
     let Ok((mut player, mut t)) = player.single_mut() else { return };
     let half = screen.size / 2.0;
+    let limit = (half.x - PLAYER_RADIUS).max(0.0);
     if let Some(p) = input.pointers_down().next() {
-        player.target_x = p.world.x.clamp(-half.x + PLAYER_RADIUS, half.x - PLAYER_RADIUS);
+        player.target_x = p.world.x.clamp(-limit, limit);
+    } else {
+        let axis = input.axis(&LEFT_KEYS, &RIGHT_KEYS);
+        player.target_x = (player.target_x + axis * KEY_SPEED * time.delta).clamp(-limit, limit);
     }
     let follow = 1.0 - (-STEER * time.delta).exp();
     t.translation.x += (player.target_x - t.translation.x) * follow;
@@ -268,6 +276,31 @@ mod tests {
     fn rock_count(app: &mut App) -> usize {
         let world = app.world_mut();
         world.query::<&Rock>().iter(world).count()
+    }
+
+    fn player_x(app: &mut App) -> f32 {
+        let world = app.world_mut();
+        world.query_filtered::<&Transform2d, With<Player>>().single(world).unwrap().translation.x
+    }
+
+    #[test]
+    fn arrow_keys_and_wasd_steer() {
+        let mut app = app();
+        app.tick(viewport(), DT);
+        app.command("key", &json!({ "code": "ArrowRight", "down": true }));
+        for _ in 0..30 {
+            app.tick(viewport(), DT);
+        }
+        let right = player_x(&mut app);
+        assert!(right > 50.0, "{right}");
+        app.command("key", &json!({ "code": "ArrowRight", "down": false }));
+        app.command("key", &json!({ "code": "KeyA", "down": true }));
+        for _ in 0..300 {
+            app.tick(viewport(), DT);
+        }
+        let left = player_x(&mut app);
+        let edge = -viewport().size[0] / 2.0 + PLAYER_RADIUS;
+        assert!((left - edge).abs() < 1.0, "按住不放停在边上：{left}");
     }
 
     #[test]

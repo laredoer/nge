@@ -3350,6 +3350,7 @@ dependencies = [
 name = "nge-platform"
 version = "0.1.0"
 dependencies = [
+ "block2",
  "log",
  "nge-assets",
  "nge-core",

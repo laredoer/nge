@@ -299,6 +299,17 @@ export function floatText(game: YNode | undefined, args: FloatText) {
   game?.command("floatText", args);
 }
 
+/**
+ * 一次按键（Mac）。`code` 是 Web `KeyboardEvent.code` 的键名（"KeyA"、"ArrowLeft"、"Space"），按键盘上的位置，和布局无关。
+ * 输入框在打字、按着 ⌘ 时不发；切到别的窗口时按着的键都补发一次松开。
+ */
+export interface KeyInput {
+  code: string;
+  down: boolean;
+  /** 按住不放时系统自动重复的按下。 */
+  repeat: boolean;
+}
+
 export interface FrameStats {
   fps: number;
   worst_ms: number;
@@ -310,6 +321,11 @@ export interface EngineError {
 
 interface BuiltinProps {
   scene: Scene;
+  /**
+   * Mac：游戏要吞掉的键（KeyInput.code），按下后不再交给 NSH。
+   * 不填时是字母、数字、方向键、Space、Enter；用到别的键（如 Esc 暂停）要自己列上，不然 NSH 不处理时会「咚」一声。
+   */
+  captureKeys: string[];
 }
 
 interface BuiltinEvents {
@@ -317,6 +333,7 @@ interface BuiltinEvents {
   collide: Collide;
   animEnd: AnimEnd;
   tweenEnd: TweenEnd;
+  key: KeyInput;
   fps: FrameStats;
   error: EngineError;
 }
@@ -327,14 +344,14 @@ export type GameViewProps<P, E> = NativeComponentProps<Partial<BuiltinProps> & P
 
 /**
  * 生成游戏视图组件。`props` / `events` 是游戏自己的通道名（Rust 侧 `add_prop` / `add_state` / `add_event`），
- * 类型由泛型给出；内置 prop `scene`、事件 `tap` / `collide` / `animEnd` / `tweenEnd` / `fps` / `error`，触摸自动转成引擎的 `touch` command。
+ * 类型由泛型给出；内置 prop `scene`、事件 `tap` / `collide` / `animEnd` / `tweenEnd` / `key` / `fps` / `error`，触摸自动转成引擎的 `touch` command。
  */
 export function gameView<P extends object = {}, E extends object = {}>(
   spec: { props?: readonly (keyof P & string)[]; events?: readonly (keyof E & string)[] } = {},
 ) {
   const Native = nativeComponent<BuiltinProps & P, BuiltinEvents & E>("nge.game", {
-    props: [...new Set(["scene", ...(spec.props ?? [])])] as (keyof (BuiltinProps & P) & string)[],
-    events: [...new Set(["tap", "collide", "animEnd", "tweenEnd", "fps", "error", ...(spec.events ?? [])])] as (keyof (BuiltinEvents & E) & string)[],
+    props: [...new Set(["scene", "captureKeys", ...(spec.props ?? [])])] as (keyof (BuiltinProps & P) & string)[],
+    events: [...new Set(["tap", "collide", "animEnd", "tweenEnd", "key", "fps", "error", ...(spec.events ?? [])])] as (keyof (BuiltinEvents & E) & string)[],
   });
 
   return (props: GameViewProps<P, E>) => {
