@@ -1,0 +1,19 @@
+[package]
+name = "physics"
+description = "nge 示例：TSX 声明 2D 刚体，点击生成弹球、碰撞计数"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+nge-core.workspace = true
+nge-ecs.workspace = true
+nge-assets.workspace = true
+nge-render2d.workspace = true
+nge-render3d.workspace = true
+nge-scene.workspace = true
+nge-platform = { workspace = true, features = ["dev"] }
+nsh-core.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
