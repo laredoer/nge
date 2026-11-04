@@ -5,10 +5,12 @@ use glam::{Vec2, Vec4};
 use nge_core::{Gfx, wgpu};
 use nge_ecs::{App, ClearColor, Input, Plugin, PreUpdate, RenderFrame, Renderer, Screen};
 
-use crate::assets::{Assets, TextureId};
+use nge_assets::{Assets, GpuImages, Image};
+
+use crate::assets::{Atlases, TextureId};
 use crate::batch::{Batch, Instance, Item, batch};
 use crate::camera::{Camera2d, Transform2d};
-use crate::sprite::Sprite;
+use crate::sprite::{Sprite, SpriteInstances};
 
 const SHADER: &str = r#"
 struct Globals { view_proj: mat4x4f }
@@ -56,13 +58,15 @@ fn fs(in: Out) -> @location(0) vec4f {
 
 const INITIAL_CAPACITY: u64 = 1024;
 
-/// 注册 [`Assets`]、指针世界坐标换算和精灵渲染器（`ClearColor` 由 `App` 自带）。
+/// 注册 [`Atlases`]、指针世界坐标换算和精灵渲染器（`ClearColor` 由 `App` 自带）。没有 `AssetPlugin` 时加一个默认的。
 pub struct Render2dPlugin;
 
 impl Plugin for Render2dPlugin {
     fn build(&self, app: &mut App) {
-        app.insert_resource(Assets::default())
-            .add_systems(PreUpdate, pointer_world.in_set(PointerWorld))
+        nge_assets::ensure_plugin(app);
+        app.init_resource::<Atlases>()
+            .init_resource::<SpriteInstances>()
+            .add_systems(PreUpdate, (pointer_world.in_set(PointerWorld), clear_sprite_instances))
             .add_renderer(SpriteRenderer::default());
     }
 }
@@ -77,12 +81,17 @@ fn pointer_world(screen: Res<Screen>, cameras: Query<&Camera2d>, mut input: ResM
     input.map_world(|s| camera.screen_to_world(size, s));
 }
 
+fn clear_sprite_instances(mut instances: ResMut<SpriteInstances>) {
+    instances.clear();
+}
+
 struct Gpu {
     pipeline: wgpu::RenderPipeline,
     globals: wgpu::Buffer,
     globals_group: wgpu::BindGroup,
     sampler: wgpu::Sampler,
-    textures: Vec<wgpu::BindGroup>,
+    /// 按贴图编号缓存；贴图还没加载完的不缓存，先用白色贴图的。
+    textures: Vec<Option<wgpu::BindGroup>>,
     instances: wgpu::Buffer,
     capacity: u64,
 }
@@ -100,12 +109,13 @@ impl Renderer for SpriteRenderer {
         let gpu = self.gpu.get_or_insert_with(|| Gpu::new(gfx));
         let mut sprites = world.query::<(&Sprite, &Transform2d)>();
         let camera = world.query::<&Camera2d>().iter(world).next().copied().unwrap_or_default();
-        let assets = world.resource::<Assets>();
-        gpu.upload_textures(gfx, assets);
+        world.resource_scope(|world, mut images: Mut<GpuImages>| images.sync(gfx, world.resource::<Assets<Image>>()));
+        let (images, atlases, gpu_images) = (world.resource::<Assets<Image>>(), world.resource::<Atlases>(), world.resource::<GpuImages>());
+        let extra = world.resource::<SpriteInstances>();
 
         self.items.clear();
         for (sprite, transform) in sprites.iter(world) {
-            let region = assets.region(sprite.image);
+            let region = atlases.region(images, sprite.image);
             let size = sprite.size.unwrap_or(region.size) * transform.scale;
             self.items.push(Item {
                 texture: region.texture,
@@ -119,7 +129,30 @@ impl Renderer for SpriteRenderer {
                 },
             });
         }
+        // 同一张图的额外实例通常是连着放的（一个发射器一批），只在图变了时重新查区域
+        let mut last = None;
+        for &(image, sprite) in &extra.items {
+            let region = match last {
+                Some((i, region)) if i == image => region,
+                _ => atlases.region(images, image),
+            };
+            last = Some((image, region));
+            self.items.push(Item {
+                texture: region.texture,
+                instance: Instance {
+                    pos: sprite.position.into(),
+                    size: sprite.size.into(),
+                    rotation_z: [sprite.rotation, sprite.z],
+                    uv: region.uv.into(),
+                    color: to_rgba8(sprite.color),
+                    _pad: 0,
+                },
+            });
+        }
         batch(&mut self.items, &mut self.instances, &mut self.batches);
+        for id in std::iter::once(TextureId::WHITE).chain(self.batches.iter().map(|b| b.texture)) {
+            gpu.cache_texture(gfx, gpu_images, id);
+        }
 
         let view_proj = camera.view_proj(Vec2::from(gfx.viewport.size));
         gfx.queue.write_buffer(&gpu.globals, 0, bytemuck::bytes_of(&view_proj.to_cols_array()));
@@ -144,7 +177,7 @@ impl Renderer for SpriteRenderer {
         pass.set_bind_group(0, &gpu.globals_group, &[]);
         pass.set_vertex_buffer(0, gpu.instances.slice(..));
         for b in &self.batches {
-            pass.set_bind_group(1, &gpu.textures[b.texture.0 as usize], &[]);
+            pass.set_bind_group(1, gpu.texture(b.texture), &[]);
             pass.draw(0..6, b.range.clone());
         }
     }
@@ -214,42 +247,28 @@ impl Gpu {
         Self { pipeline, globals, globals_group, sampler, textures: Vec::new(), instances, capacity: INITIAL_CAPACITY }
     }
 
-    /// 上传还没上传过的纹理（纹理只增不减）。
-    fn upload_textures(&mut self, gfx: &Gfx, assets: &Assets) {
-        // Assets 被整个替换成更少的图片时不越界（已上传的不会重新上传）
-        for image in assets.images().get(self.textures.len()..).unwrap_or_default() {
-            let size = wgpu::Extent3d { width: image.size.x, height: image.size.y, depth_or_array_layers: 1 };
-            let texture = gfx.device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("sprite texture"),
-                size,
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba8UnormSrgb,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                view_formats: &[],
-            });
-            gfx.queue.write_texture(
-                wgpu::TexelCopyTextureInfo {
-                    texture: &texture,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d::ZERO,
-                    aspect: wgpu::TextureAspect::All,
-                },
-                &image.rgba,
-                wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4 * image.size.x), rows_per_image: Some(image.size.y) },
-                size,
-            );
-            let view = texture.create_view(&Default::default());
-            self.textures.push(gfx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("sprite texture"),
-                layout: &self.pipeline.get_bind_group_layout(1),
-                entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
-                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
-                ],
-            }));
+    /// 贴图加载好了就建 bind group 缓存起来；没加载好的什么也不做（画的时候用白色）。
+    fn cache_texture(&mut self, gfx: &Gfx, images: &GpuImages, id: TextureId) {
+        let index = id.index() as usize;
+        if self.textures.get(index).is_some_and(Option::is_some) {
+            return;
         }
+        let Some(view) = images.view(id) else { return };
+        if self.textures.len() <= index {
+            self.textures.resize_with(index + 1, || None);
+        }
+        self.textures[index] = Some(gfx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("sprite texture"),
+            layout: &self.pipeline.get_bind_group_layout(1),
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+            ],
+        }));
+    }
+
+    fn texture(&self, id: TextureId) -> &wgpu::BindGroup {
+        self.textures.get(id.index() as usize).and_then(Option::as_ref).or(self.textures[0].as_ref()).expect("白色贴图总是先上传")
     }
 
     /// 写实例数据；容量不够时按两倍扩容。
@@ -274,5 +293,3 @@ fn instance_buffer(device: &wgpu::Device, capacity: u64) -> wgpu::Buffer {
     })
 }
 
-// 让 TextureId 在批次里按上传顺序索引
-const _: () = assert!(TextureId::WHITE.0 == 0);

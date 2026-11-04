@@ -1,20 +1,10 @@
-//! 3D 资源：贴图、网格、材质、模型。只增不减，GPU 侧按需上传。
+//! 3D 资源：网格、材质、模型。只增不减，GPU 侧按需上传。贴图在 `nge_assets` 的 `Assets<Image>` 里（和 2D 共用）。
 
 use bevy_ecs::prelude::Resource;
-use glam::{Mat4, UVec2, Vec3, Vec4};
+use glam::{Mat4, Vec3, Vec4};
+use nge_assets::ImageId;
 
 use crate::mesh::Mesh;
-
-/// 贴图边长上限：wgpu 默认设备限制。
-pub const MAX_TEXTURE_SIDE: u32 = 8192;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct ImageId(pub(crate) u32);
-
-impl ImageId {
-    /// 内置 1×1 白色贴图。
-    pub const WHITE: Self = Self(0);
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct MeshId(pub(crate) u32);
@@ -74,14 +64,8 @@ pub struct Model {
     pub parts: Vec<Part>,
 }
 
-pub(crate) struct Image {
-    pub size: UVec2,
-    pub rgba: Vec<u8>,
-}
-
 #[derive(Resource)]
 pub struct Assets3d {
-    pub(crate) images: Vec<Image>,
     pub(crate) meshes: Vec<Mesh>,
     pub(crate) materials: Vec<Material>,
     pub(crate) models: Vec<Model>,
@@ -90,7 +74,6 @@ pub struct Assets3d {
 impl Default for Assets3d {
     fn default() -> Self {
         Self {
-            images: vec![Image { size: UVec2::ONE, rgba: vec![255; 4] }],
             meshes: Vec::new(),
             materials: vec![Material::default()],
             models: Vec::new(),
@@ -99,28 +82,6 @@ impl Default for Assets3d {
 }
 
 impl Assets3d {
-    /// RGBA8（sRGB）像素。尺寸为 0、超过 [`MAX_TEXTURE_SIDE`] 或长度不符时返回错误。
-    pub fn add_rgba(&mut self, size: UVec2, rgba: Vec<u8>) -> Result<ImageId, String> {
-        if size.min_element() == 0 || size.max_element() > MAX_TEXTURE_SIDE {
-            return Err(format!("贴图尺寸 {size} 不合法（每边 1..={MAX_TEXTURE_SIDE}）"));
-        }
-        let expected = u64::from(size.x) * u64::from(size.y) * 4;
-        if rgba.len() as u64 != expected {
-            return Err(format!("像素数据 {} 字节，尺寸 {size} 需要 {expected} 字节", rgba.len()));
-        }
-        self.images.push(Image { size, rgba });
-        Ok(ImageId(self.images.len() as u32 - 1))
-    }
-
-    /// 解码 PNG（通常来自 `include_bytes!`）。
-    pub fn load_png(&mut self, bytes: &[u8]) -> Result<ImageId, String> {
-        let image = image::load_from_memory_with_format(bytes, image::ImageFormat::Png)
-            .map_err(|e| format!("PNG 解码失败: {e}"))?
-            .into_rgba8();
-        let size = UVec2::new(image.width(), image.height());
-        self.add_rgba(size, image.into_raw())
-    }
-
     /// 空网格、索引不是三的倍数或越界时返回错误。
     pub fn add_mesh(&mut self, mesh: Mesh) -> Result<MeshId, String> {
         if mesh.indices.is_empty() || mesh.indices.len() % 3 != 0 {
@@ -164,10 +125,6 @@ impl Assets3d {
     pub fn model(&self, id: ModelId) -> Option<&Model> {
         self.models.get(id.0 as usize)
     }
-
-    pub fn image_size(&self, id: ImageId) -> Option<UVec2> {
-        self.images.get(id.0 as usize).map(|i| i.size)
-    }
 }
 
 #[cfg(test)]
@@ -184,20 +141,8 @@ mod tests {
     #[test]
     fn builtins() {
         let assets = Assets3d::default();
-        assert_eq!(assets.image_size(ImageId::WHITE), Some(UVec2::ONE));
         assert_eq!(*assets.material(MaterialId::DEFAULT), Material::default());
         assert_eq!(*assets.material(MaterialId(99)), Material::default(), "不存在的材质退回默认");
-    }
-
-    #[test]
-    fn images_are_validated() {
-        let mut assets = Assets3d::default();
-        assert!(assets.add_rgba(UVec2::ZERO, vec![]).is_err());
-        assert!(assets.add_rgba(UVec2::new(MAX_TEXTURE_SIDE + 1, 1), vec![0; (MAX_TEXTURE_SIDE as usize + 1) * 4]).is_err());
-        assert!(assets.add_rgba(UVec2::new(2, 2), vec![0; 4]).is_err());
-        let id = assets.add_rgba(UVec2::new(2, 1), vec![0; 8]).unwrap();
-        assert_eq!(assets.image_size(id), Some(UVec2::new(2, 1)));
-        assert!(assets.load_png(b"nope").is_err());
     }
 
     #[test]

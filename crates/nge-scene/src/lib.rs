@@ -11,7 +11,7 @@ use std::collections::HashMap;
 
 use bevy_ecs::prelude::*;
 use nge_ecs::{App, Plugin, PreUpdate, Update};
-use nge_render2d::{AtlasId, Assets, Camera2d, Grid, PointerWorld, TextureId};
+use nge_render2d::{Assets, AtlasId, Atlases, Camera2d, Grid, Image, PointerWorld, TextureId};
 
 pub use behave::{Spin, Tappable};
 pub use protocol::{CameraNode, Color, SCENE, Scene, SpriteNode, TAP, Tap};
@@ -59,11 +59,12 @@ pub(crate) struct SceneCamera;
 impl Plugin for ScenePlugin {
     fn build(&self, app: &mut App) {
         let mut textures = SceneTextures::default();
-        let mut assets = app.world_mut().get_resource_mut::<Assets>().expect("ScenePlugin 要在 Render2dPlugin 之后添加");
+        let world = app.world_mut();
+        assert!(world.contains_resource::<Atlases>(), "ScenePlugin 要在 Render2dPlugin 之后添加");
         for (name, png, grid) in &self.textures {
-            match assets.load_png(png) {
+            match world.resource_mut::<Assets<Image>>().load_png(png) {
                 Ok(id) => {
-                    let named = grid.map_or(NamedTexture::Texture(id), |g| NamedTexture::Atlas(assets.atlas(id, g)));
+                    let named = grid.map_or(NamedTexture::Texture(id), |g| NamedTexture::Atlas(world.resource_mut::<Atlases>().add(id, g)));
                     if textures.0.insert(name.clone(), named).is_some() {
                         log::warn!("纹理名 {name} 重复注册，用后一次");
                     }

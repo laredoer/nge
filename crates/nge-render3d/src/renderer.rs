@@ -6,9 +6,12 @@ use bevy_ecs::prelude::*;
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec2, Vec3};
 use nge_core::{Gfx, wgpu};
-use nge_ecs::{App, ClearColor, Plugin, RenderFrame, Renderer};
+use nge_ecs::{App, ClearColor, Plugin, PreUpdate, RenderFrame, Renderer};
 
-use crate::assets::{Assets3d, ImageId, MaterialId, MeshId, ModelId};
+use nge_assets::{AssetApp, Assets, GpuImages, Image, ImageId};
+
+use crate::assets::{Assets3d, MaterialId, MeshId, ModelId};
+use crate::gltf_load::{Gltf, GltfModels, resolve_gltf_models};
 use crate::camera::{Camera3d, Transform3d};
 use crate::light::{AmbientLight, DirectionalLight, Globals, PointLight};
 use crate::mesh::Vertex;
@@ -33,6 +36,10 @@ pub struct Render3dPlugin;
 
 impl Plugin for Render3dPlugin {
     fn build(&self, app: &mut App) {
+        nge_assets::ensure_plugin(app);
+        app.init_asset::<Gltf>()
+            .init_resource::<GltfModels>()
+            .add_systems(PreUpdate, resolve_gltf_models.after(nge_assets::AssetsApplied));
         app.insert_resource(Assets3d::default()).init_resource::<AmbientLight>().add_renderer(MeshRenderer::default());
     }
 }
@@ -73,7 +80,8 @@ struct Gpu {
     stride: u64,
     texture_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
-    textures: Vec<wgpu::BindGroup>,
+    /// 按贴图编号缓存；贴图还没加载完的不缓存，先用白色贴图的。
+    textures: Vec<Option<wgpu::BindGroup>>,
     meshes: Vec<GpuMesh>,
     depth: Option<(wgpu::TextureView, wgpu::Extent3d)>,
 }
@@ -95,12 +103,16 @@ impl Renderer for MeshRenderer {
         }
         gfx.queue.write_buffer(&gpu.globals, 0, bytemuck::bytes_of(&globals.0));
 
-        let assets = world.resource::<Assets3d>();
-        gpu.upload(gfx, assets);
+        world.resource_scope(|world, mut images: Mut<GpuImages>| images.sync(gfx, world.resource::<Assets<Image>>()));
+        gpu.upload(gfx, world.resource::<Assets3d>());
         collect(world, &mut self.draws);
         self.draws.retain(|d| (d.mesh.0 as usize) < gpu.meshes.len());
         // 先按管线、再按贴图排，减少切换
         self.draws.sort_by_key(|d| (d.pipeline, d.texture));
+        let images = world.resource::<GpuImages>();
+        for id in std::iter::once(ImageId::WHITE).chain(self.draws.iter().map(|d| d.texture)) {
+            gpu.cache_texture(gfx, images, id);
+        }
         gpu.write_draws(gfx, &self.draws, &mut self.bytes);
         let depth = gpu.depth_view(gfx, target.texture().size());
 
@@ -124,7 +136,7 @@ impl Renderer for MeshRenderer {
         pass.set_bind_group(0, &gpu.globals_group, &[]);
         for (i, draw) in self.draws.iter().enumerate() {
             let mesh = &gpu.meshes[draw.mesh.0 as usize];
-            let texture = gpu.textures.get(draw.texture.0 as usize).unwrap_or(&gpu.textures[0]);
+            let texture = gpu.texture(draw.texture);
             pass.set_pipeline(&gpu.pipelines[draw.pipeline]);
             pass.set_bind_group(1, &gpu.draws_group, &[(i as u64 * gpu.stride) as u32]);
             pass.set_bind_group(2, texture, &[]);
@@ -281,7 +293,7 @@ impl Gpu {
         }
     }
 
-    /// 上传还没上传过的网格和贴图（资源只增不减）。
+    /// 上传还没上传过的网格（资源只增不减）。
     fn upload(&mut self, gfx: &Gfx, assets: &Assets3d) {
         use wgpu::util::DeviceExt;
         for mesh in assets.meshes.get(self.meshes.len()..).unwrap_or_default() {
@@ -294,33 +306,30 @@ impl Gpu {
                 count: mesh.indices.len() as u32,
             });
         }
-        for image in assets.images.get(self.textures.len()..).unwrap_or_default() {
-            let size = wgpu::Extent3d { width: image.size.x, height: image.size.y, depth_or_array_layers: 1 };
-            let texture = gfx.device.create_texture_with_data(
-                &gfx.queue,
-                &wgpu::TextureDescriptor {
-                    label: Some("mesh texture"),
-                    size,
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    dimension: wgpu::TextureDimension::D2,
-                    format: wgpu::TextureFormat::Rgba8UnormSrgb,
-                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                    view_formats: &[],
-                },
-                wgpu::util::TextureDataOrder::LayerMajor,
-                &image.rgba,
-            );
-            let view = texture.create_view(&Default::default());
-            self.textures.push(gfx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("mesh texture"),
-                layout: &self.texture_layout,
-                entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
-                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
-                ],
-            }));
+    }
+
+    /// 贴图加载好了就建 bind group 缓存起来；没加载好的什么也不做（画的时候用白色）。
+    fn cache_texture(&mut self, gfx: &Gfx, images: &GpuImages, id: ImageId) {
+        let index = id.index() as usize;
+        if self.textures.get(index).is_some_and(Option::is_some) {
+            return;
         }
+        let Some(view) = images.view(id) else { return };
+        if self.textures.len() <= index {
+            self.textures.resize_with(index + 1, || None);
+        }
+        self.textures[index] = Some(gfx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("mesh texture"),
+            layout: &self.texture_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+            ],
+        }));
+    }
+
+    fn texture(&self, id: ImageId) -> &wgpu::BindGroup {
+        self.textures.get(id.index() as usize).and_then(Option::as_ref).or(self.textures[0].as_ref()).expect("白色贴图总是先上传")
     }
 
     /// 每个 draw 占 `stride` 字节；容量不够时按两倍扩容。
@@ -425,5 +434,35 @@ mod tests {
     #[test]
     fn draw_layout_matches_shader() {
         assert_eq!(size_of::<DrawRaw>(), 64 * 2 + 16 * 3);
+    }
+
+    #[test]
+    fn gltf_models_resolve_once_loaded() {
+        use std::sync::Arc;
+
+        use nge_assets::{AssetPlugin, AssetServer, MemorySource};
+
+        use crate::gltf_load::GltfModel;
+
+        let source = MemorySource::default().with("asset:/@t/crate.glb", include_bytes!("../tests/data/test.glb").to_vec());
+        let mut app = App::new();
+        app.add_plugins(AssetPlugin::new().source(Arc::new(source))).add_plugins(Render3dPlugin);
+        let (ok, missing) = app.world_mut().resource_scope(|world, mut server: Mut<AssetServer>| {
+            let mut gltfs = world.resource_mut::<Assets<Gltf>>();
+            (server.load(&mut gltfs, "asset:/@t/crate.glb"), server.load(&mut gltfs, "asset:/@t/missing.glb"))
+        });
+        let a = app.world_mut().spawn(GltfModel(ok)).id();
+        let b = app.world_mut().spawn(GltfModel(ok)).id();
+        let c = app.world_mut().spawn(GltfModel(missing)).id();
+        let viewport = nge_core::Viewport { size: [100.0, 100.0], pixels: [100, 100] };
+        app.tick(viewport, 0.016);
+        AssetServer::apply(app.world_mut(), true);
+        app.tick(viewport, 0.016);
+
+        let world = app.world();
+        let (ma, mb) = (world.get::<Model3d>(a).expect("加载完换成 Model3d"), world.get::<Model3d>(b).unwrap());
+        assert_eq!(ma.0, mb.0, "同一个 glTF 只展开一次");
+        assert_eq!(world.resource::<Assets3d>().model(ma.0).unwrap().parts.len(), 2);
+        assert!(world.get::<GltfModel>(c).is_none() && world.get::<Model3d>(c).is_none(), "加载失败的去掉组件");
     }
 }

@@ -4,6 +4,7 @@ use glam::{UVec2, Vec2, Vec4};
 use nge_core::{Ctx, Emit, Gfx, Viewport, wgpu};
 use nge_ecs::prelude::*;
 use nge_render2d::prelude::*;
+use nge_render2d::{SpriteImage, SpriteInstance, SpriteInstances, TextureId};
 
 const SIZE: u32 = 64;
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
@@ -19,10 +20,18 @@ fn gfx() -> Option<Gfx> {
 /// 跑一帧并读回 RGBA 像素。
 fn render(gfx: &Gfx, setup: impl Fn(&mut World) + Send + Sync + 'static) -> Vec<[u8; 4]> {
     let setup = std::sync::Arc::new(setup);
-    let factory = nge_ecs::factory(move || {
+    render_app(gfx, move |app| {
         let setup = setup.clone();
+        app.add_systems(Startup, move |world: &mut World| setup(world));
+    })
+}
+
+/// 同 [`render`]，但可以往 App 里加系统。
+fn render_app(gfx: &Gfx, build: impl Fn(&mut App) + Send + Sync + 'static) -> Vec<[u8; 4]> {
+    let factory = nge_ecs::factory(move || {
         let mut app = App::new();
-        app.add_plugins(Render2dPlugin).add_systems(Startup, move |world: &mut World| setup(world));
+        app.add_plugins(Render2dPlugin);
+        build(&mut app);
         app
     });
     let mut game = factory(gfx);
@@ -72,7 +81,7 @@ fn quadrant_texture_keeps_orientation() {
     let pixels = render(&gfx, |world| {
         // 2×2：左上红、右上绿、左下蓝、右下白
         let rgba = [[255, 0, 0, 255], [0, 255, 0, 255], [0, 0, 255, 255], [255, 255, 255, 255]].concat();
-        let texture = world.resource_mut::<Assets>().add_rgba(UVec2::splat(2), rgba).unwrap();
+        let texture = world.resource_mut::<Assets<Image>>().add_rgba(UVec2::splat(2), rgba).unwrap();
         world.spawn((Sprite::from_texture(texture).with_size(Vec2::splat(SIZE as f32)), Transform2d::default()));
     });
     // 线性过滤在色块交界处会混色，取靠外的点（夹边后是纯色）
@@ -96,4 +105,40 @@ fn world_y_up_and_z_order() {
     assert_eq!(at(&pixels, 16, 16), [255, 0, 0, 255]);
     assert_eq!(at(&pixels, 48, 48), [0, 255, 0, 255]);
     assert_eq!(at(&pixels, 48, 16), [0, 0, 0, 255]);
+}
+
+#[test]
+fn sprite_instances_are_drawn_with_entity_sprites() {
+    let Some(gfx) = gfx() else { return eprintln!("没有可用 GPU，跳过") };
+    let pixels = render_app(&gfx, |app| {
+        app.add_systems(Startup, |mut commands: Commands| {
+            // 实体精灵：左半边绿色，z = 0
+            commands.spawn((Sprite::color(Vec2::new(32.0, 64.0), Vec4::new(0.0, 1.0, 0.0, 1.0)), Transform2d::from_xy(-16.0, 0.0)));
+        });
+        app.add_systems(Update, |mut instances: ResMut<SpriteInstances>| {
+            // 额外实例：中间一块红色，盖在绿色上面；右下角一块蓝色在下面（z 小）
+            let red = SpriteInstance { position: Vec2::ZERO, size: Vec2::splat(16.0), z: 1.0, color: Vec4::new(1.0, 0.0, 0.0, 1.0), ..Default::default() };
+            instances.push(SpriteImage::Texture(TextureId::WHITE), red);
+            let blue = SpriteInstance { position: Vec2::new(16.0, -16.0), size: Vec2::splat(8.0), z: -1.0, color: Vec4::new(0.0, 0.0, 1.0, 1.0), ..Default::default() };
+            instances.push(SpriteImage::Texture(TextureId::WHITE), blue);
+        });
+    });
+    assert_eq!(at(&pixels, 30, 32), [255, 0, 0, 255], "红色额外实例在绿色精灵上面");
+    assert_eq!(at(&pixels, 4, 32), [0, 255, 0, 255]);
+    assert_eq!(at(&pixels, 48, 48), [0, 0, 255, 255]);
+}
+
+#[test]
+fn sprite_instances_are_cleared_every_frame() {
+    let mut app = App::new();
+    app.add_plugins(Render2dPlugin).add_systems(Update, |time: Res<Time>, mut instances: ResMut<SpriteInstances>| {
+        if time.frame == 1 {
+            instances.push(SpriteImage::Texture(TextureId::WHITE), SpriteInstance::default());
+        }
+    });
+    let viewport = Viewport { size: [SIZE as f32; 2], pixels: [SIZE; 2] };
+    app.tick(viewport, 0.016);
+    assert_eq!(app.world().resource::<SpriteInstances>().len(), 1);
+    app.tick(viewport, 0.016);
+    assert!(app.world().resource::<SpriteInstances>().is_empty(), "下一帧开头清空");
 }

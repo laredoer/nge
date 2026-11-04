@@ -52,7 +52,7 @@ mod tests {
 
     fn item(texture: u32, z: f32, x: f32) -> Item {
         let instance = Instance { pos: [x, 0.0], rotation_z: [0.0, z], ..bytemuck::Zeroable::zeroed() };
-        Item { texture: TextureId(texture), instance }
+        Item { texture: TextureId::new(texture), instance }
     }
 
     fn run(mut items: Vec<Item>) -> (Vec<Instance>, Vec<Batch>) {
@@ -71,7 +71,7 @@ mod tests {
         let (_, batches) = run(vec![item(1, 0.0, 0.0), item(2, 0.0, 1.0), item(1, 0.0, 2.0)]);
         assert_eq!(
             batches,
-            vec![Batch { texture: TextureId(1), range: 0..2 }, Batch { texture: TextureId(2), range: 2..3 }]
+            vec![Batch { texture: TextureId::new(1), range: 0..2 }, Batch { texture: TextureId::new(2), range: 2..3 }]
         );
     }
 
@@ -87,7 +87,7 @@ mod tests {
     fn single_texture_is_one_draw_and_stable() {
         let items = (0..1000).map(|i| item(3, 0.0, i as f32)).collect();
         let (instances, batches) = run(items);
-        assert_eq!(batches, vec![Batch { texture: TextureId(3), range: 0..1000 }]);
+        assert_eq!(batches, vec![Batch { texture: TextureId::new(3), range: 0..1000 }]);
         assert!(instances.windows(2).all(|w| w[0].pos[0] < w[1].pos[0]));
     }
 

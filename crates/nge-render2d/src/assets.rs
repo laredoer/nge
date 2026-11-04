@@ -1,20 +1,13 @@
-//! 纹理和图集。图片在 CPU 侧同步解码，渲染器第一次用到时上传 GPU。
+//! 图集。贴图本身在 `nge_assets` 的 `Assets<Image>` 里（和 3D 共用），这里只记怎么切。
 
 use bevy_ecs::prelude::Resource;
-use glam::{UVec2, Vec2, Vec4};
+use glam::{Vec2, Vec4};
+use nge_assets::{Assets, Image, ImageId};
 
 use crate::sprite::{Sprite, SpriteImage};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct TextureId(pub(crate) u32);
-
-/// 纹理边长上限：wgpu 默认设备限制（WebGPU 默认值）。
-pub const MAX_TEXTURE_SIDE: u32 = 8192;
-
-impl TextureId {
-    /// 内置的 1×1 白色纹理，纯色精灵用。
-    pub const WHITE: Self = Self(0);
-}
+/// 2D 里对贴图的叫法，和 [`ImageId`] 是同一个类型。
+pub type TextureId = ImageId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AtlasId(u32);
@@ -24,11 +17,6 @@ pub struct AtlasId(u32);
 pub struct Grid {
     pub cols: u32,
     pub rows: u32,
-}
-
-pub(crate) struct Image {
-    pub size: UVec2,
-    pub rgba: Vec<u8>,
 }
 
 struct Atlas {
@@ -46,106 +34,63 @@ pub(crate) struct Region {
     pub size: Vec2,
 }
 
-#[derive(Resource)]
-pub struct Assets {
-    images: Vec<Image>,
+#[derive(Resource, Default)]
+pub struct Atlases {
     atlases: Vec<Atlas>,
 }
 
-impl Default for Assets {
-    fn default() -> Self {
-        Self { images: vec![Image { size: UVec2::ONE, rgba: vec![255; 4] }], atlases: Vec::new() }
-    }
-}
-
-impl Assets {
-    /// 解码 PNG（通常来自 `include_bytes!`）。
-    pub fn load_png(&mut self, bytes: &[u8]) -> Result<TextureId, String> {
-        let image = image::load_from_memory_with_format(bytes, image::ImageFormat::Png)
-            .map_err(|e| format!("PNG 解码失败: {e}"))?
-            .into_rgba8();
-        let size = UVec2::new(image.width(), image.height());
-        self.add_rgba(size, image.into_raw())
-    }
-
-    /// 直接添加 RGBA8（sRGB）像素。尺寸为 0、超过 [`MAX_TEXTURE_SIDE`] 或长度不符时返回错误。
-    pub fn add_rgba(&mut self, size: UVec2, rgba: Vec<u8>) -> Result<TextureId, String> {
-        if size.min_element() == 0 || size.max_element() > MAX_TEXTURE_SIDE {
-            return Err(format!("纹理尺寸 {size} 不合法（每边 1..={MAX_TEXTURE_SIDE}）"));
-        }
-        let expected = u64::from(size.x) * u64::from(size.y) * 4;
-        if rgba.len() as u64 != expected {
-            return Err(format!("像素数据 {} 字节，尺寸 {size} 需要 {expected} 字节", rgba.len()));
-        }
-        self.images.push(Image { size, rgba });
-        Ok(TextureId(self.images.len() as u32 - 1))
-    }
-
-    pub fn atlas(&mut self, texture: TextureId, grid: Grid) -> AtlasId {
+impl Atlases {
+    /// 贴图还在加载时也可以建图集，加载完后按实际尺寸切。
+    pub fn add(&mut self, texture: TextureId, grid: Grid) -> AtlasId {
         assert!(grid.cols > 0 && grid.rows > 0, "图集网格不能为空");
         self.atlases.push(Atlas { texture, grid });
         AtlasId(self.atlases.len() as u32 - 1)
     }
 
-    /// 不存在的纹理（比如来自另一个 Assets）返回 None。
-    pub fn texture_size(&self, texture: TextureId) -> Option<UVec2> {
-        self.images.get(texture.0 as usize).map(|i| i.size)
+    /// 精灵不缩放时的大小（point）：`size` 优先，否则是纹理区域的像素大小（贴图没加载完时是 1×1）。
+    pub fn sprite_size(&self, images: &Assets<Image>, sprite: &Sprite) -> Vec2 {
+        sprite.size.unwrap_or_else(|| self.region(images, sprite.image).size)
     }
 
-    /// 精灵不缩放时的大小（point）：`size` 优先，否则是纹理区域的像素大小。
-    pub fn sprite_size(&self, sprite: &Sprite) -> Vec2 {
-        sprite.size.unwrap_or_else(|| self.region(sprite.image).size)
-    }
-
-    pub(crate) fn images(&self) -> &[Image] {
-        &self.images
-    }
-
-    /// 精灵对应的纹理区域；引用了不存在的纹理 / 图集时退回白色纹理。
-    pub(crate) fn region(&self, image: SpriteImage) -> Region {
+    /// 精灵对应的纹理区域。引用了不存在的贴图 / 图集时退回白色贴图；贴图还在加载时保留它的编号（渲染器先画白色）。
+    pub(crate) fn region(&self, images: &Assets<Image>, image: SpriteImage) -> Region {
         const FALLBACK: Region = Region { texture: TextureId::WHITE, uv: Vec4::new(0.0, 0.0, 1.0, 1.0), size: Vec2::ONE };
-        match image {
-            SpriteImage::Texture(texture) => match self.texture_size(texture) {
-                Some(size) => Region { texture, uv: Vec4::new(0.0, 0.0, 1.0, 1.0), size: size.as_vec2() },
-                None => FALLBACK,
-            },
+        let (texture, uv) = match image {
+            SpriteImage::Texture(texture) => (texture, Vec4::new(0.0, 0.0, 1.0, 1.0)),
             SpriteImage::Atlas(atlas, index) => {
                 let Some(&Atlas { texture, grid }) = self.atlases.get(atlas.0 as usize) else { return FALLBACK };
-                let Some(size) = self.texture_size(texture) else { return FALLBACK };
                 let index = index % (grid.cols * grid.rows);
                 let cell = Vec2::new(1.0 / grid.cols as f32, 1.0 / grid.rows as f32);
                 let at = Vec2::new((index % grid.cols) as f32, (index / grid.cols) as f32) * cell;
-                Region {
-                    texture,
-                    uv: Vec4::new(at.x, at.y, cell.x, cell.y),
-                    size: size.as_vec2() * cell,
-                }
+                (texture, Vec4::new(at.x, at.y, cell.x, cell.y))
             }
+        };
+        if texture.index() as usize >= images.len() {
+            return FALLBACK;
         }
+        let size = images.size(texture).map_or(Vec2::ONE, |s| s.as_vec2() * Vec2::new(uv.z, uv.w));
+        Region { texture, uv, size }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use glam::UVec2;
+
     use super::*;
 
-    fn assets_with(size: UVec2) -> (Assets, TextureId) {
-        let mut assets = Assets::default();
-        let texture = assets.add_rgba(size, vec![0; (size.x * size.y * 4) as usize]).unwrap();
-        (assets, texture)
-    }
-
-    #[test]
-    fn white_texture_is_builtin() {
-        let assets = Assets::default();
-        assert_eq!(assets.texture_size(TextureId::WHITE), Some(UVec2::ONE));
+    fn images_with(size: UVec2) -> (Assets<Image>, TextureId) {
+        let mut images = Assets::<Image>::with_white();
+        let texture = images.add_rgba(size, vec![0; (size.x * size.y * 4) as usize]).unwrap();
+        (images, texture)
     }
 
     #[test]
     fn grid_atlas_uv_and_size() {
-        let (mut assets, texture) = assets_with(UVec2::new(128, 64));
-        let atlas = assets.atlas(texture, Grid { cols: 4, rows: 2 });
-        let r = assets.region(SpriteImage::Atlas(atlas, 5));
+        let (images, texture) = images_with(UVec2::new(128, 64));
+        let mut atlases = Atlases::default();
+        let atlas = atlases.add(texture, Grid { cols: 4, rows: 2 });
+        let r = atlases.region(&images, SpriteImage::Atlas(atlas, 5));
         assert_eq!(r.texture, texture);
         assert_eq!(r.uv, Vec4::new(0.25, 0.5, 0.25, 0.5));
         assert_eq!(r.size, Vec2::new(32.0, 32.0));
@@ -153,45 +98,28 @@ mod tests {
 
     #[test]
     fn atlas_index_wraps() {
-        let (mut assets, texture) = assets_with(UVec2::new(4, 4));
-        let atlas = assets.atlas(texture, Grid { cols: 2, rows: 2 });
-        assert_eq!(assets.region(SpriteImage::Atlas(atlas, 4)), assets.region(SpriteImage::Atlas(atlas, 0)));
+        let (images, texture) = images_with(UVec2::new(4, 4));
+        let mut atlases = Atlases::default();
+        let atlas = atlases.add(texture, Grid { cols: 2, rows: 2 });
+        assert_eq!(atlases.region(&images, SpriteImage::Atlas(atlas, 4)), atlases.region(&images, SpriteImage::Atlas(atlas, 0)));
     }
 
     #[test]
     fn sprite_size_prefers_explicit_size() {
-        let (mut assets, texture) = assets_with(UVec2::new(128, 64));
-        let atlas = assets.atlas(texture, Grid { cols: 4, rows: 2 });
-        assert_eq!(assets.sprite_size(&Sprite::from_atlas(atlas, 0)), Vec2::new(32.0, 32.0));
-        assert_eq!(assets.sprite_size(&Sprite::from_texture(texture).with_size(Vec2::splat(5.0))), Vec2::splat(5.0));
-    }
-
-    #[test]
-    fn invalid_textures_rejected() {
-        let mut assets = Assets::default();
-        assert!(assets.add_rgba(UVec2::ZERO, vec![]).is_err());
-        assert!(assets.add_rgba(UVec2::new(MAX_TEXTURE_SIDE + 1, 1), vec![0; (MAX_TEXTURE_SIDE as usize + 1) * 4]).is_err());
-        assert!(assets.add_rgba(UVec2::new(2, 2), vec![0; 4]).is_err());
+        let (images, texture) = images_with(UVec2::new(128, 64));
+        let mut atlases = Atlases::default();
+        let atlas = atlases.add(texture, Grid { cols: 4, rows: 2 });
+        assert_eq!(atlases.sprite_size(&images, &Sprite::from_atlas(atlas, 0)), Vec2::new(32.0, 32.0));
+        assert_eq!(atlases.sprite_size(&images, &Sprite::from_texture(texture).with_size(Vec2::splat(5.0))), Vec2::splat(5.0));
     }
 
     #[test]
     fn unknown_ids_fall_back_to_white() {
-        let assets = Assets::default();
-        let r = assets.region(SpriteImage::Texture(TextureId(42)));
-        assert_eq!(r.texture, TextureId::WHITE);
-        assert_eq!(assets.region(SpriteImage::Atlas(AtlasId(3), 0)).texture, TextureId::WHITE);
-    }
-
-    #[test]
-    fn png_roundtrip() {
-        let mut png = Vec::new();
-        image::RgbaImage::from_pixel(3, 2, image::Rgba([1, 2, 3, 4]))
-            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
-            .unwrap();
-        let mut assets = Assets::default();
-        let texture = assets.load_png(&png).unwrap();
-        assert_eq!(assets.texture_size(texture), Some(UVec2::new(3, 2)));
-        assert_eq!(&assets.images()[texture.0 as usize].rgba[..4], &[1, 2, 3, 4]);
-        assert!(assets.load_png(b"not a png").is_err());
+        let images = Assets::<Image>::with_white();
+        let mut other = Assets::<Image>::with_white();
+        let foreign = other.add_rgba(UVec2::ONE, vec![0; 4]).unwrap();
+        let atlases = Atlases::default();
+        assert_eq!(atlases.region(&images, SpriteImage::Texture(foreign)).texture, TextureId::WHITE);
+        assert_eq!(atlases.region(&images, SpriteImage::Atlas(AtlasId(3), 0)).texture, TextureId::WHITE);
     }
 }

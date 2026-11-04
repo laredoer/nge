@@ -1,6 +1,6 @@
 //! 精灵组件。
 
-use bevy_ecs::prelude::Component;
+use bevy_ecs::prelude::{Component, Resource};
 use glam::{Vec2, Vec4};
 
 use crate::assets::{AtlasId, TextureId};
@@ -40,5 +40,50 @@ impl Sprite {
 
     pub fn with_color(self, color: Vec4) -> Self {
         Self { color, ..self }
+    }
+}
+
+/// 不是实体的精灵（粒子之类）的一份数据。坐标是世界坐标，`size` 是最终大小。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SpriteInstance {
+    pub position: Vec2,
+    pub size: Vec2,
+    pub rotation: f32,
+    pub z: f32,
+    /// 线性 RGBA。
+    pub color: Vec4,
+}
+
+impl Default for SpriteInstance {
+    fn default() -> Self {
+        Self { position: Vec2::ZERO, size: Vec2::ONE, rotation: 0.0, z: 0.0, color: Vec4::ONE }
+    }
+}
+
+/// 每帧额外要画的精灵：系统在 Update / PostUpdate 里往里放，和实体精灵一起合批；每帧 PreUpdate 开头清空。
+#[derive(Resource, Debug, Default)]
+pub struct SpriteInstances {
+    pub(crate) items: Vec<(SpriteImage, SpriteInstance)>,
+}
+
+impl SpriteInstances {
+    pub fn push(&mut self, image: SpriteImage, instance: SpriteInstance) {
+        self.items.push((image, instance));
+    }
+
+    pub fn extend(&mut self, image: SpriteImage, instances: impl IntoIterator<Item = SpriteInstance>) {
+        self.items.extend(instances.into_iter().map(|i| (image, i)));
+    }
+
+    pub fn len(&self) -> usize {
+        self.items.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.items.clear();
     }
 }

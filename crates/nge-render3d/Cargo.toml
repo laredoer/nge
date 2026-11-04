@@ -8,11 +8,13 @@ publish.workspace = true
 [dependencies]
 nge-core.workspace = true
 nge-ecs.workspace = true
+nge-assets.workspace = true
 bevy_ecs.workspace = true
 glam.workspace = true
 bytemuck.workspace = true
 image.workspace = true
 gltf = { version = "1.4", default-features = false, features = ["import", "utils"] }
+percent-encoding = "2"
 log.workspace = true
 
 [dev-dependencies]

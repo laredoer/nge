@@ -6,6 +6,7 @@ use glam::{Quat, UVec2, Vec2, Vec3, Vec4};
 use nge_core::{Ctx, Emit, Gfx, Viewport, wgpu};
 use nge_ecs::prelude::*;
 use nge_render3d::prelude::*;
+use nge_render3d::{AssetPlugin, AssetSource, MemorySource};
 
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 const SIZE: u32 = 64;
@@ -18,12 +19,12 @@ fn gfx(size: u32) -> Option<Gfx> {
     Some(Gfx { device, queue, format: FORMAT, viewport })
 }
 
-struct Image {
+struct Pixels {
     size: u32,
     pixels: Vec<[u8; 4]>,
 }
 
-impl Image {
+impl Pixels {
     /// (x, y)：左上角原点。
     fn at(&self, x: u32, y: u32) -> [u8; 4] {
         self.pixels[(y * self.size + x) as usize]
@@ -39,62 +40,79 @@ fn close(a: [u8; 4], b: [u8; 4]) -> bool {
 }
 
 /// 跑一帧并读回 RGBA 像素。`build` 加插件和系统；没有 GPU 时返回 None。
-fn render(size: u32, build: impl Fn(&mut App) + Send + Sync + 'static) -> Option<Image> {
+fn render(size: u32, build: impl Fn(&mut App) + Send + Sync + 'static) -> Option<Pixels> {
     render_frames(size, 1, build)
 }
 
 /// 连续跑 `frames` 帧，画到同一张纹理上，读回最后一帧。
-fn render_frames(size: u32, frames: u32, build: impl Fn(&mut App) + Send + Sync + 'static) -> Option<Image> {
-    let gfx = gfx(size)?;
-    let build = std::sync::Arc::new(build);
-    let factory = nge_ecs::factory(move || {
-        let mut app = App::new();
-        build(&mut app);
-        app
-    });
-    let mut game = factory(&gfx);
-    let emit: Emit = Box::new(|_, _| {});
+fn render_frames(size: u32, frames: u32, build: impl Fn(&mut App) + Send + Sync + 'static) -> Option<Pixels> {
+    let mut offscreen = Offscreen::new(size, build)?;
+    (1..frames).for_each(|_| offscreen.frame(false).map_or((), drop));
+    offscreen.frame(true)
+}
 
-    let extent = wgpu::Extent3d { width: size, height: size, depth_or_array_layers: 1 };
-    let texture = gfx.device.create_texture(&wgpu::TextureDescriptor {
-        label: None,
-        size: extent,
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: FORMAT,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-        view_formats: &[],
-    });
-    let readback = gfx.device.create_buffer(&wgpu::BufferDescriptor {
-        label: None,
-        size: u64::from(size * size * 4),
-        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-        mapped_at_creation: false,
-    });
-    let view = texture.create_view(&Default::default());
-    for _ in 1..frames {
-        game.update(&mut Ctx::new(gfx.viewport, &emit), 0.016);
-        let mut encoder = gfx.device.create_command_encoder(&Default::default());
-        game.render(&gfx, &mut encoder, &view);
-        gfx.queue.submit([encoder.finish()]);
+/// 一个跑在离屏纹理上的游戏，可以一帧一帧地推进。
+struct Offscreen {
+    gfx: Gfx,
+    game: Box<dyn nge_core::Game>,
+    texture: wgpu::Texture,
+    size: u32,
+}
+
+impl Offscreen {
+    fn new(size: u32, build: impl Fn(&mut App) + Send + Sync + 'static) -> Option<Self> {
+        let gfx = gfx(size)?;
+        let build = std::sync::Arc::new(build);
+        let factory = nge_ecs::factory(move || {
+            let mut app = App::new();
+            build(&mut app);
+            app
+        });
+        let game = factory(&gfx);
+        let texture = gfx.device.create_texture(&wgpu::TextureDescriptor {
+            label: None,
+            size: wgpu::Extent3d { width: size, height: size, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        Some(Self { gfx, game, texture, size })
     }
-    game.update(&mut Ctx::new(gfx.viewport, &emit), 0.016);
-    let mut encoder = gfx.device.create_command_encoder(&Default::default());
-    game.render(&gfx, &mut encoder, &view);
-    encoder.copy_texture_to_buffer(
-        texture.as_image_copy(),
-        wgpu::TexelCopyBufferInfo {
-            buffer: &readback,
-            layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(size * 4), rows_per_image: None },
-        },
-        extent,
-    );
-    gfx.queue.submit([encoder.finish()]);
-    readback.map_async(wgpu::MapMode::Read, .., |r| r.expect("map"));
-    gfx.device.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
-    let pixels = readback.slice(..).get_mapped_range().expect("读回").chunks_exact(4).map(|p| [p[0], p[1], p[2], p[3]]).collect();
-    Some(Image { size, pixels })
+
+    /// 推进一帧并画出来；`read` 为真时读回像素。
+    fn frame(&mut self, read: bool) -> Option<Pixels> {
+        let (gfx, size) = (&self.gfx, self.size);
+        let emit: Emit = Box::new(|_, _| {});
+        self.game.update(&mut Ctx::new(gfx.viewport, &emit), 0.016);
+        let mut encoder = gfx.device.create_command_encoder(&Default::default());
+        self.game.render(gfx, &mut encoder, &self.texture.create_view(&Default::default()));
+        if !read {
+            gfx.queue.submit([encoder.finish()]);
+            return None;
+        }
+        let readback = gfx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: u64::from(size * size * 4),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        encoder.copy_texture_to_buffer(
+            self.texture.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(size * 4), rows_per_image: None },
+            },
+            self.texture.size(),
+        );
+        gfx.queue.submit([encoder.finish()]);
+        readback.map_async(wgpu::MapMode::Read, .., |r| r.expect("map"));
+        gfx.device.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
+        let pixels = readback.slice(..).get_mapped_range().expect("读回").chunks_exact(4).map(|p| [p[0], p[1], p[2], p[3]]).collect();
+        Some(Pixels { size, pixels })
+    }
 }
 
 /// 只开亮度 1 的环境光：画出来的颜色就是材质 × 贴图的颜色。
@@ -129,8 +147,8 @@ fn texture_keeps_orientation() {
                     (false, false) => [255, 255, 255, 255],
                 })
                 .collect();
+            let image = world.resource_mut::<Assets<Image>>().add_rgba(UVec2::splat(8), rgba).unwrap();
             let mut assets = world.resource_mut::<Assets3d>();
-            let image = assets.add_rgba(UVec2::splat(8), rgba).unwrap();
             let mesh = assets.add_mesh(Mesh::plane(2.0)).unwrap();
             let material = assets.add_material(Material { base_color_texture: Some(image), ..Default::default() });
             world.spawn((Mesh3d { mesh, material }, facing_camera()));
@@ -213,8 +231,8 @@ fn alpha_mask_discards_transparent_texels() {
         app.add_systems(Startup, |world: &mut World| {
             // 左半透明、右半不透明的白色贴图
             let rgba = (0..16).flat_map(|i| [255, 255, 255, if i % 4 < 2 { 0 } else { 255 }]).collect();
+            let image = world.resource_mut::<Assets<Image>>().add_rgba(UVec2::splat(4), rgba).unwrap();
             let mut assets = world.resource_mut::<Assets3d>();
-            let image = assets.add_rgba(UVec2::splat(4), rgba).unwrap();
             let mesh = assets.add_mesh(Mesh::plane(2.0)).unwrap();
             let material = assets.add_material(Material { base_color_texture: Some(image), alpha_cutoff: Some(0.5), ..Default::default() });
             world.spawn((Mesh3d { mesh, material }, facing_camera()));
@@ -271,8 +289,10 @@ fn gltf_model_renders_with_texture() {
     let Some(img) = render(size, |app| {
         app.add_plugins(Render3dPlugin).insert_resource(ClearColor(wgpu::Color { r: 0.02, g: 0.03, b: 0.06, a: 1.0 }));
         app.add_systems(Startup, |world: &mut World| {
+            let model = world.resource_scope(|world, mut assets: Mut<Assets3d>| {
+                assets.load_gltf(&mut world.resource_mut::<Assets<Image>>(), include_bytes!("../../../examples/model/assets/crate.glb")).unwrap()
+            });
             let mut assets = world.resource_mut::<Assets3d>();
-            let model = assets.load_gltf(include_bytes!("../../../examples/model/assets/crate.glb")).unwrap();
             let ground = assets.add_mesh(Mesh::plane(6.0)).unwrap();
             let grass = assets.add_material(Material { base_color: Vec4::new(0.2, 0.35, 0.2, 1.0), roughness: 0.9, ..Default::default() });
             world.spawn((Model3d(model), Transform3d { rotation: Quat::from_rotation_y(0.5), ..Transform3d::from_xyz(0.0, 0.5, 0.0) }));
@@ -306,7 +326,7 @@ fn missing_texture_and_material_fall_back() {
             // 从另一份资源库拿编号：在这个世界的资源库里都不存在
             let mut other = Assets3d::default();
             let red = Material { base_color: Vec4::new(1.0, 0.0, 0.0, 1.0), ..Default::default() };
-            let ghost_image = other.add_rgba(UVec2::ONE, vec![255, 0, 0, 255]).unwrap();
+            let ghost_image = Assets::<Image>::with_white().add_rgba(UVec2::ONE, vec![255, 0, 0, 255]).unwrap();
             let ghost_material = (0..4).map(|_| other.add_material(red)).last().unwrap();
 
             let mut assets = world.resource_mut::<Assets3d>();
@@ -379,4 +399,68 @@ fn mirrored_objects_keep_their_outside() {
         let c = img.center();
         assert!(c[0] > 150 && c[2] > 150, "double_sided={double_sided}: {c:?}");
     }
+}
+
+/// 读文件前先等测试放行，用来稳定地看到「加载中」的那一帧。
+struct Gate {
+    open: std::sync::Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+    inner: MemorySource,
+}
+
+impl AssetSource for Gate {
+    fn read(&self, uri: &str) -> Result<Vec<u8>, String> {
+        let (open, cv) = &*self.open;
+        let _open = cv.wait_while(open.lock().unwrap(), |open| !*open).unwrap();
+        self.inner.read(uri)
+    }
+}
+
+fn red_png() -> Vec<u8> {
+    let mut png = Vec::new();
+    image::RgbaImage::from_pixel(2, 2, image::Rgba([255, 0, 0, 255]))
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .unwrap();
+    png
+}
+
+#[test]
+fn loaded_images_are_shared_by_2d_and_3d() {
+    let gate = std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+    let source = Gate { open: gate.clone(), inner: MemorySource::default().with("asset:/@t/red.png", red_png()) };
+    let source = std::sync::Mutex::new(Some(std::sync::Arc::new(source) as std::sync::Arc<dyn AssetSource>));
+    let Some(mut offscreen) = Offscreen::new(SIZE, move |app| {
+        app.add_plugins(AssetPlugin::new().source(source.lock().unwrap().take().expect("只建一次")));
+        unlit(app);
+        app.add_plugins(nge_render2d::Render2dPlugin);
+        app.add_systems(Startup, |world: &mut World| {
+            let red = world.resource_scope(|world, mut server: Mut<AssetServer>| server.load(&mut world.resource_mut::<Assets<Image>>(), "asset:/@t/red.png"));
+            // 左边一个 3D 平面、右边一个精灵，用同一张图
+            let mut assets = world.resource_mut::<Assets3d>();
+            let mesh = assets.add_mesh(Mesh::plane(1.0)).unwrap();
+            let material = assets.add_material(Material { base_color_texture: Some(red), ..Default::default() });
+            world.spawn((Mesh3d { mesh, material }, Transform3d { translation: Vec3::new(-1.0, 0.0, 0.0), ..facing_camera() }));
+            world.spawn((nge_render2d::Sprite::from_texture(red).with_size(Vec2::splat(16.0)), nge_render2d::Transform2d::from_xy(16.0, 0.0)));
+        });
+    }) else {
+        return eprintln!("没有 GPU，跳过");
+    };
+    let c = SIZE / 2;
+    let (mesh_at, sprite_at) = ((c - 14, c), (c + 16, c));
+    let loading = offscreen.frame(true).unwrap();
+    assert!(close(loading.at(mesh_at.0, mesh_at.1), [255, 255, 255, 255]), "加载中的 3D 贴图是白色 {:?}", loading.at(mesh_at.0, mesh_at.1));
+    assert!(close(loading.at(sprite_at.0, sprite_at.1), [255, 255, 255, 255]), "加载中的精灵是白色 {:?}", loading.at(sprite_at.0, sprite_at.1));
+
+    *gate.0.lock().unwrap() = true;
+    gate.1.notify_all();
+    let mut loaded = None;
+    for _ in 0..200 {
+        let img = offscreen.frame(true).unwrap();
+        if close(img.at(sprite_at.0, sprite_at.1), [255, 0, 0, 255]) {
+            loaded = Some(img);
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let loaded = loaded.expect("贴图一直没加载出来");
+    assert!(close(loaded.at(mesh_at.0, mesh_at.1), [255, 0, 0, 255]), "3D 也换成了红色 {:?}", loaded.at(mesh_at.0, mesh_at.1));
 }

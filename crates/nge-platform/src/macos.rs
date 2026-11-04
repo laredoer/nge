@@ -197,7 +197,20 @@ pub fn dev_host(factory: GameFactory) -> std::process::ExitCode {
         ..AppOptions::default()
     };
     options.components.register(nge_core::GAME_COMPONENT, component(factory));
+    // asset:/ 从 dev server 读（nsh dev 在 /assets/ 下托管各 crate 的 assets 目录）
+    match dev_asset_base(&args.url) {
+        Some(base) => nge_assets::set_source(std::sync::Arc::new(nge_assets::HttpSource(base))),
+        None => log::warn!("从 {} 推不出资源地址，asset:/ 只能读本地文件", args.url),
+    }
     run_app(AppSource::DevServer(args.url), options)
+}
+
+/// `ws://host:port/ws` → `http://host:port/assets/`（和 nsh 的 dev host 一致）。
+#[cfg(feature = "dev")]
+fn dev_asset_base(url: &str) -> Option<String> {
+    let rest = url.strip_prefix("ws://")?;
+    let host = rest.split('/').next().filter(|h| !h.is_empty())?;
+    Some(format!("http://{host}/assets/"))
 }
 
 #[cfg(feature = "dev")]
@@ -245,6 +258,13 @@ mod tests {
 
     fn parse(args: &[&str]) -> DevArgs {
         DevArgs::parse(args.iter().map(|s| s.to_string()))
+    }
+
+    #[test]
+    fn asset_base_from_dev_server_url() {
+        assert_eq!(super::dev_asset_base("ws://127.0.0.1:8790/ws").as_deref(), Some("http://127.0.0.1:8790/assets/"));
+        assert_eq!(super::dev_asset_base("wss://dev.example.com/ws"), None, "没开 TLS");
+        assert_eq!(super::dev_asset_base("ws:///ws"), None);
     }
 
     #[test]

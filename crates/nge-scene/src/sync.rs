@@ -136,10 +136,10 @@ mod tests {
             { "id": "x", "texture": "missing" },
         ] })));
         let all = sprites(&mut app);
-        let assets = app.world().resource::<nge_render2d::Assets>();
-        assert_eq!(assets.sprite_size(&all["p"].1), Vec2::new(32.0, 16.0));
+        let (images, atlases) = (app.world().resource::<nge_render2d::Assets<nge_render2d::Image>>(), app.world().resource::<nge_render2d::Atlases>());
+        assert_eq!(atlases.sprite_size(images, &all["p"].1), Vec2::new(32.0, 16.0));
         assert!(matches!(all["g"].1.image, SpriteImage::Atlas(_, 5)));
-        assert_eq!(assets.sprite_size(&all["g"].1), Vec2::splat(8.0));
+        assert_eq!(atlases.sprite_size(images, &all["g"].1), Vec2::splat(8.0));
         assert!(matches!(all["x"].1.image, SpriteImage::Texture(t) if t == nge_render2d::TextureId::WHITE));
     }
 
