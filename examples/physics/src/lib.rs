@@ -1,6 +1,7 @@
-//! 场景完全由 `App.tsx` 声明（地面、墙、箱子、弹球的刚体），Rust 侧只建 App、加插件。
+//! 场景完全由 `App.tsx` 声明（地面、墙、箱子、弹球的刚体，音乐和音效），Rust 侧只建 App、加插件。
 
 use nge_assets::AssetPlugin;
+use nge_audio::AudioPlugin;
 use nge_ecs::App;
 use nge_render2d::Render2dPlugin;
 use nge_render3d::Render3dPlugin;
@@ -8,8 +9,13 @@ use nge_scene::ScenePlugin;
 use nsh_core::prelude::assets;
 
 pub fn app() -> App {
+    build(AudioPlugin::default())
+}
+
+fn build(audio: AudioPlugin) -> App {
     let mut app = App::new();
     app.add_plugins(AssetPlugin::new().files(assets!().iter().map(|f| (f.uri, f.source))))
+        .add_plugins(audio)
         .add_plugins(Render3dPlugin)
         .add_plugins(Render2dPlugin)
         .add_plugins(ScenePlugin::new());
@@ -28,6 +34,11 @@ mod tests {
     use serde_json::{json, Value};
 
     use super::*;
+
+    /// 测试不出声。
+    fn app() -> App {
+        build(AudioPlugin::mock())
+    }
 
     const VIEWPORT: Viewport = Viewport { size: [800.0, 600.0], pixels: [800, 600] };
     const FLOOR: f32 = -260.0;
@@ -50,7 +61,8 @@ mod tests {
             json!({ "id": format!("ball-{i}"), "x": x, "y": y, "w": r * 2.0, "z": 1, "tap": true, "texture": "asset:/@physics/spark.png",
                 "body": { "shape": "circle", "restitution": 0.5, "collide": true } })
         }));
-        json!({ "background": "#10131c", "sprites": sprites })
+        json!({ "background": "#10131c", "sprites": sprites,
+            "audio": { "music": "asset:/@physics/music.wav", "musicVolume": 0.5, "preload": ["asset:/@physics/ding.wav", "asset:/@physics/pop.wav"] } })
     }
 
     fn position(app: &mut App, id: &str) -> nge_ecs::glam::Vec2 {
@@ -93,5 +105,18 @@ mod tests {
         run(&mut app, 10);
         assert!(position(&mut app, "ball-0").y > FLOOR + 50.0, "被弹起来");
         assert!(position(&mut app, "crate-0").y < FLOOR + 30.0, "加球不动箱子");
+    }
+
+    #[test]
+    fn music_loops_and_sounds_play() {
+        let mut app = app();
+        app.prop("scene", Some(&scene(&[])));
+        run(&mut app, 1);
+        nge_assets::AssetServer::apply(app.world_mut(), true);
+        run(&mut app, 1);
+        assert_eq!(app.world().resource::<nge_audio::Audio>().voices(), 1, "背景音乐");
+        app.command("sound", &json!({ "src": "asset:/@physics/ding.wav", "volume": 0.35, "pitch": 1.4 }));
+        run(&mut app, 1);
+        assert_eq!(app.world().resource::<nge_audio::Audio>().voices(), 2);
     }
 }

@@ -5,6 +5,7 @@ use glam::Vec4;
 use nge_core::{EventKey, PropKey};
 use serde::{Deserialize, Serialize};
 
+use crate::audio::AudioNode;
 use crate::nodes::{AmbientNode, Camera3dNode, EmitterNode, LightNode, ModelNode, TextNode};
 use crate::physics::{BodyNode, PhysicsNode};
 
@@ -24,6 +25,7 @@ pub struct Scene {
     pub lights: Vec<LightNode>,
     pub ambient: Option<AmbientNode>,
     pub physics: Option<PhysicsNode>,
+    pub audio: Option<AudioNode>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]

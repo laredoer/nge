@@ -14,6 +14,7 @@ nge-render3d.workspace = true
 nge-text.workspace = true
 nge-particles.workspace = true
 nge-physics2d.workspace = true
+nge-audio.workspace = true
 bevy_ecs.workspace = true
 glam.workspace = true
 serde.workspace = true
