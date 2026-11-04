@@ -8,6 +8,7 @@ use nge_core::wgpu;
 use nge_render2d::{Camera2d, ClearColor, Sprite, Transform2d};
 
 use crate::behave::{Spin, Tappable};
+use crate::physics::{apply_body, square};
 use crate::protocol::{CameraNode, Color, Scene, SpriteNode};
 use crate::resolve::SceneAssets;
 use crate::SceneCamera;
@@ -58,14 +59,10 @@ impl Node for SpriteNode {
 }
 
 pub(crate) fn sync_sprites(mut commands: Commands, scene: Res<Scene>, mut assets: SceneAssets, nodes: Query<(Entity, &Declared<SpriteNode>)>) {
-    sync_list(&mut commands, &scene.sprites, &nodes, |commands, entity, _, node| {
+    sync_list(&mut commands, &scene.sprites, &nodes, |commands, entity, before, node| {
         let image = assets.texture(&node.id, node.texture.as_deref(), node.grid, node.frame);
         // 只给 w 或 h 时按正方形；都不给时纯色块按 1×1、纹理按像素大小
-        let size = match (node.w, node.h) {
-            (Some(w), Some(h)) => Some(Vec2::new(w, h)),
-            (Some(s), None) | (None, Some(s)) => Some(Vec2::splat(s)),
-            (None, None) => None,
-        };
+        let size = square(node.w, node.h);
         let sprite = Sprite { image, size, color: node.color.map_or(Vec4::ONE, |c| c.0) };
         let transform = Transform2d {
             translation: Vec2::new(node.x, node.y),
@@ -74,8 +71,22 @@ pub(crate) fn sync_sprites(mut commands: Commands, scene: Res<Scene>, mut assets
             z: node.z,
         };
         let mut entity = commands.entity(entity);
-        entity.remove::<(Spin, Tappable)>().insert((sprite, transform));
-        if node.spin != 0.0 {
+        entity.remove::<(Spin, Tappable)>().insert(sprite);
+        // 有刚体时位置归物理管：声明的位置没变就只更新缩放和 z，不把它拉回去
+        let placed = before.is_some_and(|b| (b.x, b.y, b.rotation) == (node.x, node.y, node.rotation));
+        if node.body.is_some() && placed {
+            entity.queue(move |mut e: EntityWorldMut| {
+                if let Some(mut t) = e.get_mut::<Transform2d>() {
+                    (t.scale, t.z) = (transform.scale, transform.z);
+                }
+            });
+        } else {
+            entity.insert(transform);
+        }
+        apply_body(&mut entity, before, node, size);
+        if node.spin != 0.0 && node.body.is_some() {
+            log::warn!("节点 {:?} 有 body，spin 不生效（位置和旋转归物理管）", node.id);
+        } else if node.spin != 0.0 {
             entity.insert(Spin(node.spin.to_radians()));
         }
         if node.tap {

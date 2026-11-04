@@ -6,6 +6,7 @@ use nge_core::{EventKey, PropKey};
 use serde::{Deserialize, Serialize};
 
 use crate::nodes::{AmbientNode, Camera3dNode, EmitterNode, LightNode, ModelNode, TextNode};
+use crate::physics::{BodyNode, PhysicsNode};
 
 pub const SCENE: PropKey<Scene> = PropKey::new("scene");
 pub const TAP: EventKey<Tap> = EventKey::new("tap");
@@ -22,6 +23,7 @@ pub struct Scene {
     pub camera3d: Option<Camera3dNode>,
     pub lights: Vec<LightNode>,
     pub ambient: Option<AmbientNode>,
+    pub physics: Option<PhysicsNode>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -64,6 +66,7 @@ pub struct SpriteNode {
     pub spin: f32,
     #[serde(default)]
     pub tap: bool,
+    pub body: Option<BodyNode>,
 }
 
 fn one() -> f32 {

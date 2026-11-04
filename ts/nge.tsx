@@ -26,6 +26,34 @@ export interface SpriteNode {
   spin?: number;
   /** 可点击：按下时发 tap 事件。 */
   tap?: boolean;
+  /** 刚体。有了它位置归物理管：声明的 x / y / rotation 只在生成和改了的时候生效（同时重设初速度）。 */
+  body?: BodyNode;
+}
+
+/** 精灵的刚体和碰撞体。尺寸是精灵本地的大小，会乘精灵的 scale。 */
+export interface BodyNode {
+  /** 默认 "dynamic"。kinematic 跟着声明的位置平滑移动，会推开别的刚体。 */
+  kind?: "dynamic" | "fixed" | "kinematic";
+  /** 默认 "box"。 */
+  shape?: "box" | "circle";
+  /** 碰撞体大小，不填取精灵的 w / h（圆取短边的一半）；都没有时只建刚体、不建碰撞体。 */
+  w?: number;
+  h?: number;
+  r?: number;
+  /** 弹性，默认 0。 */
+  restitution?: number;
+  /** 默认 0.5。 */
+  friction?: number;
+  /** 默认 1。 */
+  density?: number;
+  /** 只检测重叠，不碰撞。 */
+  sensor?: boolean;
+  /** 初速度（point / s）。 */
+  velocity?: [number, number];
+  /** 初角速度（度 / s）。 */
+  angularVelocity?: number;
+  /** 碰撞开始 / 结束时发 collide 事件。 */
+  collide?: boolean;
 }
 
 export type Anchor = "top-left" | "top" | "top-right" | "left" | "center" | "right" | "bottom-left" | "bottom" | "bottom-right";
@@ -137,6 +165,8 @@ export interface Scene {
   camera3d?: Camera3dNode;
   lights?: LightNode[];
   ambient?: { color?: string; brightness?: number };
+  /** 重力（point / s²），默认 [0, -981]。 */
+  physics?: { gravity?: [number, number] };
 }
 
 /** 点中了可点击的精灵或模型。x / y 是指针的 2D 世界坐标；点中模型时 point 是 3D 命中点。 */
@@ -173,6 +203,18 @@ export function burst(game: YNode | undefined, args: Burst) {
   game?.command("burst", args);
 }
 
+/** 两个精灵节点开始（started）或停止接触；其中一个的 body 开了 collide 才发。 */
+export interface Collide {
+  a: string;
+  b: string;
+  started: boolean;
+}
+
+/** 给精灵 `id` 的刚体加上 (x, y) 的速度（point / s，和质量无关）。 */
+export function push(game: YNode | undefined, args: { id: string; x: number; y: number }) {
+  game?.command("push", args);
+}
+
 /** 飘一行字。`game` 是 `<GameView ref>` 拿到的节点。 */
 export function floatText(game: YNode | undefined, args: FloatText) {
   game?.command("floatText", args);
@@ -193,6 +235,7 @@ interface BuiltinProps {
 
 interface BuiltinEvents {
   tap: Tap;
+  collide: Collide;
   fps: FrameStats;
   error: EngineError;
 }
@@ -203,14 +246,14 @@ export type GameViewProps<P, E> = NativeComponentProps<Partial<BuiltinProps> & P
 
 /**
  * 生成游戏视图组件。`props` / `events` 是游戏自己的通道名（Rust 侧 `add_prop` / `add_state` / `add_event`），
- * 类型由泛型给出；内置 prop `scene`、事件 `tap` / `fps` / `error`，触摸自动转成引擎的 `touch` command。
+ * 类型由泛型给出；内置 prop `scene`、事件 `tap` / `collide` / `fps` / `error`，触摸自动转成引擎的 `touch` command。
  */
 export function gameView<P extends object = {}, E extends object = {}>(
   spec: { props?: readonly (keyof P & string)[]; events?: readonly (keyof E & string)[] } = {},
 ) {
   const Native = nativeComponent<BuiltinProps & P, BuiltinEvents & E>("nge.game", {
     props: [...new Set(["scene", ...(spec.props ?? [])])] as (keyof (BuiltinProps & P) & string)[],
-    events: [...new Set(["tap", "fps", "error", ...(spec.events ?? [])])] as (keyof (BuiltinEvents & E) & string)[],
+    events: [...new Set(["tap", "collide", "fps", "error", ...(spec.events ?? [])])] as (keyof (BuiltinEvents & E) & string)[],
   });
 
   return (props: GameViewProps<P, E>) => {
