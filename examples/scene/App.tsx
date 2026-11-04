@@ -16,6 +16,7 @@ function App() {
   const taps = signal(0);
   const arrived = signal(0);
   const fps = signal(0);
+  const paused = signal(false);
 
   // 位置交给补间，TSX 只声明一次初始位置
   const scene = (): Scene => {
@@ -26,6 +27,7 @@ function App() {
     });
     return {
       background: "#0a0a20",
+      timeScale: paused() ? 0 : 1,
       // 相机平滑地跟着飞船，飞船在画面偏下；走到边上不拍出这片区域
       camera: { follow: "ship", y: 120, smooth: 0.25, bounds: { left: -400, right: 400, bottom: -500, top: 500 } },
       sprites: [
@@ -39,7 +41,7 @@ function App() {
   return (
     <View class="flex-1 bg-black">
       <Text class="text-white p-4">
-        点飞船 {taps()} 次 · 方向键移动 · 到达 {arrived()} 次 · {fps()} FPS
+        点飞船 {taps()} 次 · 方向键移动 · 空格{paused() ? "继续（已暂停）" : "暂停"} · 到达 {arrived()} 次 · {fps()} FPS
       </Text>
       <GameView
         class="flex-1"
@@ -55,6 +57,7 @@ function App() {
           shake(game, { strength: 6, duration: 0.25 });
         }}
         onKey={(e) => {
+          if (e.code === "Space" && e.down && !e.repeat) paused.set(!paused());
           const dir = ARROWS[e.code];
           if (!e.down || !dir) return;
           target.x = Math.max(-180, Math.min(180, target.x + dir[0] * STEP));

@@ -27,6 +27,9 @@ pub struct Scene {
     pub ambient: Option<AmbientNode>,
     pub physics: Option<PhysicsNode>,
     pub audio: Option<AudioNode>,
+    /// 时间缩放，1 正常、0 暂停。
+    #[serde(rename = "timeScale")]
+    pub time_scale: Option<f32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]

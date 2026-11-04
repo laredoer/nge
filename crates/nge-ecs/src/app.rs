@@ -185,8 +185,9 @@ impl App {
         }
         {
             let mut time = self.world.resource_mut::<Time>();
-            time.delta = dt;
-            time.elapsed += f64::from(dt);
+            time.delta = dt * Time::sanitize(time.scale);
+            time.real_delta = dt;
+            time.elapsed += f64::from(time.delta);
             time.frame += 1;
         }
         if !self.started {
@@ -294,6 +295,26 @@ mod tests {
         app.tick(viewport(), 0.016);
         app.tick(viewport(), 0.016);
         assert_eq!(app.world().resource::<Log>().0, ["startup", "update", "update"]);
+    }
+
+    #[test]
+    fn time_scale_pauses_and_slows() {
+        let mut app = App::new();
+        app.tick(viewport(), 0.5);
+        app.world_mut().resource_mut::<Time>().scale = 0.5;
+        app.tick(viewport(), 0.2);
+        let time = *app.world().resource::<Time>();
+        assert_eq!((time.delta, time.real_delta), (0.1, 0.2));
+        assert!((time.elapsed - 0.6).abs() < 1e-6, "elapsed 按缩放后的时间累计");
+        app.world_mut().resource_mut::<Time>().scale = 0.0;
+        app.tick(viewport(), 0.2);
+        let time = *app.world().resource::<Time>();
+        assert_eq!((time.delta, time.real_delta, time.frame), (0.0, 0.2, 3), "暂停时 frame 照样加");
+        for (scale, delta) in [(-1.0, 0.0), (f32::NAN, 0.2), (f32::INFINITY, 0.2)] {
+            app.world_mut().resource_mut::<Time>().scale = scale;
+            app.tick(viewport(), 0.2);
+            assert_eq!(app.world().resource::<Time>().delta, delta, "scale {scale}");
+        }
     }
 
     #[test]

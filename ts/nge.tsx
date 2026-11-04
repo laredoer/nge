@@ -183,6 +183,8 @@ export interface Scene {
   /** 重力（point / s²），默认 [0, -981]。 */
   physics?: { gravity?: [number, number] };
   audio?: AudioNode;
+  /** 时间缩放，默认 1；0 暂停（物理、补间、动画、粒子、相机平滑都停），0.5 慢一半。声音不受影响。 */
+  timeScale?: number;
 }
 
 /** 背景音乐和总音量。音量是线性的：0 静音，1 原音量。 */
