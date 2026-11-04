@@ -573,3 +573,59 @@ fn excluding_a_collider_without_a_body() {
     assert_eq!(down(QueryFilter::default()), Some(only));
     assert_eq!(down(QueryFilter::default().exclude(only)), Some(below));
 }
+
+/// 这一帧调试视图画的、某种颜色的线。
+fn outline(app: &App, color: glam::Vec4) -> Vec<nge_render2d::SpriteInstance> {
+    app.world().resource::<nge_render2d::SpriteInstances>().iter().filter(|(_, i)| i.color == color).map(|&(_, i)| i).collect()
+}
+
+fn centroid(lines: &[nge_render2d::SpriteInstance]) -> Vec2 {
+    lines.iter().map(|l| l.position).sum::<Vec2>() / lines.len() as f32
+}
+
+#[test]
+fn debug_view_outlines_every_collider_while_enabled() {
+    use crate::debug::{DYNAMIC, FIXED, KINEMATIC, SENSOR};
+
+    let mut app = app();
+    app.world_mut().init_resource::<nge_render2d::SpriteInstances>();
+    ground(&mut app);
+    let ball = app.world_mut().spawn((RigidBody::Dynamic, Collider::circle(10.0), at(0.0, 100.0), Velocity::default())).id();
+    app.world_mut().spawn((RigidBody::Kinematic, Collider::rect(Vec2::splat(30.0)), at(-100.0, 50.0)));
+    let turned = Transform2d { rotation: 0.5, ..at(50.0, 30.0) };
+    app.world_mut().spawn((Collider { sensor: true, ..Collider::rect(Vec2::new(40.0, 20.0)) }, turned));
+    steps(&mut app, 5);
+    assert!(app.world().resource::<nge_render2d::SpriteInstances>().is_empty(), "默认关");
+
+    app.world_mut().resource_mut::<PhysicsDebug>().enabled = true;
+    // 半步：不走物理，球画在上一步和这一步之间
+    app.tick(VIEWPORT, STEP / 2.0);
+    assert_ne!(drawn(&app, ball), pos(&app, ball));
+
+    let ground = outline(&app, FIXED);
+    assert_eq!(ground.len(), 4);
+    assert!(ground.iter().any(|l| (l.position - Vec2::ZERO).length() < 1e-3), "地面顶边在 y = 0");
+    assert!((centroid(&outline(&app, KINEMATIC)) - Vec2::new(-100.0, 50.0)).length() < 1e-3);
+
+    // 只有碰撞体的 sensor：物理里的位置，边跟着转
+    let sensor = outline(&app, SENSOR);
+    assert_eq!(sensor.len(), 4);
+    assert!((centroid(&sensor) - Vec2::new(50.0, 30.0)).length() < 1e-3);
+    let long = sensor.iter().find(|l| l.size.x > 40.0).unwrap();
+    assert!((long.rotation.rem_euclid(std::f32::consts::PI) - 0.5).abs() < 1e-4, "长边转了 0.5: {}", long.rotation);
+
+    // 动态刚体：32 段圆加一条半径，圆心在画面位置（DrawAt）
+    let ball_lines = outline(&app, DYNAMIC);
+    assert_eq!(ball_lines.len(), 33);
+    let ring: Vec<_> = ball_lines.into_iter().filter(|l| l.size.x < 5.0).collect();
+    assert!((centroid(&ring) - drawn(&app, ball)).length() < 1e-3, "{} {}", centroid(&ring), drawn(&app, ball));
+}
+
+#[test]
+fn debug_view_without_a_renderer_does_nothing() {
+    let mut app = app();
+    ground(&mut app);
+    app.world_mut().resource_mut::<PhysicsDebug>().enabled = true;
+    steps(&mut app, 2);
+    assert!(!app.world().contains_resource::<nge_render2d::SpriteInstances>());
+}

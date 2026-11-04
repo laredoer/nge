@@ -68,6 +68,7 @@
 | **平台跳跃示例** | 物理加接触查询（`Physics::contacts`）和锁旋转（`fixedRotation`）；Rust 角色控制 + TSX 关卡，合成的音效，按 R 重新开始，巡逻的敌人（踩头消灭）；见 [platformer.md](platformer.md) | `examples/platformer`：键盘跑跳、相机跟随、吃金币、踩敌人、掉坑重来、到终点通关，有音效、R 重新开始 |
 | **手柄（Mac）** | GameController 每帧读一遍：按钮和摇杆方向当成 `Gamepad*` 键名走 `key`，摇杆模拟量走 `gamepad` command 进 `Input::stick`；见 [gamepad.md](gamepad.md) | `examples/platformer` 用十字键 / 左摇杆跑、A 跳；`examples/dodge` 按摇杆推的力度移动 |
 | **移动平台和渲染插值** | `DrawAt`：动态 / kinematic 刚体画在插值过的位置，`Transform2d` 保持真实值；`Physics::velocity`；平台跳跃的横移 / 升降平台；见 [moving-platforms.md](moving-platforms.md) | `examples/platformer`：站在移动平台上跟着走、不陷不抖，120 Hz 下每帧都动 |
+| **调试绘制** | `Gizmos`（即时模式画线、框、圆，放进 `SpriteInstances`）；`PhysicsDebug` 画出所有碰撞体轮廓；见 [gizmos.md](gizmos.md) | `examples/physics` 的「查询」和平台跳跃的 Q 调试视图改用 `Gizmos`，Q 同时画出所有碰撞体 |
 | **M6 Android** | SurfaceView 和 Vulkan，JNI 胶水层 | 示例游戏在 Android 真机上能跑 |
 
 ## 待定

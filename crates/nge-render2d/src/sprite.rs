@@ -60,7 +60,7 @@ impl Default for SpriteInstance {
     }
 }
 
-/// 每帧额外要画的精灵：系统在 Update / PostUpdate 里往里放，和实体精灵一起合批；每帧 PreUpdate 开头清空。
+/// 每帧额外要画的精灵：系统在 Update / PostUpdate 里往里放，和实体精灵一起合批；每帧在 PreUpdate 里清空（别在 PreUpdate 里放）。
 #[derive(Resource, Debug, Default)]
 pub struct SpriteInstances {
     pub(crate) items: Vec<(SpriteImage, SpriteInstance)>,
@@ -73,6 +73,11 @@ impl SpriteInstances {
 
     pub fn extend(&mut self, image: SpriteImage, instances: impl IntoIterator<Item = SpriteInstance>) {
         self.items.extend(instances.into_iter().map(|i| (image, i)));
+    }
+
+    /// 这一帧放进来的实例。
+    pub fn iter(&self) -> impl Iterator<Item = &(SpriteImage, SpriteInstance)> {
+        self.items.iter()
     }
 
     pub fn len(&self) -> usize {

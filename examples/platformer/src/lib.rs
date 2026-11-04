@@ -567,9 +567,10 @@ mod tests {
         assert!((player(&mut app).0 - start).length() < 20.0, "回到起点附近 {:?}", player(&mut app));
     }
 
+    /// 这一帧调试绘制的（位置，大小）。
     fn overlays(app: &mut App) -> Vec<(Vec2, Vec2)> {
-        let world = app.world_mut();
-        world.query_filtered::<(&Transform2d, &nge_render2d::Sprite), With<debug::Overlay>>().iter(world).map(|(t, s)| (t.translation, s.size.unwrap())).collect()
+        let instances = app.world().resource::<nge_render2d::SpriteInstances>();
+        instances.iter().filter(|(_, i)| i.z == nge_render2d::GIZMO_Z).map(|(_, i)| (i.position, i.size)).collect()
     }
 
     #[test]
@@ -587,6 +588,11 @@ mod tests {
         assert!(shown.iter().any(|(at, size)| *size == Vec2::splat(8.0) && at.y.abs() < 1.0), "{shown:?}");
         // 框里的敌人被标出来（10 × 10，在敌人身上）
         assert!(shown.iter().any(|(at, size)| *size == Vec2::splat(10.0) && (*at - Vec2::new(60.0, 12.0)).length() < 1.0), "{shown:?}");
+        // 敌人（24 × 24）的碰撞体轮廓：四条边落在它的边上
+        for side in [Vec2::X, Vec2::NEG_X, Vec2::Y, Vec2::NEG_Y] {
+            let edge = Vec2::new(60.0, 12.0) + side * 12.0;
+            assert!(shown.iter().any(|(at, _)| (*at - edge).length() < 1.0), "{edge} {shown:?}");
+        }
         key(&mut app, "KeyQ", true);
         run(&mut app, 2);
         assert!(overlays(&mut app).is_empty(), "再按一次关掉");

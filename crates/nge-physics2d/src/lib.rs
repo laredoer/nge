@@ -1,8 +1,10 @@
 //! 2D 物理（rapier2d）：给带 `Transform2d` 的实体加 [`RigidBody`] / [`Collider`]，
 //! 固定步长模拟，动态刚体的位置和速度写回组件，碰撞时发 [`Collision`] 消息。
 
+mod debug;
 mod world;
 
+pub use debug::PhysicsDebug;
 pub use world::Physics;
 
 use bevy_ecs::prelude::*;
@@ -138,12 +140,14 @@ impl Plugin for PhysicsPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(Physics::new(self.gravity, self.pixels_per_meter))
             .add_message::<Collision>()
-            .add_systems(PostUpdate, (world::remove, world::create, world::step).chain().in_set(PhysicsStepped));
+            .init_resource::<PhysicsDebug>()
+            .add_systems(PostUpdate, (world::remove, world::create, world::step).chain().in_set(PhysicsStepped))
+            .add_systems(PostUpdate, debug::draw.after(PhysicsStepped).run_if(debug::enabled));
     }
 }
 
 pub mod prelude {
-    pub use crate::{Collider, Collision, Contact, Impulse, LockRotation, Physics, PhysicsPlugin, QueryFilter, RayHit, RigidBody, Shape, Velocity};
+    pub use crate::{Collider, Collision, Contact, Impulse, LockRotation, Physics, PhysicsDebug, PhysicsPlugin, QueryFilter, RayHit, RigidBody, Shape, Velocity};
 }
 
 #[cfg(test)]
