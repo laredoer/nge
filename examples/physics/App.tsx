@@ -2,7 +2,8 @@ import { mount, signal, Text, View, type YNode } from "nsh";
 import { Button } from "nsh/base";
 import { burst, gameView, push, sound, type Burst, type Scene, type SpriteNode, type TilemapNode } from "../../ts/nge";
 
-const GameView = gameView();
+/** `queries`：画空间查询（射线、框、点），Rust 侧见 src/queries.rs。 */
+const GameView = gameView<{ queries: boolean }, {}>({ props: ["queries"] });
 
 const SPARK = "asset:/@physics/spark.png";
 const DING = "asset:/@physics/ding.wav";
@@ -84,6 +85,7 @@ function App() {
   const hits = signal(0);
   const fps = signal(0);
   const muted = signal(false);
+  const queries = signal(false);
   let game: YNode | undefined;
   /** 球的半径，按 id 查：撞击声的音高跟着球的大小走。 */
   const radius = new Map<string, number>();
@@ -142,6 +144,9 @@ function App() {
           }}>
           <Text class="text-white">清空</Text>
         </Button>
+        <Button class={`${queries() ? "bg-blue-600 active:bg-blue-800" : "bg-gray-600 active:bg-gray-800"} rounded px-3 py-1`} onPress={() => queries.set(!queries())}>
+          <Text class="text-white">查询</Text>
+        </Button>
         <Button class="bg-gray-600 active:bg-gray-800 rounded px-3 py-1" onPress={() => muted.set(!muted())}>
           <Text class="text-white">{muted() ? "开声音" : "静音"}</Text>
         </Button>
@@ -150,6 +155,7 @@ function App() {
         class="flex-1"
         ref={(n: YNode) => (game = n)}
         scene={scene()}
+        queries={queries()}
         onTap={(t) => {
           if (t.id === "sky") {
             // 只在两面墙之间生成，免得掉到墙外一直往下落

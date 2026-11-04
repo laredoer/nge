@@ -106,7 +106,7 @@ function App() {
   return (
     <View class="flex-1 bg-black">
       <Text class="text-white p-4">
-        ← → / A D / 手柄 移动 · 空格 / ↑ / A 跳 · R 重来 · 金币 {taken().length} / {COINS.length} · 失手 {falls()} 次
+        ← → / A D / 手柄 移动 · 空格 / ↑ / A 跳 · R 重来 · Q 调试 · 金币 {taken().length} / {COINS.length} · 失手 {falls()} 次
         {won() === null ? "" : ` · 通关！用时 ${won()} 秒`}
       </Text>
       <GameView

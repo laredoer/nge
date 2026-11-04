@@ -6,6 +6,9 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+bevy_ecs.workspace = true
+serde.workspace = true
+nge-physics2d.workspace = true
 nge-core.workspace = true
 nge-ecs.workspace = true
 nge-assets.workspace = true

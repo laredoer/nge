@@ -2,6 +2,8 @@
 //! Rust 只管每帧的角色控制：读键盘、看脚下有没有地、设速度，踩敌人、被敌人撞或掉下去了送回起点，按 R 重新开始；
 //! 起跳、踩敌人和掉坑的音效也在这里放。
 
+mod debug;
+
 use std::collections::HashSet;
 
 use bevy_ecs::prelude::*;
@@ -216,7 +218,8 @@ fn build(audio: AudioPlugin) -> App {
         .init_resource::<Controller>()
         .init_resource::<Sfx>()
         .add_systems(Startup, load_sfx)
-        .add_systems(Update, control);
+        .init_resource::<debug::DebugView>()
+        .add_systems(Update, (control, debug::debug_view).chain());
     app
 }
 
@@ -562,6 +565,31 @@ mod tests {
         key(&mut app, "ArrowRight", false);
         assert!(named(&run(&mut app, 30), "respawn").is_empty(), "松开以后不再撞");
         assert!((player(&mut app).0 - start).length() < 20.0, "回到起点附近 {:?}", player(&mut app));
+    }
+
+    fn overlays(app: &mut App) -> Vec<(Vec2, Vec2)> {
+        let world = app.world_mut();
+        world.query_filtered::<(&Transform2d, &nge_render2d::Sprite), With<debug::Overlay>>().iter(world).map(|(t, s)| (t.translation, s.size.unwrap())).collect()
+    }
+
+    #[test]
+    fn q_toggles_the_debug_view_of_queries() {
+        let mut app = app();
+        app.prop("scene", Some(&with_enemy(level(None), 60.0)));
+        run(&mut app, 20);
+        assert!(overlays(&mut app).is_empty());
+        key(&mut app, "KeyQ", true);
+        run(&mut app, 1);
+        key(&mut app, "KeyQ", false);
+        run(&mut app, 1);
+        let shown = overlays(&mut app);
+        // 往下的射线碰到地面：交点（8 × 8）在 y = 0
+        assert!(shown.iter().any(|(at, size)| *size == Vec2::splat(8.0) && at.y.abs() < 1.0), "{shown:?}");
+        // 框里的敌人被标出来（10 × 10，在敌人身上）
+        assert!(shown.iter().any(|(at, size)| *size == Vec2::splat(10.0) && (*at - Vec2::new(60.0, 12.0)).length() < 1.0), "{shown:?}");
+        key(&mut app, "KeyQ", true);
+        run(&mut app, 2);
+        assert!(overlays(&mut app).is_empty(), "再按一次关掉");
     }
 
     /// App.tsx 的金币是 sensor、角色开了 collide：走过去时发 collide，金币不挡路。

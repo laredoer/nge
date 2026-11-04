@@ -5,13 +5,14 @@ use bevy_ecs::prelude::*;
 use glam::Vec2;
 use nge_ecs::Time;
 use nge_render2d::{DrawAt, Transform2d};
-use rapier2d::math::{Rotation, Vector};
+use rapier2d::math::{Pose, Rotation, Vector};
 use rapier2d::prelude::{
     ActiveEvents, ColliderBuilder, ColliderHandle, ColliderSet, CollisionEvent, ContactPair, EventHandler, PhysicsWorld, RigidBodyBuilder,
     RigidBodyHandle, RigidBodySet, SoftBodySet, SoftBodyTearEvent,
 };
+use rapier2d::prelude::{Cuboid, QueryFilter as RapierFilter, Ray};
 
-use crate::{Collider, Collision, Contact, Impulse, LockRotation, MAX_STEPS, RigidBody, STEP, Shape, Velocity};
+use crate::{Collider, Collision, Contact, Impulse, LockRotation, MAX_STEPS, QueryFilter, RayHit, RigidBody, STEP, Shape, Velocity};
 
 /// rapier 的世界，加上实体和刚体 / 碰撞体的对应关系。
 #[derive(Resource)]
@@ -69,7 +70,6 @@ impl Physics {
     /// 实体还没建到物理里时是空的。`other` 是碰撞体所在的实体（瓦片地图是它下面的子实体）。
     pub fn contacts(&self, entity: Entity) -> Vec<Contact> {
         let Some(collider) = self.entities.get(&entity).and_then(|h| h.collider) else { return Vec::new() };
-        let entity_of = |c: ColliderHandle| self.world.colliders.get(c).map(|c| Entity::from_bits(c.user_data as u64));
         self.world
             .contact_pairs_with(collider)
             .filter(|pair| pair.has_any_active_contact())
@@ -78,14 +78,65 @@ impl Physics {
                 let manifold = pair.solver_manifolds().iter().find(|m| !m.data.solver_contacts.is_empty())?;
                 // rapier 的法线从 collider1 指向 collider2
                 let (other, normal) = if pair.collider1 == collider { (pair.collider2, -manifold.data.normal) } else { (pair.collider1, manifold.data.normal) };
-                Some(Contact { other: entity_of(other)?, normal: vec2(normal) })
+                Some(Contact { other: self.entity_of(other)?, normal: vec2(normal) })
             })
             .collect()
+    }
+
+    /// 从 `origin` 沿 `direction`（会归一化）最远走 `max_distance`，第一个碰到的碰撞体；起点在碰撞体里面时 `distance` 是 0、
+    /// `normal` 是 `-direction`。查的是上一步结束时的世界（见 docs/physics2d.md）。方向是 0 或不是有限数、`max_distance` 不是正数时是 `None`。
+    pub fn raycast(&self, origin: Vec2, direction: Vec2, max_distance: f32, filter: QueryFilter) -> Option<RayHit> {
+        let dir = direction.try_normalize()?;
+        if !origin.is_finite() || max_distance.is_nan() || max_distance <= 0.0 {
+            return None;
+        }
+        let ray = Ray::new(vector(origin), vector(dir));
+        let (collider, hit) = self.world.cast_ray_and_get_normal(&ray, max_distance, true, self.filter(filter))?;
+        // 起点在里面时 parry 给的法线是 0（矩形）或 NaN（圆心）：统一成迎着射线
+        let normal = vec2(hit.normal).try_normalize().filter(|_| hit.time_of_impact > 0.0).unwrap_or(-dir);
+        Some(RayHit { entity: self.entity_of(collider)?, point: origin + dir * hit.time_of_impact, normal, distance: hit.time_of_impact })
+    }
+
+    /// 包含这个点的碰撞体（上一步结束时的世界）。
+    pub fn overlap_point(&self, point: Vec2, filter: QueryFilter) -> Vec<Entity> {
+        if !point.is_finite() {
+            return Vec::new();
+        }
+        self.world.intersect_point(vector(point), self.filter(filter)).filter_map(|(c, _)| self.entity_of(c)).collect()
+    }
+
+    /// 和这个不转的矩形（`half_size` 是半宽半高，取绝对值）重叠的碰撞体（上一步结束时的世界）。
+    pub fn overlap_box(&self, center: Vec2, half_size: Vec2, filter: QueryFilter) -> Vec<Entity> {
+        let half_size = half_size.abs();
+        if !center.is_finite() || !half_size.is_finite() || half_size.min_element() <= 0.0 {
+            return Vec::new();
+        }
+        let shape = Cuboid::new(vector(half_size));
+        self.world.intersect_shape(Pose::from_translation(vector(center)), &shape, self.filter(filter)).filter_map(|(c, _)| self.entity_of(c)).collect()
     }
 
     /// （刚体数，碰撞体数）。
     pub fn len(&self) -> (usize, usize) {
         (self.world.bodies.len(), self.world.colliders.len())
+    }
+
+    fn filter(&self, filter: QueryFilter) -> RapierFilter<'static> {
+        let mut f = RapierFilter::default();
+        if !filter.sensors {
+            f = f.exclude_sensors();
+        }
+        if let Some(handles) = filter.exclude.and_then(|e| self.entities.get(&e)) {
+            if let Some(body) = handles.body {
+                f = f.exclude_rigid_body(body);
+            } else if let Some(collider) = handles.collider {
+                f = f.exclude_collider(collider);
+            }
+        }
+        f
+    }
+
+    fn entity_of(&self, collider: ColliderHandle) -> Option<Entity> {
+        self.world.colliders.get(collider).map(|c| Entity::from_bits(c.user_data as u64))
     }
 
     fn forget(&mut self, entity: Entity) -> Option<Handles> {
