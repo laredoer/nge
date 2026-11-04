@@ -4386,15 +4386,18 @@ dependencies = [
 name = "physics"
 version = "0.1.0"
 dependencies = [
+ "bevy_ecs",
  "nge-assets",
  "nge-audio",
  "nge-core",
  "nge-ecs",
+ "nge-physics2d",
  "nge-platform",
  "nge-render2d",
  "nge-render3d",
  "nge-scene",
  "nsh-core",
+ "serde",
  "serde_json",
 ]
 

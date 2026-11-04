@@ -1,8 +1,11 @@
-//! 场景完全由 `App.tsx` 声明（地面、墙、箱子、弹球的刚体，音乐和音效），Rust 侧只建 App、加插件。
+//! 场景完全由 `App.tsx` 声明（地面、墙、箱子、弹球的刚体，音乐和音效），Rust 侧只建 App、加插件，
+//! 外加空间查询的可视化（[`queries`]）。
+
+mod queries;
 
 use nge_assets::AssetPlugin;
 use nge_audio::AudioPlugin;
-use nge_ecs::App;
+use nge_ecs::{App, Update};
 use nge_render2d::Render2dPlugin;
 use nge_render3d::Render3dPlugin;
 use nge_scene::ScenePlugin;
@@ -18,7 +21,9 @@ fn build(audio: AudioPlugin) -> App {
         .add_plugins(audio)
         .add_plugins(Render3dPlugin)
         .add_plugins(Render2dPlugin)
-        .add_plugins(ScenePlugin::new());
+        .add_plugins(ScenePlugin::new())
+        .add_prop(queries::SHOW_QUERIES)
+        .add_systems(Update, queries::show_queries);
     app
 }
 
@@ -136,5 +141,28 @@ mod tests {
         app.command("sound", &json!({ "src": "asset:/@physics/ding.wav", "volume": 0.35, "pitch": 1.4 }));
         run(&mut app, 1);
         assert_eq!(app.world().resource::<nge_audio::Audio>().voices(), 2);
+    }
+
+    fn overlays(app: &mut App) -> usize {
+        let world = app.world_mut();
+        world.query_filtered::<(), bevy_ecs::query::With<queries::Overlay>>().iter(world).count()
+    }
+
+    #[test]
+    fn queries_are_drawn_only_while_switched_on() {
+        let mut app = app();
+        app.prop("scene", Some(&scene(&[(0.0, FLOOR + 20.0, 10.0)])));
+        run(&mut app, 30);
+        assert_eq!(overlays(&mut app), 0);
+        app.prop("queries", Some(&json!(true)));
+        run(&mut app, 2);
+        // 射线至少碰到地面（线、法线、交点三块），框和点各一块，加上点的十字
+        assert!(overlays(&mut app) >= 7, "{}", overlays(&mut app));
+        let n = overlays(&mut app);
+        run(&mut app, 10);
+        assert!(overlays(&mut app).abs_diff(n) < 10, "每帧重画，不越攒越多");
+        app.prop("queries", Some(&json!(false)));
+        run(&mut app, 2);
+        assert_eq!(overlays(&mut app), 0, "关掉后清干净");
     }
 }

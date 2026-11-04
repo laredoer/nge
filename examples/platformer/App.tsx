@@ -1,12 +1,17 @@
 import { mount, signal, Text, View, type YNode } from "nsh";
-import { floatText, gameView, tween, type Scene, type SpriteNode, type TilemapNode, type Tween } from "../../ts/nge";
+import { floatText, gameView, sound, tween, type Scene, type SpriteNode, type TilemapNode, type Tween } from "../../ts/nge";
 
-/** Rust 掉出关卡送回起点时发的事件。 */
+/** Rust 发的事件：掉出关卡或被敌人撞到送回起点、按 R 重新开始、踩到敌人。 */
 interface Events {
   respawn: { falls: number };
+  restart: {};
+  stomp: { id: string; x: number; y: number };
 }
 
-const GameView = gameView<{}, Events>({ events: ["respawn"] });
+const GameView = gameView<{}, Events>({ events: ["respawn", "restart", "stomp"] });
+
+const COIN_SOUND = "asset:/@platformer/coin.wav";
+const WIN_SOUND = "asset:/@platformer/win.wav";
 
 const TILE = 32;
 const COLS = 80;
@@ -63,6 +68,9 @@ const LIFTS: { node: SpriteNode; to: Tween["to"]; duration: number }[] = [
   { node: { id: "lift-v", x: 42.5 * TILE, y: -8, w: 64, h: 16 }, to: { y: 152 }, duration: 2.5 },
 ];
 
+/** 敌人：id 以 enemy- 开头（Rust 按这个认），kinematic，在地面上从 [起始列] 往右来回 3 格；巡逻线上方的平台够高，踩它时不撞头。 */
+const ENEMIES = [14, 31, 69].map((c, i) => ({ id: `enemy-${i}`, x: (c + 0.5) * TILE, to: { x: (c + 3.5) * TILE } }));
+
 const GOAL: SpriteNode = { id: "goal", x: 76 * TILE, y: 40, w: 16, h: 80, color: "#6bcb77", body: { kind: "fixed", sensor: true, collide: true } };
 
 function App() {
@@ -70,10 +78,12 @@ function App() {
   const taken = signal<string[]>([]);
   const falls = signal(0);
   const won = signal<number | null>(null);
-  const started = Date.now();
+  const stomped = signal<string[]>([]);
+  let started = Date.now();
 
   const scene = (): Scene => ({
     background: "#1b2233",
+    audio: { preload: [COIN_SOUND, WIN_SOUND] },
     physics: { gravity: [0, -1800] },
     camera: { follow: "player", y: 60, smooth: 0.15, bounds: { left: 0, right: COLS * TILE, bottom: -160, top: (ROWS - 1) * TILE } },
     tilemaps: [LEVEL],
@@ -83,6 +93,12 @@ function App() {
         (c): SpriteNode => ({ id: c.id, x: c.x, y: c.y, w: 14, z: 2, rotation: 45, color: "#ffd93d", body: { kind: "fixed", sensor: true } }),
       ),
       ...LIFTS.map(({ node }): SpriteNode => ({ ...node, z: 1, color: "#c08552", body: { kind: "kinematic", friction: 0 } })),
+      // 踩到的不删：去掉刚体、变透明，巡逻补间接着走，重新开始时直接恢复
+      ...ENEMIES.map(({ id, x }): SpriteNode =>
+        stomped().includes(id)
+          ? { id, x, y: 12, w: 24, h: 24, z: 4, color: "#00000000" }
+          : { id, x, y: 12, w: 24, h: 24, z: 4, color: "#9b59b6", body: { kind: "kinematic", friction: 0 } },
+      ),
       GOAL,
     ],
   });
@@ -90,7 +106,7 @@ function App() {
   return (
     <View class="flex-1 bg-black">
       <Text class="text-white p-4">
-        ← → / A D / 手柄 移动 · 空格 / ↑ / A 跳 · 金币 {taken().length} / {COINS.length} · 掉下去 {falls()} 次
+        ← → / A D / 手柄 移动 · 空格 / ↑ / A 跳 · R 重来 · Q 调试 · 金币 {taken().length} / {COINS.length} · 失手 {falls()} 次
         {won() === null ? "" : ` · 通关！用时 ${won()} 秒`}
       </Text>
       <GameView
@@ -99,6 +115,7 @@ function App() {
           game = n;
           // 场景和命令按顺序到引擎：平台先建出来，再开始来回
           for (const { node, to, duration } of LIFTS) tween(game, { id: node.id, to, duration, ease: "easeInOut", repeat: -1, yoyo: true });
+          for (const { id, to } of ENEMIES) tween(game, { id, to, duration: 1.5, ease: "linear", repeat: -1, yoyo: true });
         }}
         scene={scene()}
         onCollide={(e) => {
@@ -108,11 +125,24 @@ function App() {
           if (coin && !taken().includes(coin.id)) {
             taken.set([...taken(), coin.id]);
             floatText(game, { x: coin.x, y: coin.y + 10, text: "+1", color: "#ffd93d", duration: 0.6 });
+            sound(game, { src: COIN_SOUND, volume: 0.5 });
           } else if (other === "goal" && won() === null) {
             won.set(Math.round((Date.now() - started) / 100) / 10);
+            sound(game, { src: WIN_SOUND, volume: 0.6 });
           }
         }}
         onRespawn={(e) => falls.set(e.falls)}
+        onStomp={(e) => {
+          stomped.set([...stomped(), e.id]);
+          floatText(game, { x: e.x, y: e.y + 10, text: "踩！", color: "#c39bd3", duration: 0.6 });
+        }}
+        onRestart={() => {
+          taken.set([]);
+          stomped.set([]);
+          falls.set(0);
+          won.set(null);
+          started = Date.now();
+        }}
       />
     </View>
   );

@@ -71,6 +71,34 @@ pub struct Contact {
     pub normal: Vec2,
 }
 
+/// 射线碰到的碰撞体（[`Physics::raycast`]）。`normal` 是碰到的面朝外的单位法线，`distance` 是从起点走了多远。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RayHit {
+    pub entity: Entity,
+    pub point: Vec2,
+    pub normal: Vec2,
+    pub distance: f32,
+}
+
+/// 空间查询算哪些碰撞体：默认不算 sensor。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct QueryFilter {
+    exclude: Option<Entity>,
+    sensors: bool,
+}
+
+impl QueryFilter {
+    /// 不算这个实体的刚体上的碰撞体（通常是自己）。
+    pub fn exclude(self, entity: Entity) -> Self {
+        Self { exclude: Some(entity), ..self }
+    }
+
+    /// sensor 也算。
+    pub fn with_sensors(self) -> Self {
+        Self { sensors: true, ..self }
+    }
+}
+
 /// 冲量，下一步施加到刚体上后清零。
 #[derive(Component, Debug, Default, Clone, Copy, PartialEq)]
 pub struct Impulse(pub Vec2);
@@ -115,7 +143,7 @@ impl Plugin for PhysicsPlugin {
 }
 
 pub mod prelude {
-    pub use crate::{Collider, Collision, Contact, Impulse, LockRotation, Physics, PhysicsPlugin, RigidBody, Shape, Velocity};
+    pub use crate::{Collider, Collision, Contact, Impulse, LockRotation, Physics, PhysicsPlugin, QueryFilter, RayHit, RigidBody, Shape, Velocity};
 }
 
 #[cfg(test)]

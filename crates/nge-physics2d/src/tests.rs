@@ -476,3 +476,100 @@ fn rebuilding_a_body_does_not_jump_the_drawing() {
         assert!((moved - 0.5).abs() < 1e-2, "第 {frame} 帧（第 2 帧重建，那一帧不够一步）画面照样走半步，不往前跳: {moved}");
     }
 }
+
+/// 地面（顶面 y = 0）、右边一堵墙（左面 x = 100）、墙前面一个 sensor、一个空中的箱子。
+fn query_world(app: &mut App) -> (Entity, Entity, Entity, Entity) {
+    let g = ground(app);
+    let wall = app.world_mut().spawn((RigidBody::Fixed, Collider::rect(Vec2::new(20.0, 200.0)), at(110.0, 100.0))).id();
+    let sensor = app.world_mut().spawn((RigidBody::Fixed, Collider { sensor: true, ..Collider::rect(Vec2::splat(20.0)) }, at(50.0, 50.0))).id();
+    let b = app.world_mut().spawn((RigidBody::Fixed, Collider::rect(Vec2::splat(20.0)), at(0.0, 50.0))).id();
+    steps(app, 1);
+    (g, wall, sensor, b)
+}
+
+#[test]
+fn raycast_finds_the_first_solid_collider() {
+    let mut app = app();
+    let (g, wall, sensor, b) = query_world(&mut app);
+    let physics = app.world().resource::<Physics>();
+    let hit = physics.raycast(Vec2::new(-200.0, 50.0), Vec2::new(5.0, 0.0), 1000.0, QueryFilter::default()).expect("碰到箱子");
+    assert_eq!(hit.entity, b);
+    assert!((hit.point - Vec2::new(-10.0, 50.0)).length() < 1e-3 && (hit.distance - 190.0).abs() < 1e-3, "{hit:?}");
+    assert!((hit.normal - Vec2::NEG_X).length() < 1e-3, "碰到的面朝左 {hit:?}");
+
+    let past = physics.raycast(Vec2::new(20.0, 50.0), Vec2::X, 1000.0, QueryFilter::default()).unwrap();
+    assert_eq!(past.entity, wall, "默认穿过 sensor");
+    let with = physics.raycast(Vec2::new(20.0, 50.0), Vec2::X, 1000.0, QueryFilter::default().with_sensors()).unwrap();
+    assert_eq!(with.entity, sensor);
+    assert!(physics.raycast(Vec2::new(20.0, 50.0), Vec2::X, 50.0, QueryFilter::default()).is_none(), "够不着墙");
+
+    let down = physics.raycast(Vec2::new(0.0, 50.0), Vec2::NEG_Y, 1000.0, QueryFilter::default().exclude(b)).unwrap();
+    assert_eq!(down.entity, g, "不算自己");
+    assert!((down.distance - 50.0).abs() < 1e-3 && (down.normal - Vec2::Y).length() < 1e-3, "{down:?}");
+    let inside = physics.raycast(Vec2::new(0.0, 50.0), Vec2::NEG_Y, 1000.0, QueryFilter::default()).unwrap();
+    assert_eq!((inside.entity, inside.distance, inside.normal), (b, 0.0, Vec2::Y), "起点在里面立刻碰到，法线迎着射线");
+
+    for (dir, max) in [(Vec2::ZERO, 10.0), (Vec2::new(f32::NAN, 1.0), 10.0), (Vec2::X, 0.0), (Vec2::X, f32::NAN)] {
+        assert!(physics.raycast(Vec2::ZERO, dir, max, QueryFilter::default()).is_none(), "{dir} {max}");
+    }
+}
+
+#[test]
+fn overlaps_list_colliders_at_a_point_or_in_a_box() {
+    let mut app = app();
+    let (g, wall, sensor, b) = query_world(&mut app);
+    let physics = app.world().resource::<Physics>();
+    let sorted = |mut v: Vec<Entity>| {
+        v.sort();
+        v
+    };
+    assert_eq!(physics.overlap_point(Vec2::new(0.0, 55.0), QueryFilter::default()), [b]);
+    assert!(physics.overlap_point(Vec2::new(50.0, 50.0), QueryFilter::default()).is_empty(), "默认不算 sensor");
+    assert_eq!(physics.overlap_point(Vec2::new(50.0, 50.0), QueryFilter::default().with_sensors()), [sensor]);
+    // 从箱子到墙、碰到地面的一条
+    let all = physics.overlap_box(Vec2::new(50.0, 20.0), Vec2::new(55.0, 25.0), QueryFilter::default().with_sensors());
+    assert_eq!(sorted(all), sorted(vec![g, wall, sensor, b]));
+    let some = physics.overlap_box(Vec2::new(50.0, 20.0), Vec2::new(55.0, 25.0), QueryFilter::default().exclude(g));
+    assert_eq!(sorted(some), sorted(vec![wall, b]));
+    assert!(physics.overlap_box(Vec2::new(-300.0, 300.0), Vec2::splat(10.0), QueryFilter::default()).is_empty());
+    assert!(physics.overlap_box(Vec2::ZERO, Vec2::new(f32::NAN, 1.0), QueryFilter::default()).is_empty(), "坏的尺寸");
+    assert_eq!(physics.overlap_box(Vec2::new(0.0, 50.0), Vec2::new(-5.0, -5.0), QueryFilter::default()), [b], "负的半宽取绝对值");
+}
+
+#[test]
+fn queries_see_the_world_as_of_the_last_step() {
+    let mut app = app();
+    let b = app.world_mut().spawn((RigidBody::Fixed, Collider::rect(Vec2::splat(20.0)), at(0.0, 0.0))).id();
+    assert!(app.world().resource::<Physics>().overlap_point(Vec2::ZERO, QueryFilter::default()).is_empty(), "还没进物理");
+    steps(&mut app, 1);
+    assert_eq!(app.world().resource::<Physics>().overlap_point(Vec2::ZERO, QueryFilter::default()), [b]);
+    app.world_mut().get_mut::<Transform2d>(b).unwrap().translation = Vec2::new(500.0, 0.0);
+    assert_eq!(app.world().resource::<Physics>().overlap_point(Vec2::ZERO, QueryFilter::default()), [b], "下一步之前还在原处");
+    steps(&mut app, 1);
+    let physics = app.world().resource::<Physics>();
+    assert!(physics.overlap_point(Vec2::ZERO, QueryFilter::default()).is_empty());
+    assert_eq!(physics.overlap_point(Vec2::new(500.0, 0.0), QueryFilter::default()), [b]);
+}
+
+#[test]
+fn ray_from_a_circle_centre_has_a_usable_normal() {
+    let mut app = app();
+    let c = app.world_mut().spawn((RigidBody::Fixed, Collider::circle(20.0), at(0.0, 0.0))).id();
+    steps(&mut app, 1);
+    let hit = app.world().resource::<Physics>().raycast(Vec2::ZERO, Vec2::new(3.0, 4.0), 100.0, QueryFilter::default()).unwrap();
+    assert_eq!(hit.entity, c);
+    assert!((hit.normal - Vec2::new(-0.6, -0.8)).length() < 1e-5, "不是 NaN {hit:?}");
+}
+
+/// 只有碰撞体、没有刚体的实体（比如瓦片地图下面的碰撞体）也能排除。
+#[test]
+fn excluding_a_collider_without_a_body() {
+    let mut app = app();
+    let only = app.world_mut().spawn((Collider::rect(Vec2::splat(20.0)), at(0.0, 0.0))).id();
+    let below = app.world_mut().spawn((Collider::rect(Vec2::splat(20.0)), at(0.0, -40.0))).id();
+    steps(&mut app, 1);
+    let physics = app.world().resource::<Physics>();
+    let down = |f| physics.raycast(Vec2::new(0.0, 50.0), Vec2::NEG_Y, 200.0, f).map(|h| h.entity);
+    assert_eq!(down(QueryFilter::default()), Some(only));
+    assert_eq!(down(QueryFilter::default().exclude(only)), Some(below));
+}

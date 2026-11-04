@@ -39,6 +39,23 @@
 
 `Physics::contacts(entity)` 返回上一步结束时正在接触的碰撞体和法线（从对方指向自己），用来判断站没站在地上；见 [platformer.md](platformer.md)。
 
+### 空间查询（射线、点、矩形）
+
+后来补的：角色 AI 看前面有没有墙、脚下前方是不是悬崖、视线有没有被挡、鼠标点在哪个刚体上，都要问「这里有什么」。rapier 自带查询，`Physics` 包一层，用实体和 `Vec2`：
+
+- `raycast(origin, direction, max_distance, filter) -> Option<RayHit>`：从 `origin` 沿 `direction`（会归一化）最远走 `max_distance`，第一个碰到的碰撞体。`RayHit { entity, point, normal, distance }`，`normal` 是碰到的那个面朝外的单位法线。起点在某个碰撞体里面（含正好在表面上）时算立刻碰到：`distance` 0，`normal` 是 `-direction`（rapier 这时给的法线是 0 或 NaN）。刚好打在 `max_distance` 那一点上的可能因为浮点误差算没碰到。方向是 0 或者不是有限数、`max_distance` 不是正数时是 `None`。
+- `overlap_point(point, filter) -> Vec<Entity>`：包含这个点的碰撞体。
+- `overlap_box(center, half_size, filter) -> Vec<Entity>`：和这个不转的矩形（`half_size` 是半宽半高，取绝对值；有一边是 0 时返回空）重叠的碰撞体。
+- 两种重叠都包含边界：点在边上、矩形刚好贴着都算；返回的顺序不固定。
+- `QueryFilter`：默认不算 sensor（金币、终点之类的触发区一般不该挡视线）；`.exclude(entity)` 不算这个实体的刚体上的碰撞体（通常是自己；只有碰撞体的实体就是它自己的碰撞体；瓦片地图要排除的话传下面的碰撞体子实体，传地图本身、还没进物理或已经删掉的实体不起作用），`.with_sensors()` 把 sensor 也算上。
+- 查的是上一步结束时的世界（和 `contacts` 一样）：游戏这一帧刚改的位置、刚生成还没进物理的实体，下一步之后才查得到。几个细节：
+  - 这一帧删掉的实体在物理把它去掉之前（`PostUpdate`）还查得到，返回的 `Entity` 可能已经不存在：拿去 `query.get` 时要容忍查不到。
+  - 物理每帧都会把删掉 / 改了形状的碰撞体同步进 rapier，但 rapier 的加速结构下一步才更新：不够一步的帧（120 Hz 屏上隔一帧就有）里，刚删的立刻查不到，刚改形状的只在旧的范围里查得到。
+  - 查的是物理的真实位置，画面画的是插值过的位置（`DrawAt`，慢最多一步）：用来点选快速运动的刚体时会差一点。
+- 返回的实体是碰撞体所在的实体：碰到瓦片地图时是地图下面的碰撞体子实体（和 `contacts` 一样）。
+- 只给 Rust 用：TSX 不跑每帧逻辑，没有需要查询的地方。
+- 看效果：`examples/physics` 的「查询」按钮（TSX prop `queries`）打开可视化：扫来扫去的射线画出交点和法线，左右扫的框和绕圈的点标出重叠的刚体（`src/queries.rs`，每帧删掉重画的白色纹理精灵）；平台跳跃按 Q 看角色身边的查询（见 [platformer.md](platformer.md)）。
+
 ### 碰撞消息
 
 `Collision { a: Entity, b: Entity, started: bool }`（`MessageReader<Collision>` 读）。两个碰撞体里有一个开了 `events` 就发。接触中删掉实体时，下一步发停止接触（这时 `a` / `b` 里有一个已经删掉，`query.get` 会查不到；TSX 的 `collide` 因为要按实体找节点 id，收不到这一条）；碰撞体重建（形状、材质变了）时先发停止再发开始。
@@ -93,6 +110,9 @@
 - **TS**：`nsh check` 通过 `examples/physics` 和 `examples/scene3d`。
 - **离屏截图**：60 个球时箱子摞着、球堆在地上；1000 个球时容器堆满。
 - **实跑**：`nsh dev --server-only` + `cargo run -p physics --release`，dev server 显示 macOS host 已连接。
+- **空间查询**（后来补的）：`nge-physics2d` 新增 5 个（射线碰到第一个实心碰撞体并给出交点、法线、距离，默认穿过 sensor、`with_sensors` 算上，够不着时没有，`exclude` 不算自己，起点在里面时距离 0，坏的方向 / 距离返回空；点和矩形的重叠，默认不算 sensor、`exclude`、坏的尺寸返回空；查的是上一步结束时的世界：刚生成的查不到、挪了的下一步之后才在新位置；从圆心发出的射线法线可用；排除只有碰撞体的实体）；`examples/physics` 1 个（打开时每帧画、不越攒越多，关掉后清干净）；`examples/platformer` 1 个（Q 打开后往下的射线碰到地面、框里的敌人被标出来，再按关掉）。变异实验：去掉「默认不算 sensor」或「`exclude` 不算自己」，各有测试会挂。
+- **修过的问题**：起点在碰撞体里面时法线是 0 或 NaN（统一成 `-direction`）、`overlap_box` 负的半宽、文档补上删掉 / 改形状的碰撞体在不够一步的帧里的表现和返回的实体可能已删除。
+- **实跑**：两个示例在 Mac 上启动，物理示例的「查询」和平台跳跃的 Q 都手测过，效果正常。
 
 ## 已知限制 / 后续
 

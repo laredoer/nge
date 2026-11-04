@@ -277,3 +277,23 @@ fn same_frame_later_wins_and_waiting_tweens_are_not_taken_over() {
     );
     assert_eq!(get(&mut app, "a").0.translation.y, 50.0);
 }
+
+/// 平台跳跃踩到敌人时去掉刚体、重新开始时加回来：补间接着走，位置不跳回声明的起点。
+#[test]
+fn tween_survives_removing_and_restoring_the_body() {
+    let mut app = app();
+    let body = json!([{ "id": "k", "w": 10, "body": { "kind": "kinematic" } }]);
+    scene(&mut app, body.clone());
+    tick(&mut app, 0.0);
+    app.command("tween", &json!({ "id": "k", "to": { "x": 100 }, "duration": 1, "ease": "linear", "repeat": -1, "yoyo": true }));
+    tick(&mut app, 0.0);
+    tick(&mut app, 0.5);
+    let x = |app: &mut App| get(app, "k").0.translation.x;
+    assert!((x(&mut app) - 50.0).abs() < 1.0, "{}", x(&mut app));
+    scene(&mut app, json!([{ "id": "k", "w": 10 }]));
+    tick(&mut app, 0.1);
+    assert!((x(&mut app) - 60.0).abs() < 1.0, "去掉刚体后接着走 {}", x(&mut app));
+    scene(&mut app, body);
+    tick(&mut app, 0.1);
+    assert!((x(&mut app) - 70.0).abs() < 1.0, "加回刚体后接着走 {}", x(&mut app));
+}
