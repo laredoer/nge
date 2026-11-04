@@ -9,10 +9,12 @@
 mod app;
 mod bridge;
 mod input;
+mod render;
 mod resources;
 
 pub use app::{App, Plugin, PostUpdate, PreUpdate, Renderer, Startup, Update, factory};
 pub use input::{Input, Pointer};
+pub use render::{ClearColor, RenderFrame};
 pub use resources::{NshCommand, Outbox, Props, Screen, Time};
 
 pub use nge_core::bridge::{CommandKey, EventKey, PropKey, StateKey};
@@ -22,7 +24,7 @@ pub use glam;
 
 pub mod prelude {
     pub use crate::{
-        App, CommandKey, EventKey, Input, NshCommand, PropKey, StateKey, Outbox, Plugin, Pointer, PostUpdate, PreUpdate, Props, Screen,
+        App, ClearColor, CommandKey, EventKey, Input, NshCommand, PropKey, StateKey, Outbox, Plugin, Pointer, PostUpdate, PreUpdate, Props, Screen,
         Startup, Time, Update,
     };
     pub use bevy_ecs::prelude::*;

@@ -10,7 +10,7 @@ use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::NSView;
-use objc2_foundation::{NSObject, NSRunLoop, NSRunLoopCommonModes};
+use objc2_foundation::{NSObject, NSPoint, NSRunLoop, NSRunLoopCommonModes};
 use objc2_quartz_core::CADisplayLink;
 use raw_window_handle::{AppKitDisplayHandle, AppKitWindowHandle, RawDisplayHandle, RawWindowHandle};
 use serde_json::{Value as JsonValue, json};
@@ -62,6 +62,12 @@ define_class!(
             if window.is_some() {
                 self.set_in_window(true);
             }
+        }
+
+        // 鼠标交给外层的节点视图，NSH 的 onTouch* 才收得到
+        #[unsafe(method_id(hitTest:))]
+        fn hit_test(&self, _point: NSPoint) -> Option<Retained<NSView>> {
+            None
         }
     }
 );

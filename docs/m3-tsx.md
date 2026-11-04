@@ -18,7 +18,7 @@
 | 解法 | 自己写 dev host：`AppSource::DevServer` + `AppOptions.components` 注册 `nge.game`，配合 `nsh dev --server-only` |
 | 能否 import app 目录外的 TS | 能（`../../ts/...` 实测可打包） |
 | 热更新时原生组件的去留 | **重建**。每次 rebuild 都会重新挂载 `nge.game`，引擎跟着重建，游戏内状态归零（实测 hud 分数 59 → 0），进程不重启 |
-| 原生组件上的触摸 | 原生 NSView 不处理鼠标，事件交给节点视图，`onTouchStart` 等 ViewProps 照常可用（同 Rust 的 `game_view`） |
+| 原生组件上的触摸 | 原生组件的 NSView 要在 `hitTest:` 返回 nil，把鼠标让给节点视图，`onTouchStart` 等 ViewProps 才收得到（同 Rust 的 `game_view`；M4 时才发现并补上，之前 Mac 上的触摸其实没生效） |
 
 热更新会重建引擎，所以**场景必须完全由 TSX 声明**：重建后新引擎收到同一份 `scene` prop，画面即恢复到声明的状态；只有运行时产生的状态（比如 `spin` 转到的角度、Rust 游戏逻辑里的分数）会归零。跨热更新保留引擎是后续优化（见「已知限制」）。
 

@@ -1,0 +1,20 @@
+[package]
+name = "nge-render3d"
+description = "NSH 游戏引擎基础 3D：网格、深度缓冲、3D 相机、简化 PBR、方向光 / 点光源、glTF"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+nge-core.workspace = true
+nge-ecs.workspace = true
+bevy_ecs.workspace = true
+glam.workspace = true
+bytemuck.workspace = true
+image.workspace = true
+gltf = { version = "1.4", default-features = false, features = ["import", "utils"] }
+log.workspace = true
+
+[dev-dependencies]
+pollster.workspace = true
+nge-render2d.workspace = true

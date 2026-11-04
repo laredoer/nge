@@ -13,6 +13,7 @@ use nge_core::{Ctx, Game, GameFactory, Gfx, Viewport, wgpu};
 use serde_json::Value as JsonValue;
 
 use crate::input::Input;
+use crate::render::{ClearColor, RenderFrame};
 use crate::resources::{NshCommand, Outbox, Props, Screen, Time};
 
 /// 第一帧 Update 之前跑一次。
@@ -70,6 +71,8 @@ impl App {
         world.init_resource::<Props>();
         world.init_resource::<Outbox>();
         world.init_resource::<Input>();
+        world.init_resource::<ClearColor>();
+        world.init_resource::<RenderFrame>();
         for schedule in [Schedule::new(Startup), Schedule::new(PreUpdate), Schedule::new(Update), Schedule::new(PostUpdate), Schedule::new(Last)] {
             world.add_schedule(schedule);
         }
@@ -208,6 +211,7 @@ impl Game for EcsGame {
 
     fn render(&mut self, gfx: &Gfx, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView) {
         let App { world, renderers, .. } = &mut self.0;
+        world.resource_mut::<RenderFrame>().reset();
         for renderer in renderers {
             renderer.render(world, gfx, encoder, target);
         }
