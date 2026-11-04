@@ -1,0 +1,16 @@
+[package]
+name = "nge-audio"
+description = "nge 的音频（kira）：按 asset:/ 加载音效和音乐，播放、循环、音量"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+nge-ecs.workspace = true
+nge-assets.workspace = true
+bevy_ecs.workspace = true
+log.workspace = true
+kira = { version = "0.12.6", default-features = false, features = ["cpal", "ogg", "vorbis", "wav", "pcm", "mp3"] }
+
+[dev-dependencies]
+nge-core.workspace = true

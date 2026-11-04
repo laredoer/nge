@@ -59,6 +59,7 @@
 | **M5 扩展** | 资源层（`nge-assets`，`asset:/` 异步加载，2D / 3D 共用贴图）、文字（`nge-text`）、2D 粒子（`nge-particles`）；音频、物理放到之后 | 贴图 / 字体 / glTF 异步加载，点击炸粒子并飘字，Mac 上 10k 粒子 120fps |
 | **TSX 场景节点** | `scene` 里声明 3D 模型、灯光、文字、粒子发射器，`burst` / `floatText` 一次性命令，点击模型（射线拾取）发 `tap`；见 [scene-nodes.md](scene-nodes.md) | `examples/scene3d`：场景全写在 `App.tsx` 里，点箱子炸粒子、飘字、加分 |
 | **2D 物理** | `nge-physics2d`（rapier2d）：刚体、碰撞体、碰撞消息；精灵节点的 `body`、`collide` 事件、`push` command；见 [physics2d.md](physics2d.md) | `examples/physics`：箱子堆叠、点击生成弹球、碰撞计数，1000 个刚体一步 < 2 ms |
+| **音频** | `nge-audio`（kira）：`asset:/` 加载音效 / 音乐，播放、循环、音量、同时发声上限；`scene.audio` 声明背景音乐，`sound` command；见 [audio.md](audio.md) | `examples/physics` 有背景音乐、撞击声、点击声和静音按钮 |
 | **M6 Android** | SurfaceView 和 Vulkan，JNI 胶水层 | 示例游戏在 Android 真机上能跑 |
 
 ## 待定

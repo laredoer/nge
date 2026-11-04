@@ -9,6 +9,7 @@ publish.workspace = true
 nge-core.workspace = true
 nge-ecs.workspace = true
 nge-assets.workspace = true
+nge-audio.workspace = true
 nge-render2d.workspace = true
 nge-render3d.workspace = true
 nge-scene.workspace = true

@@ -167,6 +167,20 @@ export interface Scene {
   ambient?: { color?: string; brightness?: number };
   /** 重力（point / s²），默认 [0, -981]。 */
   physics?: { gravity?: [number, number] };
+  audio?: AudioNode;
+}
+
+/** 背景音乐和总音量。音量是线性的：0 静音，1 原音量。 */
+export interface AudioNode {
+  /** 循环播放的背景音乐（`asset:/` 路径）；换了就淡出旧的、淡入新的，去掉就淡出停止。 */
+  music?: string;
+  /** 默认 1。 */
+  musicVolume?: number;
+  /** 总音量，默认 1。 */
+  volume?: number;
+  muted?: boolean;
+  /** 提前加载的声音，第一次播放时不用等。 */
+  preload?: string[];
 }
 
 /** 点中了可点击的精灵或模型。x / y 是指针的 2D 世界坐标；点中模型时 point 是 3D 命中点。 */
@@ -213,6 +227,11 @@ export interface Collide {
 /** 给精灵 `id` 的刚体加上 (x, y) 的速度（point / s，和质量无关）。 */
 export function push(game: YNode | undefined, args: { id: string; x: number; y: number }) {
   game?.command("push", args);
+}
+
+/** 播一次音效。`pitch` 是播放速度（2 = 高八度，限制在 0.1 到 8），`pan` 从 -1（左）到 1（右）。同时发声数有上限，超出的会被丢掉。 */
+export function sound(game: YNode | undefined, args: { src: string; volume?: number; pitch?: number; pan?: number }) {
+  game?.command("sound", args);
 }
 
 /** 飘一行字。`game` 是 `<GameView ref>` 拿到的节点。 */

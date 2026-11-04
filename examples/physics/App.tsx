@@ -1,10 +1,13 @@
 import { mount, signal, Text, View, type YNode } from "nsh";
 import { Button } from "nsh/base";
-import { burst, gameView, push, type Burst, type Scene, type SpriteNode } from "../../ts/nge";
+import { burst, gameView, push, sound, type Burst, type Scene, type SpriteNode } from "../../ts/nge";
 
 const GameView = gameView();
 
 const SPARK = "asset:/@physics/spark.png";
+const DING = "asset:/@physics/ding.wav";
+const POP = "asset:/@physics/pop.wav";
+const MUSIC = "asset:/@physics/music.wav";
 const FLOOR = -260;
 const WALL = 320;
 const MAX_BALLS = 1200;
@@ -59,12 +62,32 @@ function App() {
   const balls = signal<Ball[]>([]);
   const hits = signal(0);
   const fps = signal(0);
+  const muted = signal(false);
   let game: YNode | undefined;
+  /** 球的半径，按 id 查：撞击声的音高跟着球的大小走。 */
+  const radius = new Map<string, number>();
+  /** 最近一段时间发出去的撞击声：碰撞成片时 TSX 这边先限一下，不往引擎塞一堆 command。 */
+  let recent: number[] = [];
 
-  const add = (list: Ball[]) => balls.set([...balls(), ...list].slice(-MAX_BALLS));
+  const ding = (id: string) => {
+    const now = Date.now();
+    recent = recent.filter((t) => now - t < 100);
+    const r = radius.get(id);
+    if (r === undefined || recent.length >= 6) return;
+    recent.push(now);
+    sound(game, { src: DING, volume: 0.35, pitch: 14 / r });
+  };
+
+  const add = (list: Ball[]) => {
+    const next = [...balls(), ...list].slice(-MAX_BALLS);
+    radius.clear();
+    for (const b of next) radius.set(b.id, b.r);
+    balls.set(next);
+  };
 
   const scene = (): Scene => ({
     background: "#10131c",
+    audio: { music: MUSIC, musicVolume: 0.5, muted: muted(), preload: [DING, POP] },
     sprites: [
       ...STATIC,
       ...CRATES,
@@ -91,8 +114,14 @@ function App() {
         <Button class="bg-blue-600 active:bg-blue-800 rounded px-3 py-1" onPress={() => add(Array.from({ length: 200 }, () => ball((Math.random() - 0.5) * (WALL - 30) * 2, FLOOR + 100 + Math.random() * 300)))}>
           <Text class="text-white">+200</Text>
         </Button>
-        <Button class="bg-gray-600 active:bg-gray-800 rounded px-3 py-1" onPress={() => balls.set([])}>
+        <Button class="bg-gray-600 active:bg-gray-800 rounded px-3 py-1" onPress={() => {
+            radius.clear();
+            balls.set([]);
+          }}>
           <Text class="text-white">清空</Text>
+        </Button>
+        <Button class="bg-gray-600 active:bg-gray-800 rounded px-3 py-1" onPress={() => muted.set(!muted())}>
+          <Text class="text-white">{muted() ? "开声音" : "静音"}</Text>
         </Button>
       </View>
       <GameView
@@ -106,10 +135,13 @@ function App() {
           } else if (t.id.startsWith("ball-")) {
             push(game, { id: t.id, x: 0, y: 600 });
             burst(game, { ...SPARKS, x: t.x, y: t.y });
+            sound(game, { src: POP, volume: 0.6 });
           }
         }}
         onCollide={(c) => {
-          if (c.started) hits.set(hits() + 1);
+          if (!c.started) return;
+          hits.set(hits() + 1);
+          ding(c.a.startsWith("ball-") ? c.a : c.b);
         }}
         onFps={(s) => fps.set(s.fps)}
       />
