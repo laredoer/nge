@@ -8,7 +8,7 @@ use bevy_ecs::prelude::*;
 use bevy_ecs::schedule::{IntoScheduleConfigs, ScheduleLabel};
 use bevy_ecs::system::ScheduleSystem;
 use glam::Vec2;
-use nge_core::bridge::{KEY, TOUCH};
+use nge_core::bridge::{GAMEPAD, KEY, TOUCH};
 use nge_core::{Ctx, Game, GameFactory, Gfx, Viewport, wgpu};
 use serde_json::Value as JsonValue;
 
@@ -147,7 +147,7 @@ impl App {
         &mut self.world
     }
 
-    /// 收到 NSH 的 command：触摸和按键进 Input，注册过的变成类型化消息，其余变成 [`NshCommand`]。
+    /// 收到 NSH 的 command：触摸、按键和手柄摇杆进 Input，注册过的变成类型化消息，其余变成 [`NshCommand`]。
     pub fn command(&mut self, name: &str, args: &JsonValue) {
         if name == TOUCH.name() {
             match TOUCH.decode(args) {
@@ -157,6 +157,11 @@ impl App {
         } else if name == KEY.name() {
             match KEY.decode(args) {
                 Ok(k) => self.world.resource_mut::<Input>().key(&k.code, k.down, k.repeat),
+                Err(e) => log::warn!("{e}"),
+            }
+        } else if name == GAMEPAD.name() {
+            match GAMEPAD.decode(args) {
+                Ok(g) => self.world.resource_mut::<Input>().sticks(g.left, g.right),
                 Err(e) => log::warn!("{e}"),
             }
         } else if let Some(handler) = self.commands.get(name) {
@@ -245,6 +250,8 @@ pub fn factory(build: impl Fn() -> App + Send + Sync + 'static) -> GameFactory {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    use crate::input::Stick;
 
     fn viewport() -> Viewport {
         Viewport { size: [400.0, 300.0], pixels: [800, 600] }
@@ -371,6 +378,17 @@ mod tests {
         assert!(app.world().resource::<Input>().key_down("Space"));
         app.command("key", &json!({ "code": "Space" }));
         assert!(app.world().resource::<Input>().key_down("Space"), "缺字段的命令丢掉");
+    }
+
+    #[test]
+    fn gamepad_sticks_go_to_input() {
+        let mut app = App::new();
+        app.command("gamepad", &json!({ "left": [0.5, -0.5], "right": [0.0, 1.0] }));
+        app.tick(viewport(), 0.016);
+        let input = app.world().resource::<Input>();
+        assert_eq!((input.stick(Stick::Left), input.stick(Stick::Right)), (Vec2::new(0.5, -0.5), Vec2::new(0.0, 1.0)), "摇杆是状态，不在帧末清掉");
+        app.command("gamepad", &json!({ "left": "nope" }));
+        assert_eq!(app.world().resource::<Input>().stick(Stick::Left), Vec2::new(0.5, -0.5), "坏的命令丢掉");
     }
 
     #[derive(Message)]

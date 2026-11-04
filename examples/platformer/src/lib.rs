@@ -38,9 +38,9 @@ const BUFFER: f32 = 0.12;
 const GROUND_NORMAL: f32 = 0.7;
 /// 掉到这条线以下就送回起点。
 const FALL_LINE: f32 = -400.0;
-const LEFT: [&str; 2] = ["ArrowLeft", "KeyA"];
-const RIGHT: [&str; 2] = ["ArrowRight", "KeyD"];
-const JUMP_KEYS: [&str; 3] = ["Space", "ArrowUp", "KeyW"];
+const LEFT: [&str; 4] = ["ArrowLeft", "KeyA", "GamepadLeft", "GamepadLeftStickLeft"];
+const RIGHT: [&str; 4] = ["ArrowRight", "KeyD", "GamepadRight", "GamepadLeftStickRight"];
+const JUMP_KEYS: [&str; 4] = ["Space", "ArrowUp", "KeyW", "GamepadA"];
 
 #[derive(Resource, Debug)]
 struct Controller {
@@ -201,6 +201,26 @@ mod tests {
         let cut = player(&mut app).1.y;
         assert!(cut < held * 0.6, "全松开才截短 {held} → {cut}");
         assert!(player(&mut app).0.y > ground);
+    }
+
+    #[test]
+    fn plays_with_a_gamepad() {
+        let mut app = app();
+        app.prop("scene", Some(&level(None)));
+        run(&mut app, 20);
+        let (start, ground) = { let p = player(&mut app).0; (p.x, p.y) };
+        key(&mut app, "GamepadLeftStickRight", true);
+        run(&mut app, 30);
+        assert!(player(&mut app).0.x > start + 50.0, "左摇杆往右跑");
+        key(&mut app, "GamepadLeftStickRight", false);
+        key(&mut app, "GamepadLeft", true);
+        run(&mut app, 60);
+        assert!(player(&mut app).1.x < -200.0, "十字键往左跑");
+        key(&mut app, "GamepadLeft", false);
+        run(&mut app, 30);
+        key(&mut app, "GamepadA", true);
+        run(&mut app, 10);
+        assert!(player(&mut app).0.y > ground + 50.0, "A 跳");
     }
 
     #[test]

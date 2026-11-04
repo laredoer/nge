@@ -352,8 +352,8 @@ export function floatText(game: YNode | undefined, args: FloatText) {
 }
 
 /**
- * 一次按键（Mac）。`code` 是 Web `KeyboardEvent.code` 的键名（"KeyA"、"ArrowLeft"、"Space"），按键盘上的位置，和布局无关。
- * 输入框在打字、按着 ⌘ 时不发；切到别的窗口时按着的键都补发一次松开。
+ * 一次按键（Mac）。`code` 是 Web `KeyboardEvent.code` 的键名（"KeyA"、"ArrowLeft"、"Space"），按键盘上的位置，和布局无关；手柄的按钮和摇杆方向是 "GamepadA"、"GamepadLeft"、"GamepadLeftStickRight" 这类（见 docs/gamepad.md）。
+ * 键盘：输入框在打字、按着 ⌘ 时不发（手柄照样发）；切到别的窗口时按着的键（含手柄）都补发一次松开。
  */
 export interface KeyInput {
   code: string;

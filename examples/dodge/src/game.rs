@@ -151,7 +151,9 @@ fn steer(time: Res<Time>, screen: Res<Screen>, input: Res<Input>, mut player: Qu
     if let Some(p) = input.pointers_down().next() {
         player.target_x = p.world.x.clamp(-limit, limit);
     } else {
-        let axis = input.axis(&LEFT_KEYS, &RIGHT_KEYS);
+        // 键盘没按时看手柄左摇杆，推一半走一半的速度
+        let keys = input.axis(&LEFT_KEYS, &RIGHT_KEYS);
+        let axis = if keys != 0.0 { keys } else { input.stick(Stick::Left).x };
         player.target_x = (player.target_x + axis * KEY_SPEED * time.delta).clamp(-limit, limit);
     }
     let follow = 1.0 - (-STEER * time.delta).exp();
@@ -301,6 +303,22 @@ mod tests {
         let left = player_x(&mut app);
         let edge = -viewport().size[0] / 2.0 + PLAYER_RADIUS;
         assert!((left - edge).abs() < 1.0, "按住不放停在边上：{left}");
+    }
+
+    #[test]
+    fn stick_steers_by_how_far_it_is_pushed() {
+        let moved = |x: f32| {
+            let mut app = app();
+            app.tick(viewport(), DT);
+            app.command("gamepad", &json!({ "left": [x, 0.0] }));
+            for _ in 0..10 {
+                app.tick(viewport(), DT);
+            }
+            player_x(&mut app)
+        };
+        let (half, full) = (moved(0.5), moved(1.0));
+        assert!(half > 10.0 && full > half * 1.5, "推一半走得慢：{half} / {full}");
+        assert!(moved(-1.0) < -10.0);
     }
 
     #[test]

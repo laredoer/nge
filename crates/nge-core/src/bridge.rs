@@ -23,6 +23,8 @@ pub const TOUCH: CommandKey<Touch> = CommandKey::new("touch");
 pub const KEY: CommandKey<KeyInput> = CommandKey::new("key");
 /// 内置：同一次按键也发给 NSH（TSX 的 `onKey`）。
 pub const KEY_EVENT: EventKey<KeyInput> = EventKey::new("key");
+/// 内置：手柄摇杆的模拟量（Mac），平台层在值变了时发给游戏；按钮走 [`KEY`]。
+pub const GAMEPAD: CommandKey<GamepadInput> = CommandKey::new("gamepad");
 /// 内置：每秒一次的帧率和最长帧间隔。
 pub const FRAME_STATS: EventKey<FrameReport> = EventKey::new("fps");
 /// 内置：渲染线程出错（初始化失败、panic、surface 丢失）。`game_view()` 默认记日志。
@@ -40,7 +42,7 @@ pub fn is_reserved(name: &str, outbound: bool) -> bool {
     if outbound {
         name == FRAME_STATS.name() || name == ENGINE_ERROR.name() || name == KEY_EVENT.name()
     } else {
-        name == TOUCH.name() || name == KEY.name() || name.starts_with(RESERVED_COMMAND_PREFIX)
+        name == TOUCH.name() || name == KEY.name() || name == GAMEPAD.name() || name.starts_with(RESERVED_COMMAND_PREFIX)
     }
 }
 
@@ -73,6 +75,14 @@ pub struct KeyInput {
     /// 按住不放时系统自动重复的按下。
     #[serde(default)]
     pub repeat: bool,
+}
+
+/// 两根摇杆，x 向右、y 向上，各在 −1 … 1，已经去掉死区。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GamepadInput {
+    pub left: [f32; 2],
+    pub right: [f32; 2],
 }
 
 macro_rules! key {
@@ -210,6 +220,14 @@ mod tests {
         let k = KEY.decode(&json!({ "code": "ArrowLeft", "down": true })).unwrap();
         assert_eq!(k, KeyInput { code: "ArrowLeft".into(), down: true, repeat: false });
         assert_eq!(KEY_EVENT.encode(&k), json!({ "code": "ArrowLeft", "down": true, "repeat": false }));
+    }
+
+    #[test]
+    fn gamepad_wire_format() {
+        let g = GAMEPAD.decode(&json!({ "left": [0.5, -1.0], "right": [0.0, 0.25] })).unwrap();
+        assert_eq!(g, GamepadInput { left: [0.5, -1.0], right: [0.0, 0.25] });
+        assert_eq!(GAMEPAD.decode(&json!({})).unwrap(), GamepadInput::default(), "缺的摇杆是 0");
+        assert!(is_reserved("gamepad", false));
     }
 
     #[test]

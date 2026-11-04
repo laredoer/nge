@@ -1,25 +1,27 @@
 //! macOS：引擎挂在一个 NSView 上；主线程的 CADisplayLink 只采样视口，出帧在渲染线程。
-//! 键盘用 AppKit 的本地事件监听拿 keyDown / keyUp / flagsChanged，转给引擎和 NSH（见 docs/keyboard.md）。
+//! 键盘用 AppKit 的本地事件监听拿 keyDown / keyUp / flagsChanged，转给引擎和 NSH（见 docs/keyboard.md）；
+//! 手柄在 display link 里每帧读一遍 GameController（见 docs/gamepad.md）。
 
-use std::cell::{OnceCell, RefCell};
+use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::BTreeSet;
 use std::ptr::NonNull;
 use std::rc::{Rc, Weak};
 
 use block2::RcBlock;
-use nge_core::bridge::{KEY, KEY_EVENT, KeyInput};
+use nge_core::bridge::{GAMEPAD, GamepadInput, KEY, KEY_EVENT, KeyInput};
 use nge_core::{Engine, GameFactory, Viewport, create_surface};
 use nsh_platform_macos::{ComponentContext, ComponentFactory, NativeComponent};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, AnyProtocol, NSObjectProtocol, ProtocolObject};
 use objc2::{ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{NSEvent, NSEventMask, NSEventModifierFlags, NSEventType, NSText, NSView, NSWindow, NSWindowDidResignKeyNotification};
+use objc2_game_controller::{GCController, GCControllerButtonInput, GCControllerDirectionPad, GCExtendedGamepad};
 use objc2_foundation::{NSNotification, NSNotificationCenter, NSObject, NSPoint, NSRunLoop, NSRunLoopCommonModes};
 use objc2_quartz_core::CADisplayLink;
 use raw_window_handle::{AppKitDisplayHandle, AppKitWindowHandle, RawDisplayHandle, RawWindowHandle};
 use serde_json::{Value as JsonValue, json};
 
-use crate::keys;
+use crate::{keys, pad};
 use crate::shared::Proxy;
 
 /// 把 `factory` 包成 NSH 原生组件工厂，注册到 `AppOptions.components`。
@@ -36,6 +38,9 @@ struct Shared {
     keys: RefCell<BTreeSet<&'static str>>,
     /// prop `captureKeys`：游戏要吞的键；`None` 时用 [`keys::default_capture`]。
     capture: RefCell<Option<Vec<String>>>,
+    /// 上一帧按着的手柄键和摇杆。
+    pad_keys: RefCell<BTreeSet<&'static str>>,
+    sticks: Cell<[[f32; 2]; 2]>,
 }
 
 impl Shared {
@@ -66,8 +71,37 @@ impl Shared {
 
     /// 窗口不再是 key window、或者视图离开了窗口时补发松开（每帧在主线程查一次）。
     fn check_focus(&self) {
-        if !self.keys.borrow().is_empty() && !self.view.window().is_some_and(|w| w.isKeyWindow()) {
-            self.release_keys();
+        if !self.view.window().is_some_and(|w| w.isKeyWindow()) {
+            if !self.keys.borrow().is_empty() {
+                self.release_keys();
+            }
+            self.update_pads(&[]);
+        }
+    }
+
+    /// 每帧（`check_focus` 之后）读一遍手柄；视图被隐藏时按「什么都没按」算，按着的就松开了。
+    fn poll_pads(&self) {
+        let key = self.view.window().is_some_and(|w| w.isKeyWindow());
+        if key && !self.view.isHiddenOrHasHiddenAncestor() {
+            self.update_pads(&read_pads());
+        } else {
+            self.update_pads(&[]);
+        }
+    }
+
+    fn update_pads(&self, readings: &[pad::Reading]) {
+        let (now, sticks) = pad::merge(readings);
+        let changes = pad::diff(&self.pad_keys.borrow(), &now, self.sticks.get(), sticks);
+        *self.pad_keys.borrow_mut() = now;
+        self.sticks.set(sticks);
+        for code in changes.released {
+            self.forward(code, false, false);
+        }
+        for code in changes.pressed {
+            self.forward(code, true, false);
+        }
+        if let (Some([left, right]), Some(proxy)) = (changes.sticks, &self.proxy) {
+            proxy.command(GAMEPAD.name(), &GAMEPAD.encode(&GamepadInput { left, right }));
         }
     }
 
@@ -107,6 +141,33 @@ impl Shared {
     }
 }
 
+/// 所有连着的、有 extendedGamepad 的手柄这一帧的读数。
+fn read_pads() -> Vec<pad::Reading> {
+    let pressed = |b: Retained<GCControllerButtonInput>| unsafe { b.isPressed() };
+    let maybe = |b: Option<Retained<GCControllerButtonInput>>| b.is_some_and(pressed);
+    let axes = |d: Retained<GCControllerDirectionPad>| unsafe { [d.xAxis().value(), d.yAxis().value()] };
+    let read = |g: &GCExtendedGamepad| unsafe {
+        pad::Reading {
+            a: pressed(g.buttonA()),
+            b: pressed(g.buttonB()),
+            x: pressed(g.buttonX()),
+            y: pressed(g.buttonY()),
+            l1: pressed(g.leftShoulder()),
+            r1: pressed(g.rightShoulder()),
+            l3: maybe(g.leftThumbstickButton()),
+            r3: maybe(g.rightThumbstickButton()),
+            menu: pressed(g.buttonMenu()),
+            options: maybe(g.buttonOptions()),
+            l2: g.leftTrigger().value(),
+            r2: g.rightTrigger().value(),
+            dpad: axes(g.dpad()),
+            left: axes(g.leftThumbstick()),
+            right: axes(g.rightThumbstick()),
+        }
+    };
+    unsafe { GCController::controllers() }.iter().filter_map(|c| unsafe { c.extendedGamepad() }).map(|g| read(&g)).collect()
+}
+
 /// 平台层自己用的 prop：游戏视图要吞的键（`code` 名的数组），不转给游戏。
 const CAPTURE_KEYS: &str = "captureKeys";
 
@@ -142,6 +203,7 @@ define_class!(
             self.set_in_window(false);
             if let Some(shared) = self.ivars().get().and_then(Weak::upgrade) {
                 shared.release_keys();
+                shared.update_pads(&[]);
             }
             let _: () = unsafe { msg_send![super(self), viewWillMoveToWindow: window] };
         }
@@ -152,6 +214,15 @@ define_class!(
             let window: Option<Retained<AnyObject>> = unsafe { msg_send![self, window] };
             if window.is_some() {
                 self.set_in_window(true);
+            }
+        }
+
+        // 导航切走屏幕时 NSView 被隐藏，display link 可能不再回调：手柄按着的先松开
+        #[unsafe(method(viewDidHide))]
+        fn view_did_hide(&self) {
+            let _: () = unsafe { msg_send![super(self), viewDidHide] };
+            if let Some(shared) = self.ivars().get().and_then(Weak::upgrade) {
+                shared.update_pads(&[]);
             }
         }
 
@@ -188,6 +259,7 @@ define_class!(
         fn tick(&self, _link: &CADisplayLink) {
             let shared = self.ivars();
             shared.check_focus();
+            shared.poll_pads();
             if let Some(proxy) = &shared.proxy {
                 proxy.tick(shared.viewport());
             }
@@ -237,7 +309,7 @@ impl GameView {
                 None
             }
         };
-        let shared = Rc::new(Shared { proxy, view, ctx, keys: RefCell::default(), capture: RefCell::default() });
+        let shared = Rc::new(Shared { proxy, view, ctx, keys: RefCell::default(), capture: RefCell::default(), pad_keys: RefCell::default(), sticks: Cell::default() });
         let _ = shared.view.ivars().set(Rc::downgrade(&shared));
 
         let ticker = Ticker::new(mtm, shared.clone());

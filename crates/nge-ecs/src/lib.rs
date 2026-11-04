@@ -13,7 +13,7 @@ mod render;
 mod resources;
 
 pub use app::{App, Plugin, PostUpdate, PreUpdate, Renderer, Startup, Update, factory};
-pub use input::{Input, Pointer};
+pub use input::{Input, Pointer, Stick};
 pub use render::{ClearColor, RenderFrame};
 pub use resources::{NshCommand, Outbox, Props, Screen, Time};
 
@@ -25,7 +25,7 @@ pub use glam;
 pub mod prelude {
     pub use crate::{
         App, ClearColor, CommandKey, EventKey, Input, NshCommand, PropKey, StateKey, Outbox, Plugin, Pointer, PostUpdate, PreUpdate, Props, Screen,
-        Startup, Time, Update,
+        Startup, Stick, Time, Update,
     };
     pub use bevy_ecs::prelude::*;
     pub use glam::{Vec2, Vec4, vec2};
