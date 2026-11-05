@@ -1,4 +1,4 @@
-import { mount, signal, Text, View, type YNode } from "nsh";
+import { mount, type NativeComponentRef, signal, Text, View } from "nsh";
 import { floatText, gameView, sound, tween, type Scene, type SpriteNode, type TilemapNode, type Tween } from "../../ts/nge";
 
 /** Rust 发的事件：掉出关卡或被敌人撞到送回起点、按 R 重新开始、踩到敌人。 */
@@ -74,7 +74,7 @@ const ENEMIES = [14, 31, 69].map((c, i) => ({ id: `enemy-${i}`, x: (c + 0.5) * T
 const GOAL: SpriteNode = { id: "goal", x: 76 * TILE, y: 40, w: 16, h: 80, color: "#6bcb77", body: { kind: "fixed", sensor: true, collide: true } };
 
 function App() {
-  let game: YNode | undefined;
+  let game: NativeComponentRef | undefined;
   const taken = signal<string[]>([]);
   const falls = signal(0);
   const won = signal<number | null>(null);
@@ -111,7 +111,7 @@ function App() {
       </Text>
       <GameView
         class="flex-1"
-        ref={(n: YNode) => {
+        ref={(n: NativeComponentRef) => {
           game = n;
           // 场景和命令按顺序到引擎：平台先建出来，再开始来回
           for (const { node, to, duration } of LIFTS) tween(game, { id: node.id, to, duration, ease: "easeInOut", repeat: -1, yoyo: true });

@@ -1,4 +1,4 @@
-import { mount, signal, Text, View, type YNode } from "nsh";
+import { mount, type NativeComponentRef, signal, Text, View } from "nsh";
 import { burst, floatText, gameView, type Burst, type Scene } from "../../ts/nge";
 
 const GameView = gameView();
@@ -54,7 +54,7 @@ const scene = (): Scene => ({
 function App() {
   const score = signal(0);
   const fps = signal(0);
-  let game: YNode | undefined;
+  let game: NativeComponentRef | undefined;
 
   return (
     <View class="flex-1 bg-black">
@@ -63,7 +63,7 @@ function App() {
       </Text>
       <GameView
         class="flex-1"
-        ref={(n: YNode) => (game = n)}
+        ref={(n: NativeComponentRef) => (game = n)}
         scene={scene()}
         onTap={(t) => {
           if (!t.point) return;

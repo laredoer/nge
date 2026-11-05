@@ -69,6 +69,7 @@
 | **手柄（Mac）** | GameController 每帧读一遍：按钮和摇杆方向当成 `Gamepad*` 键名走 `key`，摇杆模拟量走 `gamepad` command 进 `Input::stick`；见 [gamepad.md](gamepad.md) | `examples/platformer` 用十字键 / 左摇杆跑、A 跳；`examples/dodge` 按摇杆推的力度移动 |
 | **移动平台和渲染插值** | `DrawAt`：动态 / kinematic 刚体画在插值过的位置，`Transform2d` 保持真实值；`Physics::velocity`；平台跳跃的横移 / 升降平台；见 [moving-platforms.md](moving-platforms.md) | `examples/platformer`：站在移动平台上跟着走、不陷不抖，120 Hz 下每帧都动 |
 | **调试绘制** | `Gizmos`（即时模式画线、框、圆，放进 `SpriteInstances`）；`PhysicsDebug` 画出所有碰撞体轮廓；见 [gizmos.md](gizmos.md) | `examples/physics` 的「查询」和平台跳跃的 Q 调试视图改用 `Gizmos`，Q 同时画出所有碰撞体 |
+| **nsh 0.4** | 依赖升到 0.4，TSX 的 `YNode` 换成 `NativeComponentRef`；crates.io 上 `nsh-platform-ios` 编不过，暂时从 git tag 取；见 [nsh-0.4.md](nsh-0.4.md) | 测试、iOS 检查、`nsh check` 通过，示例连 0.4 的 dev server 能热更新 |
 | **M6 Android** | SurfaceView 和 Vulkan，JNI 胶水层 | 示例游戏在 Android 真机上能跑 |
 
 ## 待定

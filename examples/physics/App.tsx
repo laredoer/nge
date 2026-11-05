@@ -1,4 +1,4 @@
-import { mount, signal, Text, View, type YNode } from "nsh";
+import { mount, type NativeComponentRef, signal, Text, View } from "nsh";
 import { Button } from "nsh/base";
 import { burst, gameView, push, sound, type Burst, type Scene, type SpriteNode, type TilemapNode } from "../../ts/nge";
 
@@ -86,7 +86,7 @@ function App() {
   const fps = signal(0);
   const muted = signal(false);
   const queries = signal(false);
-  let game: YNode | undefined;
+  let game: NativeComponentRef | undefined;
   /** 球的半径，按 id 查：撞击声的音高跟着球的大小走。 */
   const radius = new Map<string, number>();
   /** 最近一段时间发出去的撞击声：碰撞成片时 TSX 这边先限一下，不往引擎塞一堆 command。 */
@@ -153,7 +153,7 @@ function App() {
       </View>
       <GameView
         class="flex-1"
-        ref={(n: YNode) => (game = n)}
+        ref={(n: NativeComponentRef) => (game = n)}
         scene={scene()}
         queries={queries()}
         onTap={(t) => {
