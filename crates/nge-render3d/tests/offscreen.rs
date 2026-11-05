@@ -464,3 +464,43 @@ fn loaded_images_are_shared_by_2d_and_3d() {
     let loaded = loaded.expect("贴图一直没加载出来");
     assert!(close(loaded.at(mesh_at.0, mesh_at.1), [255, 0, 0, 255]), "3D 也换成了红色 {:?}", loaded.at(mesh_at.0, mesh_at.1));
 }
+
+#[test]
+fn ortho_camera_shows_the_same_size_at_any_distance() {
+    for distance in [3.0, 300.0] {
+        let Some(img) = render(SIZE, move |app| {
+            unlit(app);
+            app.add_systems(Startup, move |world: &mut World| {
+                // 竖直方向看到 2 个单位：边长 1 的平面占画面中间一半
+                world.spawn((Camera3d { ortho: Some(2.0), ..Default::default() }, Transform3d::from_xyz(0.0, 0.0, distance)));
+                solid(world, Vec4::ONE, Mesh::plane(1.0), facing_camera());
+            });
+        }) else {
+            return eprintln!("没有 GPU，跳过");
+        };
+        let q = SIZE / 4;
+        assert!(close(img.at(q + 2, SIZE / 2), [255; 4]), "距离 {distance}：平面里面 {:?}", img.at(q + 2, SIZE / 2));
+        assert!(close(img.at(q - 2, SIZE / 2), [0, 0, 0, 255]), "距离 {distance}：平面外面 {:?}", img.at(q - 2, SIZE / 2));
+    }
+}
+
+#[test]
+fn ortho_highlight_is_the_same_everywhere_on_a_flat_surface() {
+    let Some(img) = render(SIZE, |app| {
+        app.add_plugins(Render3dPlugin).insert_resource(AmbientLight { color: Vec3::ONE, brightness: 0.0 });
+        app.add_systems(Startup, |world: &mut World| {
+            world.spawn((Camera3d { ortho: Some(2.0), ..Default::default() }, Transform3d::from_xyz(0.0, 0.0, 1.0)));
+            let mut assets = world.resource_mut::<Assets3d>();
+            let mesh = assets.add_mesh(Mesh::plane(4.0)).unwrap();
+            let material = assets.add_material(Material { base_color: Vec4::ONE, metallic: 1.0, roughness: 0.1, ..Default::default() });
+            world.spawn((Mesh3d { mesh, material }, facing_camera()));
+            // 光从相机那边正对着平面照：正交相机的视线处处一样，高光也处处一样
+            world.spawn(DirectionalLight { direction: Vec3::NEG_Z, color: Vec3::ONE, illuminance: 1.0 });
+        });
+    }) else {
+        return eprintln!("没有 GPU，跳过");
+    };
+    let (center, corner) = (img.center(), img.at(4, 4));
+    assert!(center[0] > 100, "正对着有高光 {center:?}");
+    assert!(close(center, corner), "中间 {center:?} 和角上 {corner:?} 一样亮");
+}

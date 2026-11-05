@@ -71,6 +71,9 @@ const LIFTS: { node: SpriteNode; to: Tween["to"]; duration: number }[] = [
 /** 敌人：id 以 enemy- 开头（Rust 按这个认），kinematic，在地面上从 [起始列] 往右来回 3 格；巡逻线上方的平台够高，踩它时不撞头。 */
 const ENEMIES = [14, 31, 69].map((c, i) => ({ id: `enemy-${i}`, x: (c + 0.5) * TILE, to: { x: (c + 3.5) * TILE } }));
 
+/** 终点前转着的 3D 箱子（2.5D）：3D 相机跟着 2D 相机（`match2d`），模型的 (x, y) 就是关卡里的位置。 */
+const CRATE = { id: "crate", model: "asset:/@platformer/crate.glb", x: 73.5 * TILE, y: 56, scale: 40, rotation: [20, 0, 0] as [number, number, number], spin: 60 };
+
 const GOAL: SpriteNode = { id: "goal", x: 76 * TILE, y: 40, w: 16, h: 80, color: "#6bcb77", body: { kind: "fixed", sensor: true, collide: true } };
 
 function App() {
@@ -86,6 +89,10 @@ function App() {
     audio: { preload: [COIN_SOUND, WIN_SOUND] },
     physics: { gravity: [0, -1800] },
     camera: { follow: "player", y: 60, smooth: 0.15, bounds: { left: 0, right: COLS * TILE, bottom: -160, top: (ROWS - 1) * TILE } },
+    camera3d: { match2d: true },
+    lights: [{ id: "sun", kind: "directional", direction: [-1, -2, -1.5] }],
+    ambient: { brightness: 0.35 },
+    models: [CRATE],
     tilemaps: [LEVEL],
     sprites: [
       { id: "player", x: 3 * TILE, y: 16, w: 24, h: 32, z: 5, color: "#ff7a59", body: { fixedRotation: true, friction: 0, collide: true } },

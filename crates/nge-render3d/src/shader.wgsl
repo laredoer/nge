@@ -4,7 +4,7 @@ struct DirLight { to_light: vec4f, color: vec4f }
 struct PointLight { position_range: vec4f, color: vec4f }
 struct Globals {
     view_proj: mat4x4f,
-    camera_pos: vec4f,
+    eye: vec4f,
     ambient: vec4f,
     counts: vec4u,
     dirs: array<DirLight, 4>,
@@ -82,7 +82,8 @@ fn fs(i: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4f {
     if front == (d.params.w > 0.0) {
         n = -n;
     }
-    let v = normalize(g.camera_pos.xyz - i.world);
+    // eye.w = 0：正交相机，所有片元的视线方向一样
+    let v = normalize(select(g.eye.xyz - i.world, g.eye.xyz, g.eye.w == 0.0));
     let metallic = clamp(d.params.x, 0.0, 1.0);
     let roughness = clamp(d.params.y, 0.04, 1.0);
 

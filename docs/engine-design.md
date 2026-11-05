@@ -70,6 +70,9 @@
 | **移动平台和渲染插值** | `DrawAt`：动态 / kinematic 刚体画在插值过的位置，`Transform2d` 保持真实值；`Physics::velocity`；平台跳跃的横移 / 升降平台；见 [moving-platforms.md](moving-platforms.md) | `examples/platformer`：站在移动平台上跟着走、不陷不抖，120 Hz 下每帧都动 |
 | **调试绘制** | `Gizmos`（即时模式画线、框、圆，放进 `SpriteInstances`）；`PhysicsDebug` 画出所有碰撞体轮廓；见 [gizmos.md](gizmos.md) | `examples/physics` 的「查询」和平台跳跃的 Q 调试视图改用 `Gizmos`，Q 同时画出所有碰撞体 |
 | **nsh 0.4** | 依赖升到 0.4，TSX 的 `YNode` 换成 `NativeComponentRef`；crates.io 上 `nsh-platform-ios` 编不过，暂时从 git tag 取；见 [nsh-0.4.md](nsh-0.4.md) | 测试、iOS 检查、`nsh check` 通过，示例连 0.4 的 dev server 能热更新 |
+| **生成的宿主** | 0.4 的 `#[native_components]` 把游戏视图注册进 `nsh run` / `nsh package` 生成的宿主；iOS 字体、包内资源、GPU 上限、重签脚本；见 [native-components.md](native-components.md) | 平台跳跃用 `nsh run` 在 Mac 上跑、用 `nsh package` 在 iPhone 真机上跑 |
+| **触屏按钮** | `KeyButton` 按住发 `key` 命令，和键盘走同一条路；见 [touch-controls.md](touch-controls.md) | 平台跳跃在 iPhone 上能边跑边跳 |
+| **2.5D 相机** | `Camera3d::ortho` 正交投影，`camera3d.match2d` 让 3D 相机跟着 2D 相机；见 [camera25d.md](camera25d.md) | 平台跳跃终点前的 3D 箱子随相机跟随、震屏始终和关卡对齐 |
 | **M6 Android** | SurfaceView 和 Vulkan，JNI 胶水层 | 示例游戏在 Android 真机上能跑 |
 
 ## 待定

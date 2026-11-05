@@ -2,7 +2,7 @@
 
 use bevy_ecs::prelude::{Component, Resource};
 use bytemuck::{Pod, Zeroable};
-use glam::{Mat4, Vec3};
+use glam::{Mat4, Vec3, Vec4};
 
 pub const MAX_DIRECTIONAL_LIGHTS: usize = 4;
 pub const MAX_POINT_LIGHTS: usize = 8;
@@ -70,7 +70,8 @@ pub(crate) struct PointRaw {
 #[derive(Debug, Clone, Copy, PartialEq, Pod, Zeroable)]
 pub(crate) struct Globals {
     pub view_proj: [[f32; 4]; 4],
-    pub camera_pos: [f32; 4],
+    /// 视点：w = 1 是相机位置，w = 0 是正交相机朝向相机的方向（[`Camera3d::eye`](crate::Camera3d::eye)）。
+    pub eye: [f32; 4],
     pub ambient: [f32; 4],
     /// 方向光数量、点光源数量。
     pub counts: [u32; 4],
@@ -82,14 +83,14 @@ impl Globals {
     /// 超出上限的灯丢弃，返回值的第二项表示有没有丢。
     pub fn new<'a>(
         view_proj: Mat4,
-        camera_pos: Vec3,
+        eye: Vec4,
         ambient: AmbientLight,
         dirs: impl IntoIterator<Item = &'a DirectionalLight>,
         points: impl IntoIterator<Item = (&'a PointLight, Vec3)>,
     ) -> (Self, bool) {
         let mut g = Self::zeroed();
         g.view_proj = view_proj.to_cols_array_2d();
-        g.camera_pos = camera_pos.extend(1.0).into();
+        g.eye = eye.into();
         g.ambient = (ambient.color * ambient.brightness).extend(0.0).into();
         let mut dropped = false;
         let mut n = 0;
@@ -129,10 +130,10 @@ mod tests {
         let dir = DirectionalLight { direction: Vec3::new(0.0, -2.0, 0.0), color: Vec3::new(1.0, 0.5, 0.0), illuminance: 2.0 };
         let point = PointLight { color: Vec3::ONE, intensity: 3.0, range: 7.0 };
         let ambient = AmbientLight { color: Vec3::new(0.5, 0.5, 1.0), brightness: 0.2 };
-        let (g, dropped) = Globals::new(Mat4::IDENTITY, Vec3::new(1.0, 2.0, 3.0), ambient, [&dir], [(&point, Vec3::X)]);
+        let (g, dropped) = Globals::new(Mat4::IDENTITY, Vec4::new(1.0, 2.0, 3.0, 1.0), ambient, [&dir], [(&point, Vec3::X)]);
         assert!(!dropped);
         assert_eq!(g.counts, [1, 1, 0, 0]);
-        assert_eq!(g.camera_pos, [1.0, 2.0, 3.0, 1.0]);
+        assert_eq!(g.eye, [1.0, 2.0, 3.0, 1.0]);
         assert_eq!(g.ambient, [0.1, 0.1, 0.2, 0.0]);
         assert_eq!(g.dirs[0].to_light, [0.0, 1.0, 0.0, 0.0], "存的是指向光源的单位向量");
         assert_eq!(g.dirs[0].color, [2.0, 1.0, 0.0, 0.0]);
@@ -144,7 +145,7 @@ mod tests {
     fn extra_lights_are_dropped() {
         let dir = DirectionalLight::default();
         let point = PointLight::default();
-        let (g, dropped) = Globals::new(Mat4::IDENTITY, Vec3::ZERO, AmbientLight::default(), [&dir; 5], [(&point, Vec3::ZERO); 9]);
+        let (g, dropped) = Globals::new(Mat4::IDENTITY, Vec4::W, AmbientLight::default(), [&dir; 5], [(&point, Vec3::ZERO); 9]);
         assert!(dropped);
         assert_eq!(g.counts[..2], [MAX_DIRECTIONAL_LIGHTS as u32, MAX_POINT_LIGHTS as u32]);
     }
@@ -152,7 +153,7 @@ mod tests {
     #[test]
     fn zero_direction_light_is_skipped() {
         let dir = DirectionalLight { direction: Vec3::ZERO, ..Default::default() };
-        let (g, _) = Globals::new(Mat4::IDENTITY, Vec3::ZERO, AmbientLight::default(), [&dir], []);
+        let (g, _) = Globals::new(Mat4::IDENTITY, Vec4::W, AmbientLight::default(), [&dir], []);
         assert_eq!(g.counts[0], 0);
     }
 

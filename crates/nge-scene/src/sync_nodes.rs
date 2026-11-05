@@ -8,6 +8,7 @@ use nge_render3d::{AmbientLight, Camera3d, DirectionalLight, GltfModel, Model3d,
 use nge_text::{ScreenText, Text2d};
 
 use crate::behave::{Follow, Spin, Tappable};
+use crate::match2d::Match2d;
 use crate::nodes::{AmbientNode, Camera3dNode, EmitterNode, LightKind, LightNode, ModelNode, Particles, TextNode};
 use crate::protocol::{Color, Scene};
 use crate::resolve::SceneAssets;
@@ -129,18 +130,27 @@ pub(crate) fn sync_lights(mut commands: Commands, scene: Res<Scene>, nodes: Quer
 /// 3D 相机和环境光：各自的声明变了才覆盖。
 pub(crate) fn sync_camera3d(
     scene: Res<Scene>,
-    mut camera: Query<(&mut Camera3d, &mut Transform3d), With<SceneCamera>>,
+    mut commands: Commands,
+    mut camera: Query<(Entity, &mut Camera3d, &mut Transform3d, Has<Match2d>), With<SceneCamera>>,
     mut ambient: ResMut<AmbientLight>,
     mut last_camera: Local<Option<Option<Camera3dNode>>>,
     mut last_ambient: Local<Option<Option<AmbientNode>>>,
 ) {
     if last_camera.as_ref() != Some(&scene.camera3d) {
         let cam = scene.camera3d.clone().unwrap_or_default();
-        let (eye, target) = (Vec3::new(cam.x, cam.y, cam.z), Vec3::from(cam.target));
+        let (eye, target) = (Vec3::new(cam.x, cam.y, cam.z.unwrap_or(6.0)), Vec3::from(cam.target));
         // 正上方 / 正下方看时 y 不能当 up，改用 -z（画面上方朝 -z）
         let up = if (target - eye).normalize_or_zero().cross(Vec3::Y).length_squared() < 1e-8 { Vec3::NEG_Z } else { Vec3::Y };
-        for (mut camera, mut transform) in &mut camera {
-            camera.fov_y = cam.fov.clamp(1.0, 179.0).to_radians();
+        for (entity, mut camera, mut transform, matched) in &mut camera {
+            if cam.match2d {
+                // 位置、投影由 match_2d 每帧设
+                commands.entity(entity).insert(Match2d { z: cam.z.unwrap_or(1000.0) });
+                continue;
+            }
+            // 刚关掉 match2d 时近远平面回到默认；否则留着 Rust 设的
+            let base = if matched { Camera3d::default() } else { *camera };
+            commands.entity(entity).remove::<Match2d>();
+            *camera = Camera3d { fov_y: cam.fov.clamp(1.0, 179.0).to_radians(), ortho: cam.ortho, ..base };
             *transform = Transform3d::from_xyz(eye.x, eye.y, eye.z).looking_at(target, up);
         }
         *last_camera = Some(scene.camera3d.clone());

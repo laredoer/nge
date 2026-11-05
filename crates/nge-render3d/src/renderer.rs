@@ -159,7 +159,7 @@ fn globals(world: &mut World, size: Vec2) -> (Globals, bool) {
     let ambient = *world.resource::<AmbientLight>();
     let dirs: Vec<DirectionalLight> = world.query::<&DirectionalLight>().iter(world).copied().collect();
     let points: Vec<(PointLight, Vec3)> = world.query::<(&PointLight, &Transform3d)>().iter(world).map(|(l, t)| (*l, t.translation)).collect();
-    Globals::new(view_proj, eye.translation, ambient, &dirs, points.iter().map(|(l, p)| (l, *p)))
+    Globals::new(view_proj, camera.eye(&eye), ambient, &dirs, points.iter().map(|(l, p)| (l, *p)))
 }
 
 fn collect(world: &mut World, draws: &mut Vec<Draw>) {

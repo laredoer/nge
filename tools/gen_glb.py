@@ -143,7 +143,8 @@ def crate_model():
     ]
     b.gltf["scenes"] = [{"nodes": [0]}]
     b.gltf["scene"] = 0
-    b.write(ROOT / "examples/model/assets/crate.glb")
+    for example in ["model", "platformer"]:
+        b.write(ROOT / f"examples/{example}/assets/crate.glb")
 
 
 if __name__ == "__main__":

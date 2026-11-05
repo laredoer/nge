@@ -8,6 +8,7 @@ mod anim;
 mod audio;
 mod behave;
 mod camera;
+mod match2d;
 mod nodes;
 mod physics;
 mod protocol;
@@ -135,10 +136,11 @@ impl Plugin for ScenePlugin {
             .add_event(TWEEN_END)
             .add_event(COLLIDE)
             .add_systems(PreUpdate, synced.run_if(resource_changed::<Scene>).before(PointerWorld))
+            .add_systems(PreUpdate, match2d::match_2d.after(sync_nodes::sync_camera3d).after(camera::sync_camera).before(PointerWorld))
             .add_systems(Update, (behave::spin, behave::tap, behave::burst, behave::float_text, physics::push, audio::play_sound, anim::animate))
             // 补间最后写，盖过 spin / push 这一帧的改动
             .add_systems(Update, (anim::start_tweens, anim::tween).chain().after(behave::spin).after(physics::push))
-            .add_systems(PostUpdate, (behave::follow, physics::collide.after(PhysicsStepped), camera::camera_rig.after(PhysicsStepped)));
+            .add_systems(PostUpdate, (behave::follow, physics::collide.after(PhysicsStepped), camera::camera_rig.after(PhysicsStepped), match2d::match_2d.after(camera::camera_rig)));
     }
 }
 
