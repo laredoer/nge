@@ -136,10 +136,15 @@ export interface ModelNode {
 export interface Camera3dNode {
   x?: number;
   y?: number;
+  /** 默认 6；`match2d` 时是相机离 z = 0 平面的距离，默认 1000，模型的 z 在 [-z, z] 之间都看得到。 */
   z?: number;
   target?: [number, number, number];
   /** 垂直视角（度），默认 60。 */
   fov?: number;
+  /** 正交投影：竖直方向看到这么多个世界单位，远近一样大。 */
+  ortho?: number;
+  /** 每帧跟着 2D 相机走（跟随、震屏都跟上）：正交，3D 的一个单位是 2D 的一个 point，模型放在 (x, y, 0) 就在 2D 世界的 (x, y)。开着时 `x`、`y`、`target`、`fov`、`ortho` 都不看。 */
+  match2d?: boolean;
 }
 
 export interface LightNode {

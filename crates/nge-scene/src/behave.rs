@@ -308,6 +308,19 @@ mod tests {
     }
 
     #[test]
+    fn tap_uses_the_matched_3d_camera_in_the_same_frame() {
+        let mut app = app();
+        let cube = json!({ "id": "box", "model": "asset:/@t/a.glb", "x": 100, "scale": 10, "tap": true });
+        let entity = with_cube(&mut app, cube.clone());
+        assert!(app.world().get::<Model3d>(entity).is_some());
+        // 打开 match2d、2D 相机移到箱子上，和点击同一帧到达：点画面正中间打中箱子
+        app.prop("scene", Some(&json!({ "camera": { "x": 100 }, "camera3d": { "match2d": true }, "models": [cube] })));
+        app.command("touch", &json!({ "phase": "start", "id": 1, "x": 50, "y": 50 }));
+        let hit = taps(&frame(&mut app, None));
+        assert_eq!(hit.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), ["box"]);
+    }
+
+    #[test]
     fn tap_picks_the_nearest_of_overlapping_models() {
         let mut app = app();
         frame(&mut app, Some(json!({ "camera3d": { "x": 0, "y": 0, "z": 10 }, "models": [

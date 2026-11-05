@@ -151,15 +151,20 @@ fn one() -> f32 {
 pub struct Camera3dNode {
     pub x: f32,
     pub y: f32,
-    pub z: f32,
+    /// 不填时是 6；`match2d` 时是相机离 z = 0 平面的距离，不填是 1000。
+    pub z: Option<f32>,
     pub target: [f32; 3],
     /// 垂直视角（度）。
     pub fov: f32,
+    /// 正交投影，竖直方向看到这么多个世界单位。
+    pub ortho: Option<f32>,
+    /// 每帧跟着 2D 相机走（正交，3D 的一个单位是 2D 的一个 point），`x`、`y`、`target`、`fov`、`ortho` 都不看。
+    pub match2d: bool,
 }
 
 impl Default for Camera3dNode {
     fn default() -> Self {
-        Self { x: 0.0, y: 2.0, z: 6.0, target: [0.0; 3], fov: 60.0 }
+        Self { x: 0.0, y: 2.0, z: None, target: [0.0; 3], fov: 60.0, ortho: None, match2d: false }
     }
 }
 

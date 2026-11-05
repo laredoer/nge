@@ -493,6 +493,7 @@ mod tests {
         let tsx = include_str!("../App.tsx");
         assert!(tsx.contains("asset:/@platformer/coin.wav") && tsx.contains("asset:/@platformer/win.wav"));
         assert!(tsx.contains(&format!("id: `{ENEMY}${{i}}`")), "App.tsx 的敌人 id 用 {ENEMY} 开头");
+        assert!(uris.contains(&"asset:/@platformer/crate.glb") && tsx.contains("asset:/@platformer/crate.glb"), "2.5D 的箱子");
     }
 
     #[test]
