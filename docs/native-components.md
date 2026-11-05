@@ -61,5 +61,5 @@ nsh 0.3 自带的宿主不能注册应用自己的原生组件，所以引擎自
 
 - `nsh run examples/platformer`：生成的 macOS 宿主里有引擎的 `nge-render`、`nge-assets` 线程（游戏组件注册上了）；改 `App.tsx` 热更新推过去。还没手测画面和键盘、手柄。
 - `nsh run examples/platformer --target ios`（模拟器）：宿主连上 dev server，游戏组件挂上；修 GPU 上限之前渲染线程退出，修完还没在模拟器里重跑。
-- 真机（iPhone 16 Plus）：`nsh package --target ios --sign … --profile …` 打的包启动被拦，重签以后能启动；启动后资源路径不对、渲染线程因为没有字体 panic，修完重新打包、重签，在真机上跑起来，控制台没有资源和字体的报错。真机上没法操作：键盘、手柄只在 Mac 上，平台跳跃又不读触摸，之后加触屏按钮。
+- 真机（iPhone 16 Plus）：`nsh package --target ios --sign … --profile …` 打的包启动被拦，重签以后能启动；启动后资源路径不对、渲染线程因为没有字体 panic，修完重新打包、重签，在真机上跑起来，控制台没有资源和字体的报错。真机上没法操作：键盘、手柄只在 Mac 上，平台跳跃又不读触摸；加了触屏按钮以后能玩（[touch-controls.md](touch-controls.md)）。
 - `cargo test --workspace`、iOS 检查通过；新增 `device_limits`、包里的 `nsh/assets`、空字体库时跳过不指定字体的文字、默认字体家族选择的测试。

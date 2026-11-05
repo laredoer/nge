@@ -1,5 +1,5 @@
 // nge 的 TSX 绑定：<GameView> 组件和场景类型（和 crates/nge-scene 的协议一一对应）。
-import { nativeComponent, type GestureResponderEvent, type NativeComponentProps, type NativeComponentRef } from "nsh";
+import { nativeComponent, Text, View, type GestureResponderEvent, type NativeComponentProps, type NativeComponentRef } from "nsh";
 
 /** 一个精灵。坐标是世界坐标（point，y 朝上，原点在视口中心），角度用度（逆时针）。 */
 export interface SpriteNode {
@@ -349,6 +349,45 @@ export function sound(game: NativeComponentRef | undefined, args: { src: string;
 /** 飘一行字。`game` 是 `<GameView ref>` 拿到的节点。 */
 export function floatText(game: NativeComponentRef | undefined, args: FloatText) {
   game?.command("floatText", args);
+}
+
+/** 发一次按键给引擎，和键盘、手柄一样进 `Input`（见 docs/touch-controls.md）。 */
+export function key(game: NativeComponentRef | undefined, code: string, down: boolean) {
+  game?.command("key", { code, down, repeat: false });
+}
+
+/** 一个屏幕按钮上按着的手指：第一根按下时 `send(true)`，最后一根松开时 `send(false)`；没按着时的松开不发。 */
+export function heldKey(send: (down: boolean) => void) {
+  const fingers = new Set<number>();
+  return {
+    start(ids: number[]) {
+      const was = fingers.size;
+      for (const id of ids) fingers.add(id);
+      if (was === 0 && fingers.size > 0) send(true);
+    },
+    end(ids: number[]) {
+      const was = fingers.size;
+      for (const id of ids) fingers.delete(id);
+      if (was > 0 && fingers.size === 0) send(false);
+    },
+  };
+}
+
+/** 按住发按键的屏幕按钮（testID 是 `key-<code>`）。用触摸而不是 press：同时按住两个按钮（跑着跳）要靠各自的手指。 */
+export function KeyButton(props: { game: () => NativeComponentRef | undefined; code: string; label: string; class?: string }) {
+  const held = heldKey((down) => key(props.game(), props.code, down));
+  const ids = (e: GestureResponderEvent) => e.changedTouches.map((t) => t.identifier);
+  return (
+    <View
+      testID={`key-${props.code}`}
+      class={`w-16 h-16 rounded-full bg-white/20 items-center justify-center active:bg-white/40 ${props.class ?? ""}`}
+      onTouchStart={(e: GestureResponderEvent) => held.start(ids(e))}
+      onTouchEnd={(e: GestureResponderEvent) => held.end(ids(e))}
+      onTouchCancel={(e: GestureResponderEvent) => held.end(ids(e))}
+    >
+      <Text class="text-white text-2xl">{props.label}</Text>
+    </View>
+  );
 }
 
 /**

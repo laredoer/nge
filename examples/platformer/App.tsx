@@ -1,5 +1,5 @@
-import { mount, type NativeComponentRef, signal, Text, View } from "nsh";
-import { floatText, gameView, sound, tween, type Scene, type SpriteNode, type TilemapNode, type Tween } from "../../ts/nge";
+import { mount, type NativeComponentRef, platform, signal, Text, View } from "nsh";
+import { floatText, gameView, KeyButton, sound, tween, type Scene, type SpriteNode, type TilemapNode, type Tween } from "../../ts/nge";
 
 /** Rust 发的事件：掉出关卡或被敌人撞到送回起点、按 R 重新开始、踩到敌人。 */
 interface Events {
@@ -106,7 +106,7 @@ function App() {
   return (
     <View class="flex-1 bg-black">
       <Text class="text-white p-4">
-        ← → / A D / 手柄 移动 · 空格 / ↑ / A 跳 · R 重来 · Q 调试 · 金币 {taken().length} / {COINS.length} · 失手 {falls()} 次
+        {platform.desktop ? "← → / A D / 手柄 移动 · 空格 / ↑ / A 跳 · R 重来 · Q 调试 · " : ""}金币 {taken().length} / {COINS.length} · 失手 {falls()} 次
         {won() === null ? "" : ` · 通关！用时 ${won()} 秒`}
       </Text>
       <GameView
@@ -144,6 +144,23 @@ function App() {
           started = Date.now();
         }}
       />
+      {platform.desktop ? null : <TouchPad game={() => game} />}
+    </View>
+  );
+}
+
+/** 手机上的触屏按钮，叠在游戏视图下方：左边跑，右边跳和重来（见 docs/touch-controls.md）。 */
+function TouchPad(props: { game: () => NativeComponentRef | undefined }) {
+  return (
+    <View class="absolute bottom-8 left-6 right-6 flex-row justify-between items-end">
+      <View class="flex-row gap-4">
+        <KeyButton game={props.game} code="ArrowLeft" label="←" />
+        <KeyButton game={props.game} code="ArrowRight" label="→" />
+      </View>
+      <View class="flex-row gap-4 items-end">
+        <KeyButton game={props.game} code="KeyR" label="↺" class="w-12 h-12" />
+        <KeyButton game={props.game} code="Space" label="跳" class="w-20 h-20" />
+      </View>
     </View>
   );
 }
