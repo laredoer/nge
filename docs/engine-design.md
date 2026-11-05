@@ -17,7 +17,7 @@
 | NSH → 引擎 | command 和 prop 都可用（JSON），大约有一帧延迟 |
 | 引擎 → NSH | `ComponentContext::emit`，可以在任意线程调用 |
 | 输入 | NSH 的 `on_touch` 接收全部触摸阶段，macOS 的鼠标也会映射成触摸 |
-| 已知缺口 | nsh 0.3 iOS 的 `run_app` 不支持注册组件，现在用自建的宿主（`ios_host.rs`）绕过 |
+| 已知缺口 | nsh 0.3 iOS 的 `run_app` 不支持注册组件，现在用自建的宿主（`ios_app.rs`）绕过；0.4 的 `#[native_components]` 能注册进生成的宿主，平台跳跃已经换过去（[native-components.md](native-components.md)） |
 
 ## 分层
 

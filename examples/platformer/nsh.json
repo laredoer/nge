@@ -1,1 +1,1 @@
-{ "name": "platformer", "id": "com.lewu.nge.platformer", "version": "0.1.0", "build": 1 }
+{ "name": "platformer", "id": "com.lewu.nge.platformer", "version": "0.1.0", "build": 1, "rust": "." }

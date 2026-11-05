@@ -1,0 +1,20 @@
+# nsh-platform-ios 0.4.0 在 crates.io 上编不过（longbridge/nsh#940：speech.rs 用了 monorepo 里的相对路径）。
+# 修好发布之前整套 nsh 从同一个 tag 取，避免混进两份 nsh-core。
+# 写在这里而不是 Cargo.toml：nsh run / nsh package 在 examples/*/.nsh/rust 生成的工作区也要用上。
+[patch.crates-io]
+nsh-base = { git = "https://github.com/longbridge/nsh", tag = "v0.4.0" }
+nsh-core = { git = "https://github.com/longbridge/nsh", tag = "v0.4.0" }
+nsh-dev = { git = "https://github.com/longbridge/nsh", tag = "v0.4.0" }
+nsh-engine = { git = "https://github.com/longbridge/nsh", tag = "v0.4.0" }
+nsh-js = { git = "https://github.com/longbridge/nsh", tag = "v0.4.0" }
+nsh-macros = { git = "https://github.com/longbridge/nsh", tag = "v0.4.0" }
+nsh-package = { git = "https://github.com/longbridge/nsh", tag = "v0.4.0" }
+nsh-platform-ios = { git = "https://github.com/longbridge/nsh", tag = "v0.4.0" }
+nsh-platform-linux = { git = "https://github.com/longbridge/nsh", tag = "v0.4.0" }
+nsh-platform-macos = { git = "https://github.com/longbridge/nsh", tag = "v0.4.0" }
+nsh-platform-windows = { git = "https://github.com/longbridge/nsh", tag = "v0.4.0" }
+nsh-testing = { git = "https://github.com/longbridge/nsh", tag = "v0.4.0" }
+
+# nsh 0.4 要求 iOS 15；不设时按 10.0 链接，QuickJS 的 ___chkstk_darwin 找不到（nsh package --target ios）。
+[env]
+IPHONEOS_DEPLOYMENT_TARGET = "15.0"

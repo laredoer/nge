@@ -192,6 +192,11 @@ enum Flow {
     Quit,
 }
 
+/// WebGPU 默认上限，硬件做不到的按硬件的来（iOS 模拟器的阶段间变量比默认少一个）。
+fn device_limits(supported: &wgpu::Limits) -> wgpu::Limits {
+    wgpu::Limits::default().or_worse_values_from(supported)
+}
+
 fn run(
     instance: wgpu::Instance,
     surface: wgpu::Surface<'static>,
@@ -224,8 +229,8 @@ fn run(
         ..Default::default()
     }))
     .map_err(|e| e.to_string())?;
-    let (device, queue) =
-        pollster::block_on(adapter.request_device(&Default::default())).map_err(|e| e.to_string())?;
+    let descriptor = wgpu::DeviceDescriptor { required_limits: device_limits(&adapter.limits()), ..Default::default() };
+    let (device, queue) = pollster::block_on(adapter.request_device(&descriptor)).map_err(|e| e.to_string())?;
     device.on_uncaptured_error(Arc::new(|e| log::error!("wgpu 错误: {e}")));
 
     let max_side = device.limits().max_texture_dimension_2d;
@@ -373,5 +378,20 @@ impl Loop<'_> {
         self.gfx.queue.submit([encoder.finish()]);
         self.gfx.queue.present(frame);
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn device_limits_never_ask_more_than_the_adapter_has() {
+        // iOS 模拟器：阶段间变量只有 15 个，比 WebGPU 默认的 16 少
+        let simulator = wgpu::Limits { max_inter_stage_shader_variables: 15, ..wgpu::Limits::default() };
+        assert_eq!(device_limits(&simulator).max_inter_stage_shader_variables, 15);
+        // 硬件更好时不多要，按默认值
+        let big = wgpu::Limits { max_texture_dimension_2d: 16384, ..wgpu::Limits::default() };
+        assert_eq!(device_limits(&big), wgpu::Limits::default());
     }
 }

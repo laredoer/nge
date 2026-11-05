@@ -72,7 +72,7 @@ impl Default for TextRenderer {
         let (tx, rx) = std::sync::mpsc::channel();
         let spawned = std::thread::Builder::new().name("nge-system-fonts".into()).spawn(move || {
             let mut db = fontdb::Database::new();
-            db.load_system_fonts();
+            load_system_fonts(&mut db);
             let _ = tx.send(db.faces().cloned().collect());
         });
         let system_fonts = match spawned {
@@ -177,13 +177,38 @@ impl TextRenderer {
                 for face in faces {
                     db.push_face_info(face);
                 }
-                shape(&mut self.fonts, Key { text: "0123456789+-".into(), face: None, px: 16.0, width: None });
+                // fontdb 默认的 sans-serif 是 Arial，cosmic-text 在 iOS 上又按 Linux 的 Noto 系列回退，都不一定有
+                #[cfg(target_os = "ios")]
+                if let Some(family) = first_family(db, IOS_SANS_SERIF) {
+                    let family = family.to_owned();
+                    db.set_sans_serif_family(family);
+                }
+                if self.has_default_font() {
+                    shape(&mut self.fonts, Key { text: "0123456789+-".into(), face: None, px: 16.0, width: None });
+                } else {
+                    log::warn!("没找到系统字体，不指定字体的文字不会画出来");
+                }
             }
             Err(TryRecvError::Empty) => return false,
             Err(TryRecvError::Disconnected) => log::warn!("扫描系统字体失败，不指定字体的文字不会画出来"),
         }
         self.system_fonts = None;
         true
+    }
+
+    /// 字体库里有没有字体：一个都没有时 cosmic-text 排版会 panic。至少要有一个，有了也不保证每个字都排得出。
+    fn has_default_font(&self) -> bool {
+        self.fonts.db().len() > 0
+    }
+
+    /// 这段文字用哪个字体排：`None` 是先不画，`Some(None)` 是默认字体。
+    fn face_for(&self, font: Option<FontId>, system_ready: bool) -> Option<Option<&Face>> {
+        match font {
+            Some(font) => self.faces.get(&font)?.as_ref().map(Some),
+            // 系统字体还在后台扫描：先不画，免得落到空字体库里排出一片空白；扫完了字体库还是空的，排版会 panic
+            None if !system_ready || !self.has_default_font() => None,
+            None => Some(None),
+        }
     }
 
     /// 排版并算出每段文字的位置；字体没加载完的跳过。删掉已经不存在的文字的缓存。
@@ -197,15 +222,8 @@ impl TextRenderer {
         let mut placed = Vec::new();
         let mut texts = world.query::<(Entity, &Text2d, &Transform2d, Has<ScreenText>)>();
         for (entity, text, transform, on_screen) in texts.iter(world) {
-            let face = match text.font {
-                Some(font) => match self.faces.get(&font) {
-                    Some(Some(face)) => Some(face),
-                    _ => continue,
-                },
-                // 系统字体还在后台扫描：先不画，免得落到空字体库里排出一片空白
-                None if !system_ready => continue,
-                None => None,
-            };
+            let Some(face) = self.face_for(text.font, system_ready).map(|f| f.cloned()) else { continue };
+            let face = face.as_ref();
             let zoom = if on_screen { 1.0 } else { camera.zoom };
             let px = (text.size * zoom * scale).max(1.0);
             let width = text.max_width.map(|w| w * zoom * scale);
@@ -227,6 +245,24 @@ impl TextRenderer {
         self.shaped.retain(|entity, _| seen.contains(entity));
         placed
     }
+}
+
+/// iOS 上不指定字体时依次试这些家族（都在 `/System/Library/Fonts` 里）。
+#[cfg(target_os = "ios")]
+const IOS_SANS_SERIF: &[&str] = &["PingFang SC", "Helvetica Neue", "Helvetica"];
+
+/// `families` 里第一个在字体库里有的家族。
+#[cfg_attr(not(target_os = "ios"), allow(dead_code))]
+fn first_family<'a>(db: &fontdb::Database, families: &[&'a str]) -> Option<&'a str> {
+    families.iter().copied().find(|family| db.faces().any(|face| face.families.iter().any(|(name, _)| name == family)))
+}
+
+/// fontdb 在 iOS 上按 Linux 找字体目录，一个也找不到；iOS 的系统字体在 `/System/Library/Fonts` 的各个子目录里，应用能读。
+fn load_system_fonts(db: &mut fontdb::Database) {
+    #[cfg(target_os = "ios")]
+    db.load_fonts_dir("/System/Library/Fonts");
+    #[cfg(not(target_os = "ios"))]
+    db.load_system_fonts();
 }
 
 fn shape(fonts: &mut FontSystem, key: Key) -> Shaped {
@@ -278,5 +314,35 @@ mod tests {
             assert!(shaped.buffer.layout_runs().map(|run| run.glyphs.len()).sum::<usize>() > 0, "默认字体排得出字形");
         }
         assert!(renderer.system_fonts_ready(), "加载完以后一直是 ready");
+    }
+
+    #[test]
+    fn no_system_fonts_does_not_panic() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(Vec::new()).unwrap();
+        let mut renderer = TextRenderer { system_fonts: Some(rx), ..TextRenderer::default() };
+        assert!(renderer.system_fonts_ready(), "扫完了（一个也没扫到）");
+        assert!(!renderer.has_default_font(), "字体库是空的");
+        assert_eq!(renderer.face_for(None, true), None, "不指定字体的文字跳过，不交给 cosmic-text 排版");
+        assert_eq!(renderer.face_for(None, false), None, "还在扫描的也跳过");
+    }
+
+    #[test]
+    fn default_font_text_waits_for_system_fonts() {
+        let mut fonts = Assets::<Font>::default();
+        let bold = fonts.add(Font(std::sync::Arc::new(include_bytes!("../tests/data/Inter-Bold.ttf").to_vec())));
+        let mut renderer = TextRenderer::default();
+        renderer.register_fonts(&fonts);
+        assert_eq!(renderer.face_for(None, false), None, "系统字体没扫完");
+        assert_eq!(renderer.face_for(None, true), Some(None), "扫完了用默认字体");
+        assert_eq!(renderer.face_for(Some(bold), false).map(|f| f.map(|f| f.family.clone())), Some(Some("Inter".into())), "指定的字体不等系统字体");
+    }
+
+    #[test]
+    fn sans_serif_falls_to_the_first_family_that_exists() {
+        let mut db = fontdb::Database::new();
+        db.load_font_data(include_bytes!("../tests/data/Inter-Bold.ttf").to_vec());
+        assert_eq!(first_family(&db, &["PingFang SC", "Inter", "Helvetica"]), Some("Inter"));
+        assert_eq!(first_family(&db, &["PingFang SC"]), None);
     }
 }

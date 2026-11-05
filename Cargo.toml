@@ -45,18 +45,3 @@ objc2-app-kit = { version = "0.3", features = ["NSView", "objc2-quartz-core", "N
 block2 = "0.6"
 objc2-ui-kit = { version = "0.3", features = ["UIApplication", "UIColor", "UIResponder", "UIScene", "UISceneDefinitions", "UISceneOptions", "UISceneSession", "UITraitCollection", "UIView", "UIViewController", "UIWindow", "UIWindowScene"] }
 
-# nsh-platform-ios 0.4.0 在 crates.io 上编不过（longbridge/nsh#940：speech.rs 用了 monorepo 里的相对路径）。
-# 修好发布之前整套 nsh 从同一个 tag 取，避免混进两份 nsh-core。
-[patch.crates-io]
-nsh-base = { git = "https://github.com/longbridge/nsh", tag = "v0.4.0" }
-nsh-core = { git = "https://github.com/longbridge/nsh", tag = "v0.4.0" }
-nsh-dev = { git = "https://github.com/longbridge/nsh", tag = "v0.4.0" }
-nsh-engine = { git = "https://github.com/longbridge/nsh", tag = "v0.4.0" }
-nsh-js = { git = "https://github.com/longbridge/nsh", tag = "v0.4.0" }
-nsh-macros = { git = "https://github.com/longbridge/nsh", tag = "v0.4.0" }
-nsh-package = { git = "https://github.com/longbridge/nsh", tag = "v0.4.0" }
-nsh-platform-ios = { git = "https://github.com/longbridge/nsh", tag = "v0.4.0" }
-nsh-platform-linux = { git = "https://github.com/longbridge/nsh", tag = "v0.4.0" }
-nsh-platform-macos = { git = "https://github.com/longbridge/nsh", tag = "v0.4.0" }
-nsh-platform-windows = { git = "https://github.com/longbridge/nsh", tag = "v0.4.0" }
-nsh-testing = { git = "https://github.com/longbridge/nsh", tag = "v0.4.0" }

@@ -20,5 +20,12 @@ nsh-core.workspace = true
 bevy_ecs.workspace = true
 serde.workspace = true
 
+# 生成的宿主（nsh run / nsh package）里注册游戏视图用
+[target.'cfg(target_os = "macos")'.dependencies]
+nsh-platform-macos.workspace = true
+
+[target.'cfg(target_os = "ios")'.dependencies]
+nsh-platform-ios.workspace = true
+
 [dev-dependencies]
 serde_json.workspace = true
