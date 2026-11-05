@@ -1,5 +1,5 @@
 // nge 的 TSX 绑定：<GameView> 组件和场景类型（和 crates/nge-scene 的协议一一对应）。
-import { nativeComponent, type GestureResponderEvent, type NativeComponentProps, type YNode } from "nsh";
+import { nativeComponent, Text, View, type GestureResponderEvent, type NativeComponentProps, type NativeComponentRef } from "nsh";
 
 /** 一个精灵。坐标是世界坐标（point，y 朝上，原点在视口中心），角度用度（逆时针）。 */
 export interface SpriteNode {
@@ -257,7 +257,7 @@ export interface FloatText {
 }
 
 /** 炸一团粒子。`game` 是 `<GameView ref>` 拿到的节点。 */
-export function burst(game: YNode | undefined, args: Burst) {
+export function burst(game: NativeComponentRef | undefined, args: Burst) {
   game?.command("burst", args);
 }
 
@@ -269,7 +269,7 @@ export interface Collide {
 }
 
 /** 给精灵 `id` 的刚体加上 (x, y) 的速度（point / s，和质量无关）。 */
-export function push(game: YNode | undefined, args: { id: string; x: number; y: number }) {
+export function push(game: NativeComponentRef | undefined, args: { id: string; x: number; y: number }) {
   game?.command("push", args);
 }
 
@@ -316,7 +316,7 @@ export interface Tween {
  * 让精灵在一段时间里平滑地移动 / 旋转 / 缩放 / 渐隐，结束时发 tweenEnd。
  * 补间开始（delay 过后）时接管它写到的属性，属性全被接管的旧补间发 `cancelled: true` 的 tweenEnd；dynamic 刚体只补间 scale / alpha。
  */
-export function tween(game: YNode | undefined, args: Tween) {
+export function tween(game: NativeComponentRef | undefined, args: Tween) {
   game?.command("tween", args);
 }
 
@@ -326,7 +326,7 @@ export interface Shake {
   duration?: number;
 }
 
-export function shake(game: YNode | undefined, args: Shake = {}) {
+export function shake(game: NativeComponentRef | undefined, args: Shake = {}) {
   game?.command("shake", args);
 }
 
@@ -342,13 +342,52 @@ export interface TweenEnd {
 }
 
 /** 播一次音效。`pitch` 是播放速度（2 = 高八度，限制在 0.1 到 8），`pan` 从 -1（左）到 1（右）。同时发声数有上限，超出的会被丢掉。 */
-export function sound(game: YNode | undefined, args: { src: string; volume?: number; pitch?: number; pan?: number }) {
+export function sound(game: NativeComponentRef | undefined, args: { src: string; volume?: number; pitch?: number; pan?: number }) {
   game?.command("sound", args);
 }
 
 /** 飘一行字。`game` 是 `<GameView ref>` 拿到的节点。 */
-export function floatText(game: YNode | undefined, args: FloatText) {
+export function floatText(game: NativeComponentRef | undefined, args: FloatText) {
   game?.command("floatText", args);
+}
+
+/** 发一次按键给引擎，和键盘、手柄一样进 `Input`（见 docs/touch-controls.md）。 */
+export function key(game: NativeComponentRef | undefined, code: string, down: boolean) {
+  game?.command("key", { code, down, repeat: false });
+}
+
+/** 一个屏幕按钮上按着的手指：第一根按下时 `send(true)`，最后一根松开时 `send(false)`；没按着时的松开不发。 */
+export function heldKey(send: (down: boolean) => void) {
+  const fingers = new Set<number>();
+  return {
+    start(ids: number[]) {
+      const was = fingers.size;
+      for (const id of ids) fingers.add(id);
+      if (was === 0 && fingers.size > 0) send(true);
+    },
+    end(ids: number[]) {
+      const was = fingers.size;
+      for (const id of ids) fingers.delete(id);
+      if (was > 0 && fingers.size === 0) send(false);
+    },
+  };
+}
+
+/** 按住发按键的屏幕按钮（testID 是 `key-<code>`）。用触摸而不是 press：同时按住两个按钮（跑着跳）要靠各自的手指。 */
+export function KeyButton(props: { game: () => NativeComponentRef | undefined; code: string; label: string; class?: string }) {
+  const held = heldKey((down) => key(props.game(), props.code, down));
+  const ids = (e: GestureResponderEvent) => e.changedTouches.map((t) => t.identifier);
+  return (
+    <View
+      testID={`key-${props.code}`}
+      class={`w-16 h-16 rounded-full bg-white/20 items-center justify-center active:bg-white/40 ${props.class ?? ""}`}
+      onTouchStart={(e: GestureResponderEvent) => held.start(ids(e))}
+      onTouchEnd={(e: GestureResponderEvent) => held.end(ids(e))}
+      onTouchCancel={(e: GestureResponderEvent) => held.end(ids(e))}
+    >
+      <Text class="text-white text-2xl">{props.label}</Text>
+    </View>
+  );
 }
 
 /**
@@ -407,7 +446,7 @@ export function gameView<P extends object = {}, E extends object = {}>(
   });
 
   return (props: GameViewProps<P, E>) => {
-    let node: YNode | undefined;
+    let node: NativeComponentRef | undefined;
     const user = props as GameViewProps<P, E> & Record<string, unknown>;
     const forward = (phase: TouchPhase, handler: string) => (e: GestureResponderEvent) => {
       for (const t of e.changedTouches) {
@@ -418,9 +457,9 @@ export function gameView<P extends object = {}, E extends object = {}>(
     return (
       <Native
         {...(props as any)}
-        ref={(n: YNode) => {
+        ref={(n: NativeComponentRef) => {
           node = n;
-          (user.ref as ((n: YNode) => void) | undefined)?.(n);
+          (user.ref as ((n: NativeComponentRef) => void) | undefined)?.(n);
         }}
         onTouchStart={forward("start", "onTouchStart")}
         onTouchMove={forward("move", "onTouchMove")}

@@ -119,13 +119,13 @@ pub fn platform_source() -> Option<Arc<dyn AssetSource>> {
 }
 
 /// App 的资源目录（和 nsh 的 host 一致）：
-/// `NSH_APP_DIR/assets`，Mac App 的 `Contents/Resources/nsh/assets`，iOS 包根目录下的 `assets`。
+/// `NSH_APP_DIR/assets`，Mac App 的 `Contents/Resources/nsh/assets`，iOS 包里的 `nsh/assets`（nsh 0.4 的 `nsh package`）或根目录下的 `assets`。
 pub fn bundle_dir(app_dir: Option<PathBuf>, exe: Option<&Path>) -> Option<PathBuf> {
     if let Some(dir) = app_dir {
         return Some(dir.join("assets"));
     }
     let exe_dir = exe?.parent()?;
-    [exe_dir.parent().map(|contents| contents.join("Resources/nsh/assets")), Some(exe_dir.join("assets"))]
+    [exe_dir.parent().map(|contents| contents.join("Resources/nsh/assets")), Some(exe_dir.join("nsh/assets")), Some(exe_dir.join("assets"))]
         .into_iter()
         .flatten()
         .find(|dir| dir.is_dir())
@@ -201,6 +201,10 @@ mod tests {
         let ios = root.join("Game.ios.app");
         std::fs::create_dir_all(ios.join("assets")).unwrap();
         assert_eq!(bundle_dir(None, Some(&ios.join("game"))), Some(ios.join("assets")));
+        // nsh 0.4 打的 iOS 包：资源在 nsh/assets 下
+        let ios4 = root.join("Game4.app");
+        std::fs::create_dir_all(ios4.join("nsh/assets")).unwrap();
+        assert_eq!(bundle_dir(None, Some(&ios4.join("game"))), Some(ios4.join("nsh/assets")));
         assert_eq!(bundle_dir(None, Some(&root.join("plain/game"))), None, "没有资源目录");
         std::fs::remove_dir_all(root).unwrap();
     }

@@ -1,4 +1,4 @@
-import { mount, signal, Text, View, type YNode } from "nsh";
+import { mount, type NativeComponentRef, signal, Text, View } from "nsh";
 import { gameView, shake, tween, type Scene, type SpriteNode } from "../../ts/nge";
 
 const GameView = gameView();
@@ -9,7 +9,7 @@ const STEP = 40;
 const ARROWS: Record<string, [number, number]> = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, 1], ArrowDown: [0, -1] };
 
 function App() {
-  let game: YNode | undefined;
+  let game: NativeComponentRef | undefined;
   // 飞船要去的位置（位置交给补间，不进 signal）
   const target = { x: 0, y: -200 };
   const move = (duration: number, tag: string) => tween(game, { id: "ship", to: { ...target }, duration, ease: "easeOut", tag });
@@ -45,7 +45,7 @@ function App() {
       </Text>
       <GameView
         class="flex-1"
-        ref={(n: YNode) => (game = n)}
+        ref={(n: NativeComponentRef) => (game = n)}
         scene={scene()}
         onTap={() => {
           taps.set(taps() + 1);

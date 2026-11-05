@@ -24,11 +24,11 @@ nge-text = { path = "crates/nge-text" }
 bevy_ecs = { version = "0.20.1", default-features = false, features = ["std"] }
 glam = { version = "0.34", features = ["bytemuck"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
-nsh-core = "0.3.0"
-nsh-base = "0.3.0"
-nsh-engine = { version = "0.3.0", default-features = false }
-nsh-platform-macos = { version = "0.3.0", default-features = false }
-nsh-platform-ios = { version = "0.3.0", default-features = false }
+nsh-core = "0.4.0"
+nsh-base = "0.4.0"
+nsh-engine = { version = "0.4.0", default-features = false }
+nsh-platform-macos = { version = "0.4.0", default-features = false }
+nsh-platform-ios = { version = "0.4.0", default-features = false }
 wgpu = "30"
 pollster = "1"
 raw-window-handle = "0.6"
@@ -44,3 +44,4 @@ objc2-quartz-core = { version = "0.3", features = ["CADisplayLink", "CAFrameRate
 objc2-app-kit = { version = "0.3", features = ["NSView", "objc2-quartz-core", "NSEvent", "NSResponder", "NSWindow", "NSText", "NSTextInputClient", "block2"] }
 block2 = "0.6"
 objc2-ui-kit = { version = "0.3", features = ["UIApplication", "UIColor", "UIResponder", "UIScene", "UISceneDefinitions", "UISceneOptions", "UISceneSession", "UITraitCollection", "UIView", "UIViewController", "UIWindow", "UIWindowScene"] }
+

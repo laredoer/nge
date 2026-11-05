@@ -17,7 +17,7 @@ The design and the acceptance notes for each feature are in [docs/](docs/) (in C
 
 ## Running the examples
 
-You need Rust (the version is pinned in `rust-toolchain.toml`) and the nsh 0.3 command line. For the platformer:
+You need Rust (the version is pinned in `rust-toolchain.toml`) and the nsh 0.4 command line. For the platformer:
 
 ```sh
 cd examples/platformer

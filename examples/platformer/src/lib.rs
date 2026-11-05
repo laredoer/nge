@@ -227,6 +227,25 @@ pub fn factory() -> nge_core::GameFactory {
     nge_ecs::factory(app)
 }
 
+/// `nsh run` / `nsh package` 生成的宿主要求应用的 crate 有它；TSX 不从这里导入东西，只带上资源（见 docs/native-components.md）。
+#[nsh_core::prelude::native_module("platformer/native")]
+fn native(registry: &mut nsh_core::prelude::Registry) {
+    registry.assets(assets!());
+}
+
+/// 把游戏视图注册进生成的宿主。
+#[cfg(target_os = "macos")]
+#[nsh_core::prelude::native_components(macos)]
+fn components(components: &nsh_platform_macos::Components) {
+    components.register(nge_core::GAME_COMPONENT, nge_platform::macos::component(factory()));
+}
+
+#[cfg(target_os = "ios")]
+#[nsh_core::prelude::native_components(ios)]
+fn components(components: &nsh_platform_ios::Components) {
+    components.register(nge_core::GAME_COMPONENT, nge_platform::ios::component(factory()));
+}
+
 #[cfg(test)]
 mod tests {
     use nge_core::Viewport;
