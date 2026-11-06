@@ -74,6 +74,7 @@
 | **触屏按钮** | `KeyButton` 按住发 `key` 命令，和键盘走同一条路；见 [touch-controls.md](touch-controls.md) | 平台跳跃在 iPhone 上能边跑边跳 |
 | **2.5D 相机** | `Camera3d::ortho` 正交投影，`camera3d.match2d` 让 3D 相机跟着 2D 相机；见 [camera25d.md](camera25d.md) | 平台跳跃终点前的 3D 箱子随相机跟随、震屏始终和关卡对齐 |
 | **示例换成生成的宿主** | 其余 8 个示例照平台跳跃改用 `#[native_components]`，删掉 dev host、`ios_app`、`HttpSource`；iOS 的前后台暂停改成组件自己监听通知；见 [generated-hosts.md](generated-hosts.md) | 每个示例 `nsh run` 能跑、`nsh check` 通过 |
+| **视差背景** | 精灵和瓦片地图的 `parallax`（一个数或 `[x, y]`），渲染和点击都按画的位置；z < 0 的精灵画在 3D 后面；见 [parallax.md](parallax.md) | 平台跳跃的远山和树按不同速度跟着相机，3D 箱子在背景前面 |
 | **M6 Android** | SurfaceView 和 Vulkan，JNI 胶水层 | 示例游戏在 Android 真机上能跑 |
 
 ## 待定

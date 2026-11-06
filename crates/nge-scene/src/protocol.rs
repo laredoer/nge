@@ -93,6 +93,31 @@ pub struct SpriteNode {
     #[serde(default)]
     pub tap: bool,
     pub body: Option<BodyNode>,
+    /// 视差：相机移动时跟着挪的比例，不填是 1（见 docs/parallax.md）。
+    pub parallax: Option<ParallaxNode>,
+}
+
+/// `parallax`：一个数（x、y 一样），或者 `[x, y]`。
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(untagged)]
+pub enum ParallaxNode {
+    Both(f32),
+    Axes([f32; 2]),
+}
+
+impl ParallaxNode {
+    /// 转成组件；有坏值（NaN、无穷）时 warn 并按 1 处理（不加组件）。
+    pub(crate) fn resolve(node: Option<Self>, id: &str) -> Option<nge_render2d::Parallax> {
+        let v = match node? {
+            Self::Both(p) => glam::Vec2::splat(p),
+            Self::Axes(p) => glam::Vec2::from(p),
+        };
+        if !v.is_finite() {
+            log::warn!("节点 {id:?} 的 parallax 不是有限的数，按 1 处理");
+            return None;
+        }
+        Some(nge_render2d::Parallax(v))
+    }
 }
 
 fn one() -> f32 {

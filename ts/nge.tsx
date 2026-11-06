@@ -7,7 +7,7 @@ export interface SpriteNode {
   id: string;
   x?: number;
   y?: number;
-  /** 绘制顺序，大的在上面。 */
+  /** 绘制顺序，大的在上面；小于 0 的是背景，画在 3D 模型后面（点击也是先模型后背景）。 */
   z?: number;
   rotation?: number;
   scale?: number;
@@ -30,6 +30,8 @@ export interface SpriteNode {
   tap?: boolean;
   /** 刚体。有了它位置归物理管：声明的 x / y / rotation 只在生成和改了的时候生效（同时重设初速度）。 */
   body?: BodyNode;
+  /** 视差：相机移动时跟着挪的比例，默认 1。0.5 像远处的东西，0 钉在屏幕上，大于 1 像前景。`[x, y]` 两个方向分开，背景常用 `[0.3, 1]`（竖直方向跟着关卡）。按相机在原点时摆。 */
+  parallax?: number | [number, number];
 }
 
 /** 精灵的刚体和碰撞体。尺寸是精灵本地的大小，会乘精灵的 scale。 */
@@ -198,6 +200,8 @@ export interface TilemapNode {
   friction?: number;
   restitution?: number;
   collide?: boolean;
+  /** 视差，加在每个瓦片上（同精灵的 `parallax`）；碰撞体不跟着挪，别和 `solid` 一起用。 */
+  parallax?: number | [number, number];
 }
 
 export interface Scene {

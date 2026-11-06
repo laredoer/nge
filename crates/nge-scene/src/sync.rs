@@ -5,12 +5,12 @@ use std::collections::{HashMap, HashSet};
 use bevy_ecs::prelude::*;
 use glam::{Vec2, Vec4};
 use nge_ecs::Time;
-use nge_render2d::{Sprite, SpriteImage, Transform2d};
+use nge_render2d::{Parallax, Sprite, SpriteImage, Transform2d};
 
 use crate::anim::FrameAnimation;
 use crate::behave::{Spin, Tappable};
 use crate::physics::{apply_body, square};
-use crate::protocol::{Scene, SpriteNode};
+use crate::protocol::{ParallaxNode, Scene, SpriteNode};
 use crate::resolve::SceneAssets;
 
 /// 节点 id。Rust 系统用它找到 TSX 声明的实体。不同种类的节点各用各的 id 空间。
@@ -92,6 +92,15 @@ pub(crate) fn sync_sprites(mut commands: Commands, scene: Res<Scene>, mut assets
         if node.tap {
             entity.insert(Tappable);
         }
+        match ParallaxNode::resolve(node.parallax, &node.id) {
+            Some(p) => {
+                if node.body.is_some() && p.0 != Vec2::ONE {
+                    log::warn!("节点 {:?} 有 body 又设了视差：碰撞体在声明的位置，和画面对不上", node.id);
+                }
+                entity.insert(p)
+            }
+            None => entity.remove::<Parallax>(),
+        };
         // anim 没变时接着播，不从头开始
         if before.map(|b| &b.anim) != Some(&node.anim) {
             let anim = node.anim.as_ref().and_then(|a| FrameAnimation::new(a.frames.clone(), a.fps, a.looped));
@@ -137,6 +146,23 @@ mod tests {
     fn sprites(app: &mut nge_ecs::App) -> HashMap<String, (Transform2d, Sprite)> {
         let world = app.world_mut();
         world.query::<(&SceneId, &Transform2d, &Sprite)>().iter(world).map(|(id, t, s)| (id.0.clone(), (*t, *s))).collect()
+    }
+
+    #[test]
+    fn parallax_is_declared_and_removed() {
+        let mut app = app();
+        let parallax = |app: &mut nge_ecs::App| {
+            let world = app.world_mut();
+            world.query::<&nge_render2d::Parallax>().iter(world).next().copied()
+        };
+        frame(&mut app, Some(json!({ "sprites": [{ "id": "far", "w": 10, "parallax": 0.3 }] })));
+        assert_eq!(parallax(&mut app), Some(nge_render2d::Parallax(Vec2::splat(0.3))), "一个数时 x、y 一样");
+        frame(&mut app, Some(json!({ "sprites": [{ "id": "far", "w": 10, "parallax": [0.2, 1] }] })));
+        assert_eq!(parallax(&mut app), Some(nge_render2d::Parallax(Vec2::new(0.2, 1.0))));
+        frame(&mut app, Some(json!({ "sprites": [{ "id": "far", "w": 10, "parallax": 1e39 }] })));
+        assert_eq!(parallax(&mut app), None, "无穷大按 1（不加视差）");
+        frame(&mut app, Some(json!({ "sprites": [{ "id": "far", "w": 10 }] })));
+        assert_eq!(parallax(&mut app), None, "去掉就回到跟着世界走");
     }
 
     #[test]

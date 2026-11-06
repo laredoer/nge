@@ -9,7 +9,7 @@ use nge_assets::{Assets, GpuImages, Image};
 
 use crate::assets::{Atlases, TextureId};
 use crate::batch::{Batch, Instance, Item, batch};
-use crate::camera::{Camera2d, DrawAt, Transform2d};
+use crate::camera::{Camera2d, DrawAt, Parallax, Transform2d, drawn};
 use crate::sprite::{Sprite, SpriteInstances};
 
 const SHADER: &str = r#"
@@ -59,6 +59,7 @@ fn fs(in: Out) -> @location(0) vec4f {
 const INITIAL_CAPACITY: u64 = 1024;
 
 /// 注册 [`Atlases`]、指针世界坐标换算和精灵渲染器（`ClearColor` 由 `App` 自带）。没有 `AssetPlugin` 时加一个默认的。
+/// 精灵分两层画：z < 0 的背景排在所有渲染器前面（在 3D 后面），其余的排在已注册的渲染器后面（在 3D 上面），所以要在 `Render3dPlugin` 之后添加。
 pub struct Render2dPlugin;
 
 impl Plugin for Render2dPlugin {
@@ -67,7 +68,8 @@ impl Plugin for Render2dPlugin {
         app.init_resource::<Atlases>()
             .init_resource::<SpriteInstances>()
             .add_systems(PreUpdate, (pointer_world.in_set(PointerWorld), clear_sprite_instances))
-            .add_renderer(SpriteRenderer::default());
+            .prepend_renderer(SpriteRenderer::new(Layer::Back))
+            .add_renderer(SpriteRenderer::new(Layer::Front));
     }
 }
 
@@ -96,26 +98,45 @@ struct Gpu {
     capacity: u64,
 }
 
-#[derive(Default)]
+/// 精灵层：z < 0 是背景。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Layer {
+    Back,
+    Front,
+}
+
+impl Layer {
+    fn contains(self, z: f32) -> bool {
+        (z < 0.0) == (self == Layer::Back)
+    }
+}
+
 struct SpriteRenderer {
+    layer: Layer,
     gpu: Option<Gpu>,
     items: Vec<Item>,
     instances: Vec<Instance>,
     batches: Vec<Batch>,
 }
 
+impl SpriteRenderer {
+    fn new(layer: Layer) -> Self {
+        Self { layer, gpu: None, items: Vec::new(), instances: Vec::new(), batches: Vec::new() }
+    }
+}
+
 impl Renderer for SpriteRenderer {
     fn render(&mut self, world: &mut World, gfx: &Gfx, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView) {
         let gpu = self.gpu.get_or_insert_with(|| Gpu::new(gfx));
-        let mut sprites = world.query::<(&Sprite, &Transform2d, Option<&DrawAt>)>();
+        let mut sprites = world.query::<(&Sprite, &Transform2d, Option<&DrawAt>, Option<&Parallax>)>();
         let camera = world.query::<&Camera2d>().iter(world).next().copied().unwrap_or_default();
         world.resource_scope(|world, mut images: Mut<GpuImages>| images.sync(gfx, world.resource::<Assets<Image>>()));
         let (images, atlases, gpu_images) = (world.resource::<Assets<Image>>(), world.resource::<Atlases>(), world.resource::<GpuImages>());
         let extra = world.resource::<SpriteInstances>();
 
         self.items.clear();
-        for (sprite, transform, draw) in sprites.iter(world) {
-            let (pos, rotation) = draw.map_or((transform.translation, transform.rotation), |d| (d.translation, d.rotation));
+        for (sprite, transform, draw, parallax) in sprites.iter(world).filter(|(_, t, ..)| self.layer.contains(t.z)) {
+            let Transform2d { translation: pos, rotation, .. } = drawn(transform, draw, parallax, &camera);
             let region = atlases.region(images, sprite.image);
             let size = sprite.size.unwrap_or(region.size) * transform.scale;
             self.items.push(Item {
@@ -132,7 +153,7 @@ impl Renderer for SpriteRenderer {
         }
         // 同一张图的额外实例通常是连着放的（一个发射器一批），只在图变了时重新查区域
         let mut last = None;
-        for &(image, sprite) in &extra.items {
+        for &(image, sprite) in extra.items.iter().filter(|(_, s)| self.layer.contains(s.z)) {
             let region = match last {
                 Some((i, region)) if i == image => region,
                 _ => atlases.region(images, image),
@@ -149,6 +170,10 @@ impl Renderer for SpriteRenderer {
                     _pad: 0,
                 },
             });
+        }
+        // 没有背景精灵时不开 pass，清屏留给后面的渲染器
+        if self.layer == Layer::Back && self.items.is_empty() {
+            return;
         }
         batch(&mut self.items, &mut self.instances, &mut self.batches);
         for id in std::iter::once(TextureId::WHITE).chain(self.batches.iter().map(|b| b.texture)) {

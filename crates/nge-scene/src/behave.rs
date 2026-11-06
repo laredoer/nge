@@ -4,7 +4,7 @@ use bevy_ecs::prelude::*;
 use glam::{Mat4, Quat, Vec2, Vec3, Vec4};
 use nge_ecs::{Input, Outbox, Screen, Time};
 use nge_particles::ParticleEmitter;
-use nge_render2d::{Assets, Atlases, DrawAt, Image, Sprite, Transform2d};
+use nge_render2d::{Assets, Atlases, Camera2d, DrawAt, Image, Parallax, Sprite, Transform2d, drawn};
 use nge_render3d::{Assets3d, Camera3d, Model3d, Transform3d};
 use nge_text::{FloatingText, Text2d};
 
@@ -57,31 +57,40 @@ pub(crate) fn tap(
     images: Res<Assets<Image>>,
     atlases: Res<Atlases>,
     assets3d: Res<Assets3d>,
-    sprites: Query<(&SceneId, &Transform2d, &Sprite, Option<&DrawAt>), With<Tappable>>,
+    sprites: Query<(&SceneId, &Transform2d, &Sprite, Option<&DrawAt>, Option<&Parallax>), With<Tappable>>,
+    camera2d: Query<&Camera2d>,
     models: Query<(&SceneId, &Transform3d, &Model3d), With<Tappable>>,
     camera: Query<(&Camera3d, &Transform3d), With<SceneCamera>>,
     mut outbox: ResMut<Outbox>,
 ) {
     for p in input.pointers_pressed() {
-        // 精灵画在 3D 上面，先看精灵
-        // 按画面上的位置点（有刚体的精灵画在插值过的位置上）
-        let drawn = |t: &Transform2d, d: Option<&DrawAt>| d.map_or(*t, |d| Transform2d { translation: d.translation, rotation: d.rotation, ..*t });
-        let sprite = sprites
-            .iter()
-            .filter(|(_, t, s, d)| contains(&drawn(t, *d), atlases.sprite_size(&images, s), p.world))
-            .max_by(|a, b| a.1.z.total_cmp(&b.1.z));
-        if let Some((id, ..)) = sprite {
+        // 按画的顺序从上往下找：z ≥ 0 的精灵、3D 模型、z < 0 的背景精灵
+        // 按画面上的位置点（有刚体的精灵画在插值过的位置上，视差精灵加上视差偏移）
+        let cam2d = camera2d.iter().next().copied().unwrap_or_default();
+        let top_sprite = |back: bool| {
+            sprites
+                .iter()
+                .filter(|(_, t, ..)| (t.z < 0.0) == back)
+                .filter(|(_, t, s, d, px)| contains(&drawn(t, *d, *px, &cam2d), atlases.sprite_size(&images, s), p.world))
+                .max_by(|a, b| a.1.z.total_cmp(&b.1.z))
+                .map(|(id, ..)| id)
+        };
+        if let Some(id) = top_sprite(false) {
             outbox.send(TAP, &Tap { id: id.0.clone(), x: p.world.x, y: p.world.y, point: None });
             continue;
         }
-        let Some(ray) = view_proj(&camera, &screen).and_then(|vp| Ray::through(vp, screen.size, p.screen)) else { continue };
-        let hit = models
-            .iter()
-            .filter_map(|(id, t, m)| Some((id, ray.hit(t.matrix(), model_bounds(&assets3d, m)?)?)))
-            .min_by(|a, b| a.1.total_cmp(&b.1));
-        if let Some((id, t)) = hit {
-            let point = ray.at(t).to_array();
+        let ray = view_proj(&camera, &screen).and_then(|vp| Ray::through(vp, screen.size, p.screen));
+        let hit = ray.and_then(|ray| {
+            models
+                .iter()
+                .filter_map(|(id, t, m)| Some((id, ray.hit(t.matrix(), model_bounds(&assets3d, m)?)?)))
+                .min_by(|a, b| a.1.total_cmp(&b.1))
+                .map(|(id, t)| (id, ray.at(t).to_array()))
+        });
+        if let Some((id, point)) = hit {
             outbox.send(TAP, &Tap { id: id.0.clone(), x: p.world.x, y: p.world.y, point: Some(point) });
+        } else if let Some(id) = top_sprite(true) {
+            outbox.send(TAP, &Tap { id: id.0.clone(), x: p.world.x, y: p.world.y, point: None });
         }
     }
 }
@@ -236,6 +245,29 @@ mod tests {
     }
 
     #[test]
+    fn tap_hits_parallax_sprites_where_they_are_drawn() {
+        let mut app = app();
+        // 相机在 x = 100：钉在屏幕上的（parallax 0）画在屏幕中心，同样位置的普通精灵在左边 100 处（视口外）
+        frame(&mut app, Some(json!({ "camera": { "x": 100 }, "sprites": [
+            { "id": "hud", "w": 10, "parallax": 0, "tap": true },
+            { "id": "far", "w": 10, "x": 80, "y": 10, "parallax": 0.5, "tap": true },
+            { "id": "world", "w": 10, "tap": true },
+        ] })));
+        app.command("touch", &json!({ "phase": "start", "id": 1, "x": 50, "y": 50 }));
+        assert_eq!(taps(&frame(&mut app, None)).iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), ["hud"]);
+        // far 画在 80 + 100 × 0.5 = 130，屏幕上是 (80, 40)
+        app.command("touch", &json!({ "phase": "end", "id": 1, "x": 50, "y": 50 }));
+        app.command("touch", &json!({ "phase": "start", "id": 2, "x": 80, "y": 40 }));
+        assert_eq!(taps(&frame(&mut app, None)).iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), ["far"]);
+        // Rust 直接挪相机（不经过场景声明）：钉在屏幕上的还在中间
+        let world = app.world_mut();
+        world.query::<&mut Camera2d>().single_mut(world).unwrap().position = Vec2::new(-500.0, 300.0);
+        app.command("touch", &json!({ "phase": "end", "id": 2, "x": 80, "y": 40 }));
+        app.command("touch", &json!({ "phase": "start", "id": 3, "x": 50, "y": 50 }));
+        assert_eq!(taps(&frame(&mut app, None)).iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), ["hud"]);
+    }
+
+    #[test]
     fn tap_hits_topmost_tappable_sprite() {
         let mut app = app();
         frame(&mut app, Some(json!({ "sprites": [
@@ -350,6 +382,20 @@ mod tests {
         app.command("touch", &json!({ "phase": "end", "id": 1, "x": 50, "y": 50 }));
         app.command("touch", &json!({ "phase": "start", "id": 2, "x": 50, "y": 50 }));
         assert_eq!(taps(&frame(&mut app, None))[0].id, "btn", "精灵画在上面，先判断精灵");
+    }
+
+    #[test]
+    fn background_sprites_are_tapped_only_where_no_model_is() {
+        let mut app = app();
+        let entity = with_cube(&mut app, json!({ "id": "box", "model": "asset:/@t/a.glb", "tap": true }));
+        let _ = entity;
+        // z < 0 的精灵画在 3D 后面：和模型重叠处点到模型，模型外面点到背景
+        app.world_mut().spawn((SceneId("sky".into()), Sprite::color(Vec2::splat(100.0), Vec4::ONE), Transform2d::default().with_z(-1.0), Tappable));
+        app.command("touch", &json!({ "phase": "start", "id": 1, "x": 50, "y": 50 }));
+        assert_eq!(taps(&frame(&mut app, None)).iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), ["box"]);
+        app.command("touch", &json!({ "phase": "end", "id": 1, "x": 50, "y": 50 }));
+        app.command("touch", &json!({ "phase": "start", "id": 2, "x": 5, "y": 5 }));
+        assert_eq!(taps(&frame(&mut app, None)).iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), ["sky"]);
     }
 
     #[test]

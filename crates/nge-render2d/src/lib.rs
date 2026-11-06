@@ -11,7 +11,7 @@ mod sprite;
 
 pub use assets::{AtlasId, Atlases, Grid, TextureId};
 pub use nge_assets::{AssetPlugin, AssetServer, Assets, Image, ImageId, MAX_TEXTURE_SIDE};
-pub use camera::{Camera2d, DrawAt, Transform2d};
+pub use camera::{Camera2d, DrawAt, Parallax, Transform2d, drawn};
 pub use nge_ecs::ClearColor;
 pub use gizmos::{GIZMO_Z, Gizmos};
 pub use renderer::{PointerWorld, Render2dPlugin};
