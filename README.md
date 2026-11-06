@@ -28,7 +28,7 @@ On an iPhone: `nsh package --target ios --sign <certificate> --profile <profile>
 
 More examples are in [examples/](examples/): `physics` (physics and sound), `scene` (animation, camera, pause), `scene3d` (3D scene nodes), `dodge` (keyboard and gamepad) and others; each runs with `nsh run examples/<name>` (`--window-size 480x800` sets the window size).
 
-`nsh run` builds each example in its own `target/` (5–20 GB each). To share one build directory between them, set `CARGO_TARGET_DIR`, e.g. `export CARGO_TARGET_DIR=$PWD/target/nsh-hosts`.
+`nsh run` builds each example as its own Cargo workspace, and with the stock Cargo each gets its own `target/` (5–20 GB each). [huacnlee/cargo](https://huacnlee.github.io/cargo/) shares compiled dependencies between them and keeps the build output under a size limit.
 
 Tests: `cargo test --workspace`.
 

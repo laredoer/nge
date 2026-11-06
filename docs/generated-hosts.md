@@ -45,8 +45,8 @@
 - `cargo build --workspace`、`cargo test --workspace` 通过，没有新的 warning；`nge-platform` 的 iOS 检查（`aarch64-apple-ios`）通过。
 - 9 个示例的 `nsh check` 都通过。
 - 冒烟：9 个示例都能 `nsh run examples/<名字>` 在 Mac 上起来，宿主进程里有 `nge-render` 渲染线程，日志没有报错。还没手测画面和操作。
-- 编译目录：生成的宿主默认在每个示例下各编一份 `target/`（5–21 GB），9 个示例加起来把磁盘占满过。设 `CARGO_TARGET_DIR` 共用一个目录后，scene、scene3d、platformer 三个一共 13 GB（各自编时 35 GB）。写进了根目录 README。
-- 还没做：iPhone 上打包运行、切后台再回来是否暂停。
+- 编译目录：生成的宿主默认在每个示例下各编一份 `target/`（5–21 GB），9 个示例加起来把磁盘占满过。设 `CARGO_TARGET_DIR` 共用一个目录后，scene、scene3d、platformer 三个一共 13 GB（各自编时 35 GB）。现在改用 huacnlee/cargo：依赖编一次各示例共用，编译目录有大小上限，写进了根目录 README。
+- iPhone：平台跳跃 `nsh package --target ios` 打包、`tools/resign-ios.sh` 重签后装到 iPhone 16 Plus 运行。手测：玩几秒后切回主屏等 10 秒再回来，游戏接着正常跑；切换前后是同一个进程（没被系统杀掉，后台没有提交 GPU 命令）。前后台切换会打 info 日志（`App 进入后台` / `App 回到前台`），在系统日志里，`devicectl --console` 看不到。
 
 **修过的问题**：
 - 第一个游戏视图在 App 已经进后台后才挂载时，按前台起步，后台提交 GPU 命令会被系统杀掉；装监听时先读 `applicationState`。

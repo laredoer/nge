@@ -67,6 +67,7 @@ impl Proxy {
     /// App 进后台 / 回前台（主线程）。
     #[cfg_attr(not(target_os = "ios"), allow(dead_code))]
     pub fn set_active(&self, active: bool) {
+        log::info!("App {}", if active { "回到前台" } else { "进入后台" });
         self.transition(self.state.get().with_active(active));
     }
 
