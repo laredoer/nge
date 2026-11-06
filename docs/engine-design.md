@@ -17,7 +17,7 @@
 | NSH → 引擎 | command 和 prop 都可用（JSON），大约有一帧延迟 |
 | 引擎 → NSH | `ComponentContext::emit`，可以在任意线程调用 |
 | 输入 | NSH 的 `on_touch` 接收全部触摸阶段，macOS 的鼠标也会映射成触摸 |
-| 已知缺口 | nsh 0.3 iOS 的 `run_app` 不支持注册组件，现在用自建的宿主（`ios_app.rs`）绕过；0.4 的 `#[native_components]` 能注册进生成的宿主，平台跳跃已经换过去（[native-components.md](native-components.md)） |
+| 宿主 | 所有示例都用 nsh 0.4 生成的宿主（`#[native_components]`，`nsh run` / `nsh package`）；原来绕过 nsh 0.3 限制的自写宿主（macOS dev host、iOS `ios_app.rs`）已删掉（[generated-hosts.md](generated-hosts.md)） |
 
 ## 分层
 
@@ -73,6 +73,7 @@
 | **生成的宿主** | 0.4 的 `#[native_components]` 把游戏视图注册进 `nsh run` / `nsh package` 生成的宿主；iOS 字体、包内资源、GPU 上限、重签脚本；见 [native-components.md](native-components.md) | 平台跳跃用 `nsh run` 在 Mac 上跑、用 `nsh package` 在 iPhone 真机上跑 |
 | **触屏按钮** | `KeyButton` 按住发 `key` 命令，和键盘走同一条路；见 [touch-controls.md](touch-controls.md) | 平台跳跃在 iPhone 上能边跑边跳 |
 | **2.5D 相机** | `Camera3d::ortho` 正交投影，`camera3d.match2d` 让 3D 相机跟着 2D 相机；见 [camera25d.md](camera25d.md) | 平台跳跃终点前的 3D 箱子随相机跟随、震屏始终和关卡对齐 |
+| **示例换成生成的宿主** | 其余 8 个示例照平台跳跃改用 `#[native_components]`，删掉 dev host、`ios_app`、`HttpSource`；iOS 的前后台暂停改成组件自己监听通知；见 [generated-hosts.md](generated-hosts.md) | 每个示例 `nsh run` 能跑、`nsh check` 通过 |
 | **M6 Android** | SurfaceView 和 Vulkan，JNI 胶水层 | 示例游戏在 Android 真机上能跑 |
 
 ## 待定

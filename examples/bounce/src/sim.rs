@@ -228,6 +228,8 @@ impl Sim {
             "spawn" => self.spawn(size),
             "reset" => self.reset(size),
             "touch" => return self.touch(args),
+            // 平台层发给所有游戏的内置命令（按键、手柄），弹球不用
+            other if nge_core::bridge::is_reserved(other, false) => return,
             other => log::warn!("game.view 未知命令: {other}"),
         }
         self.emit("state", json!({ "paused": self.paused }));

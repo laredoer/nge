@@ -1,1 +1,1 @@
-{ "name": "scene", "id": "com.lewu.nge.scene", "version": "0.1.0", "build": 1 }
+{ "name": "scene", "id": "com.lewu.nge.scene", "version": "0.1.0", "build": 1, "rust": "." }

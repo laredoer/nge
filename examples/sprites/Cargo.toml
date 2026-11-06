@@ -18,7 +18,6 @@ nsh-core.workspace = true
 nsh-base.workspace = true
 serde_json.workspace = true
 log.workspace = true
-env_logger.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 nsh-platform-macos.workspace = true

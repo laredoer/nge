@@ -1,0 +1,1 @@
+{ "name": "effects", "id": "com.lewu.nge.effects", "version": "0.1.0", "build": 1, "rust": ".", "root": "App" }

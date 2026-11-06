@@ -20,12 +20,15 @@ The design and the acceptance notes for each feature are in [docs/](docs/) (in C
 You need Rust (the version is pinned in `rust-toolchain.toml`) and the nsh 0.4 command line. For the platformer:
 
 ```sh
-cd examples/platformer
-nsh dev --server-only App.tsx      # one terminal: the TSX dev server
-cargo run --release -p platformer  # another terminal: the game
+nsh run examples/platformer            # macOS: edits to App.tsx hot-reload, edits to Rust rebuild and restart
+nsh run examples/platformer --target ios  # the iOS simulator
 ```
 
-More examples are in [examples/](examples/): `physics` (physics and sound), `scene` (animation, camera, pause), `scene3d` (3D scene nodes), `dodge` (keyboard and gamepad) and others.
+On an iPhone: `nsh package --target ios --sign <certificate> --profile <profile>` in the example's directory, then `tools/resign-ios.sh` (works around an nsh 0.4.0 signing issue, see [docs/native-components.md](docs/native-components.md)) and install the `.ipa`.
+
+More examples are in [examples/](examples/): `physics` (physics and sound), `scene` (animation, camera, pause), `scene3d` (3D scene nodes), `dodge` (keyboard and gamepad) and others; each runs with `nsh run examples/<name>` (`--window-size 480x800` sets the window size).
+
+`nsh run` builds each example as its own Cargo workspace, and with the stock Cargo each gets its own `target/` (5–20 GB each). [huacnlee/cargo](https://huacnlee.github.io/cargo/) shares compiled dependencies between them and keeps the build output under a size limit.
 
 Tests: `cargo test --workspace`.
 
