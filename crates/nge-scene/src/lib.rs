@@ -192,7 +192,7 @@ pub(crate) mod testing {
         use nge_render3d::{Assets3d, MaterialId, Mesh, Model, Part};
         let mut assets = world.resource_mut::<Assets3d>();
         let mesh = assets.add_mesh(Mesh::cube(2.0)).unwrap();
-        assets.add_model(Model { parts: vec![Part { mesh, material: MaterialId::DEFAULT, local: glam::Mat4::IDENTITY }] }).unwrap()
+        assets.add_model(Model { parts: vec![Part::new(mesh, MaterialId::DEFAULT, glam::Mat4::IDENTITY)], ..Default::default() }).unwrap()
     }
 
     pub fn frame(app: &mut App, scene: Option<JsonValue>) -> Vec<(String, JsonValue)> {

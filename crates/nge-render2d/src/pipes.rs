@@ -44,9 +44,9 @@ impl Mode {
 
 pub(crate) const STENCIL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Stencil8;
 
-/// 管线号：着色器编号 × 4 + 画法（所以 `pipe % 4` 是画法）。
-pub(crate) fn pipe(module: u32, mode: Mode) -> u32 {
-    module * 4 + mode as u32
+/// 管线号：着色器编号 × 8 + 和 3D 混排 × 4 + 画法（所以 `pipe % 4` 是画法）。
+pub(crate) fn pipe(module: u32, mode: Mode, depth: bool) -> u32 {
+    module * 8 + u32::from(depth) * 4 + mode as u32
 }
 
 pub(crate) struct Pipes {
@@ -159,8 +159,11 @@ impl Pipes {
         if self.pipelines.contains_key(&pipe) {
             return;
         }
-        let module = &self.modules[(pipe / 4) as usize];
+        let module = &self.modules[(pipe / 8) as usize];
         let mode = Mode::ALL[(pipe % 4) as usize];
+        // 混排：用 3D 留下的深度（深度 + 模板），比深度不写深度（精灵是半透明的，靠 z 排序）
+        let (format, depth_compare) =
+            if pipe / 4 % 2 == 1 { (nge_ecs::SCENE_DEPTH_FORMAT, wgpu::CompareFunction::LessEqual) } else { (STENCIL_FORMAT, wgpu::CompareFunction::Always) };
         let write = mode == Mode::Write;
         let attributes = wgpu::vertex_attr_array![
             0 => Float32x2, 1 => Float32x2, 2 => Float32x2, 3 => Float32x4, 4 => Unorm8x4, 5 => Uint32, 6 => Float32x4
@@ -180,9 +183,9 @@ impl Pipes {
             },
             primitive: Default::default(),
             depth_stencil: Some(wgpu::DepthStencilState {
-                format: STENCIL_FORMAT,
+                format,
                 depth_write_enabled: Some(false),
-                depth_compare: Some(wgpu::CompareFunction::Always),
+                depth_compare: Some(depth_compare),
                 stencil: mode.stencil(),
                 bias: Default::default(),
             }),

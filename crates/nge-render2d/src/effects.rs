@@ -185,18 +185,24 @@ pub struct PostEffect {
 #[derive(Debug, Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub(crate) struct Globals {
     pub view_proj: [f32; 16],
+    /// 和 3D 混排时，3D 相机的矩阵：精灵的深度按它算。
+    pub depth_view_proj: [f32; 16],
     pub time: f32,
     pub light_count: u32,
     pub lighting: u32,
-    pub _pad: u32,
+    /// 1：和 3D 混排，按 `depth_view_proj` 写深度。
+    pub depth: u32,
     pub ambient: [f32; 4],
     pub lights: [[f32; 8]; MAX_LIGHTS],
 }
 
 impl Globals {
-    /// 半径不是正数、不是有限数的灯跳过；超过 [`MAX_LIGHTS`] 盏的只取前面的。
-    pub fn new(view_proj: [f32; 16], time: f32, lighting: &Lighting2d) -> Self {
+    /// 半径不是正数、不是有限数的灯跳过；超过 [`MAX_LIGHTS`] 盏的只取前面的。`depth` 是混排时 3D 相机的矩阵。
+    pub fn new(view_proj: [f32; 16], depth: Option<[f32; 16]>, time: f32, lighting: &Lighting2d) -> Self {
         let mut g = Self { view_proj, time, ..bytemuck::Zeroable::zeroed() };
+        if let Some(m) = depth {
+            (g.depth_view_proj, g.depth) = (m, 1);
+        }
         if !lighting.enabled {
             return g;
         }
@@ -251,10 +257,11 @@ pub(crate) const SPRITE_HEAD: &str = r#"
 struct Light { a: vec4f, b: vec4f }
 struct Globals {
     view_proj: mat4x4f,
+    depth_view_proj: mat4x4f,
     time: f32,
     light_count: u32,
     lighting: u32,
-    _pad: u32,
+    depth: u32,
     ambient: vec4f,
     lights: array<Light, 32>,
 }
@@ -313,6 +320,11 @@ fn vs(@builtin(vertex_index) vi: u32, i: Inst) -> Out {
     let p = vec2f(local.x * k - local.y * s, local.x * s + local.y * k) + i.pos;
     var out: Out;
     out.clip = globals.view_proj * vec4f(p, 0.0, 1.0);
+    // 和 3D 混排：深度按精灵的 z 在 3D 相机里算，超出前后范围的贴在最前 / 最后（不裁掉）
+    if globals.depth != 0u {
+        let d = globals.depth_view_proj * vec4f(p, i.rotation_z.y, 1.0);
+        out.clip.z = clamp(d.z / d.w, 0.0, 1.0) * out.clip.w;
+    }
     // 世界 y 朝上、图片 v 朝下
     out.uv = i.uv.xy + vec2f(c.x + 0.5, 0.5 - c.y) * i.uv.zw;
     out.color = i.color;
@@ -474,14 +486,16 @@ mod tests {
 
     #[test]
     fn globals_pack_lights() {
-        assert_eq!(size_of::<Globals>(), 64 + 16 + 16 + 32 * 32, "和 WGSL 的布局一样");
-        let off = Globals::new([0.0; 16], 1.5, &Lighting2d { enabled: false, ambient: Vec3::ONE, lights: vec![] });
-        assert_eq!((off.lighting, off.light_count, off.time), (0, 0, 1.5));
+        assert_eq!(size_of::<Globals>(), 64 + 64 + 16 + 16 + 32 * 32, "和 WGSL 的布局一样");
+        let off = Globals::new([0.0; 16], None, 1.5, &Lighting2d { enabled: false, ambient: Vec3::ONE, lights: vec![] });
+        assert_eq!((off.lighting, off.light_count, off.time, off.depth), (0, 0, 1.5, 0));
+        let mixed = Globals::new([0.0; 16], Some([2.0; 16]), 0.0, &Lighting2d::default());
+        assert_eq!((mixed.depth, mixed.depth_view_proj), (1, [2.0; 16]));
         let light = |x: f32, radius: f32| Light2d { position: Vec2::new(x, 2.0), radius, color: Vec3::new(1.0, 0.5, 0.0), intensity: 3.0 };
         let mut lights: Vec<_> = (0..40).map(|i| light(i as f32, 10.0)).collect();
         lights.insert(0, light(0.0, 0.0));
         lights.insert(1, light(0.0, f32::NAN));
-        let g = Globals::new([0.0; 16], 0.0, &Lighting2d { enabled: true, ambient: Vec3::splat(0.2), lights });
+        let g = Globals::new([0.0; 16], None, 0.0, &Lighting2d { enabled: true, ambient: Vec3::splat(0.2), lights });
         assert_eq!((g.lighting, g.light_count as usize), (1, MAX_LIGHTS));
         assert_eq!(g.ambient, [0.2, 0.2, 0.2, 1.0]);
         assert_eq!(g.lights[0], [0.0, 2.0, 10.0, 3.0, 1.0, 0.5, 0.0, 0.0], "半径不对的跳过");

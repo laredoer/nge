@@ -197,7 +197,7 @@ fn directional_light_shades_the_lit_side() {
         app.add_systems(Startup, |world: &mut World| {
             solid(world, Vec4::ONE, Mesh::sphere(1.5, 32), Transform3d::default());
             // 光从 +X 照过来
-            world.spawn(DirectionalLight { direction: Vec3::NEG_X, color: Vec3::ONE, illuminance: 3.0 });
+            world.spawn(DirectionalLight { direction: Vec3::NEG_X, color: Vec3::ONE, illuminance: 3.0, shadows: false });
         });
     }) else {
         return eprintln!("没有 GPU，跳过");
@@ -409,7 +409,7 @@ fn mirrored_objects_keep_their_outside() {
                 let material = assets.add_material(Material { double_sided, ..Default::default() });
                 world.spawn((Mesh3d { mesh, material }, Transform3d { scale: Vec3::new(-1.0, 1.0, 1.0), ..Default::default() }));
                 // 光从相机这边照过去：外表面亮，看到的若是内壁就是黑的
-                world.spawn(DirectionalLight { direction: Vec3::NEG_Z, color: Vec3::ONE, illuminance: 3.0 });
+                world.spawn(DirectionalLight { direction: Vec3::NEG_Z, color: Vec3::ONE, illuminance: 3.0, shadows: false });
             });
         }) else {
             return eprintln!("没有 GPU，跳过");
@@ -513,7 +513,7 @@ fn ortho_highlight_is_the_same_everywhere_on_a_flat_surface() {
             let material = assets.add_material(Material { base_color: Vec4::ONE, metallic: 1.0, roughness: 0.1, ..Default::default() });
             world.spawn((Mesh3d { mesh, material }, facing_camera()));
             // 光从相机那边正对着平面照：正交相机的视线处处一样，高光也处处一样
-            world.spawn(DirectionalLight { direction: Vec3::NEG_Z, color: Vec3::ONE, illuminance: 1.0 });
+            world.spawn(DirectionalLight { direction: Vec3::NEG_Z, color: Vec3::ONE, illuminance: 1.0, shadows: false });
         });
     }) else {
         return eprintln!("没有 GPU，跳过");
@@ -521,4 +521,220 @@ fn ortho_highlight_is_the_same_everywhere_on_a_flat_surface() {
     let (center, corner) = (img.center(), img.at(4, 4));
     assert!(center[0] > 100, "正对着有高光 {center:?}");
     assert!(close(center, corner), "中间 {center:?} 和角上 {corner:?} 一样亮");
+}
+
+/// 和 2D 对齐的正交相机（同 `camera3d.match2d`）：1 个单位是 1 个像素，z 在 [-1000, 1000] 都看得到。
+fn match_2d(world: &mut World) {
+    world.spawn((Camera3d { ortho: Some(SIZE as f32), near: 0.0, far: 2000.0, ..Default::default() }, Transform3d::from_xyz(0.0, 0.0, 1000.0)));
+}
+
+/// 左边：红方块正面在 z = 10，前面 z = 5 的绿精灵（下半）被挡、z = 5000 的白精灵（上半）不被裁掉；
+/// 右边：蓝方块正面在 z = -40，z = -10 的黄精灵在它前面。
+fn mixed_scene(app: &mut App, interleave: bool) {
+    use nge_render2d::{Render2dPlugin, Sprite, Transform2d};
+    unlit(app);
+    app.add_plugins(Render2dPlugin).insert_resource(nge_ecs::Interleave(interleave));
+    app.add_systems(Startup, |world: &mut World| {
+        match_2d(world);
+        solid(world, Vec4::new(1.0, 0.0, 0.0, 1.0), Mesh::cube(20.0), Transform3d::from_xyz(-16.0, 0.0, 0.0));
+        solid(world, Vec4::new(0.0, 0.0, 1.0, 1.0), Mesh::cube(20.0), Transform3d::from_xyz(16.0, 0.0, -50.0));
+        let sprite = |world: &mut World, x: f32, y: f32, z: f32, color: Vec4| {
+            world.spawn((Sprite::color(Vec2::splat(6.0), color), Transform2d::from_xy(x, y).with_z(z)));
+        };
+        sprite(world, -16.0, -6.0, 5.0, Vec4::new(0.0, 1.0, 0.0, 1.0));
+        sprite(world, -16.0, 6.0, 5000.0, Vec4::ONE);
+        sprite(world, 16.0, 0.0, -10.0, Vec4::new(1.0, 1.0, 0.0, 1.0));
+    });
+}
+
+#[test]
+fn interleaved_sprites_and_models_sort_by_depth() {
+    let Some(img) = render(SIZE, |app| mixed_scene(app, true)) else {
+        return eprintln!("没有 GPU，跳过");
+    };
+    assert!(close(img.at(16, 38), [255, 0, 0, 255]), "z = 5 的精灵在模型后面 {:?}", img.at(16, 38));
+    assert!(close(img.at(16, 26), [255; 4]), "z 很大的精灵在最前面、不被裁掉 {:?}", img.at(16, 26));
+    assert!(close(img.at(48, 32), [255, 255, 0, 255]), "z < 0 的精灵在更远的模型前面 {:?}", img.at(48, 32));
+    assert!(close(img.at(48, 25), [0, 0, 255, 255]), "精灵外面是模型 {:?}", img.at(48, 25));
+}
+
+#[test]
+fn without_interleave_layers_stay_as_before() {
+    let Some(img) = render(SIZE, |app| mixed_scene(app, false)) else {
+        return eprintln!("没有 GPU，跳过");
+    };
+    assert!(close(img.at(16, 38), [0, 255, 0, 255]), "z ≥ 0 的精灵画在 3D 上面 {:?}", img.at(16, 38));
+    assert!(close(img.at(48, 32), [0, 0, 255, 255]), "z < 0 的精灵画在 3D 下面 {:?}", img.at(48, 32));
+}
+
+/// 地面上方一个方块，光从左上斜着照：方块的影子落在它右边的地上。
+fn shadow_scene(app: &mut App, shadows: bool) {
+    app.add_plugins(Render3dPlugin).insert_resource(AmbientLight { color: Vec3::ONE, brightness: 0.1 });
+    app.insert_resource(ClearColor(wgpu::Color::BLACK));
+    app.add_systems(Startup, move |world: &mut World| {
+        let (camera, eye) = shadow_camera();
+        world.spawn((camera, eye));
+        solid(world, Vec4::ONE, Mesh::plane(6.0), Transform3d::default());
+        solid(world, Vec4::ONE, Mesh::cube(0.5), Transform3d::from_xyz(0.0, 1.0, 0.0));
+        world.spawn(DirectionalLight { direction: Vec3::new(1.0, -1.0, 0.0), shadows, ..Default::default() });
+    });
+}
+
+fn shadow_camera() -> (Camera3d, Transform3d) {
+    (Camera3d::default(), Transform3d::from_xyz(0.0, 4.0, 4.0).looking_at(Vec3::new(0.5, 0.0, 0.0), Vec3::Y))
+}
+
+/// 世界上的点画在哪个像素。
+fn pixel_of(point: Vec3) -> (u32, u32) {
+    let (camera, eye) = shadow_camera();
+    pixel_in(camera, eye, point)
+}
+
+fn pixel_in(camera: Camera3d, eye: Transform3d, point: Vec3) -> (u32, u32) {
+    let c = camera.view_proj(&eye, 1.0) * point.extend(1.0);
+    let ndc = c.truncate().truncate() / c.w;
+    (((ndc.x * 0.5 + 0.5) * SIZE as f32) as u32, ((0.5 - ndc.y * 0.5) * SIZE as f32) as u32)
+}
+
+#[test]
+fn shadowed_light_darkens_what_is_behind_the_caster() {
+    let Some(img) = render(SIZE, |app| shadow_scene(app, true)) else {
+        return eprintln!("没有 GPU，跳过");
+    };
+    // 方块中心在 y = 1，光沿 (1, -1) 走：影子中心落在 x = 1
+    let (sx, sy) = pixel_of(Vec3::new(1.0, 0.0, 0.0));
+    let (lx, ly) = pixel_of(Vec3::new(-1.5, 0.0, 0.0));
+    let (shadow, lit) = (img.at(sx, sy), img.at(lx, ly));
+    assert!(lit[0] > 120, "没挡住的地方照亮了 {lit:?}");
+    // 环境光 0.1（线性）是 sRGB 89
+    assert!(close(shadow, [89, 89, 89, 255]), "影子里只有环境光 {shadow:?}，外面 {lit:?}");
+    // 方块顶面朝光，没有自己挡自己
+    let (tx, ty) = pixel_of(Vec3::new(0.0, 1.25, 0.0));
+    assert!(img.at(tx, ty)[0] > 120, "方块顶面没有阴影痘 {:?}", img.at(tx, ty));
+}
+
+#[test]
+fn without_shadows_the_ground_is_evenly_lit() {
+    let Some(img) = render(SIZE, |app| shadow_scene(app, false)) else {
+        return eprintln!("没有 GPU，跳过");
+    };
+    let (sx, sy) = pixel_of(Vec3::new(1.0, 0.0, 0.0));
+    let (lx, ly) = pixel_of(Vec3::new(-1.5, 0.0, 0.0));
+    assert!(close(img.at(sx, sy), img.at(lx, ly)), "{:?} vs {:?}", img.at(sx, sy), img.at(lx, ly));
+}
+
+/// 两截竖条：下半截（y 0–1）跟关节 0、上半截（y 1–2）跟关节 1；关节 1 挂在关节 0 上方 1 处。
+/// 动画 bend 把关节 1 绕 z 转 90°，上半截倒向左边。模型整体下移 1，下半截在画面中心下方。
+fn bending_bar(world: &mut World, animate: bool) {
+    use nge_render3d::{Animation, Channel, Influence, Interpolation, Model, Node, Part, Pose, Property, Skeleton, Skin, Trs, Vertex};
+
+    let mut mesh = Mesh::default();
+    for (joint, y) in [(0u16, 0.0), (1, 1.0)] {
+        let base = mesh.vertices.len() as u32;
+        for (x, dy) in [(-0.25, 0.0), (0.25, 0.0), (0.25, 1.0), (-0.25, 1.0)] {
+            mesh.vertices.push(Vertex::new(Vec3::new(x, y + dy, 0.0), Vec3::Z, Vec2::ZERO));
+            mesh.skin.push(Influence { joints: [joint, 0, 0, 0], weights: [1.0, 0.0, 0.0, 0.0] });
+        }
+        mesh.indices.extend([0, 1, 2, 0, 2, 3].map(|i| base + i));
+    }
+    let quarter = Vec4::from(Quat::from_rotation_z(std::f32::consts::FRAC_PI_2));
+    let mut assets = world.resource_mut::<Assets3d>();
+    let mesh = assets.add_mesh(mesh).unwrap();
+    let material = assets.add_material(Material { base_color: Vec4::new(1.0, 0.0, 0.0, 1.0), ..Default::default() });
+    let model = assets
+        .add_model(Model {
+            parts: vec![Part { skin: Some(0), ..Part::new(mesh, material, glam::Mat4::IDENTITY) }],
+            skeleton: Skeleton {
+                nodes: vec![
+                    Node { parent: None, rest: Trs::default() },
+                    Node { parent: Some(0), rest: Trs { translation: Vec3::Y, ..Default::default() } },
+                ],
+                skins: vec![Skin { joints: vec![0, 1], inverse_bind: vec![glam::Mat4::IDENTITY, glam::Mat4::from_translation(Vec3::NEG_Y)] }],
+            },
+            animations: vec![Animation {
+                name: "bend".into(),
+                duration: 1.0,
+                channels: vec![Channel { node: 1, property: Property::Rotation, interpolation: Interpolation::Step, times: vec![0.0, 1.0], values: vec![quarter; 2] }],
+            }],
+        })
+        .unwrap();
+    // 右边再放一根不播动画的：两份关节矩阵在同一个缓冲里，各自从自己的起点读
+    world.spawn((Model3d(model), Transform3d::from_xyz(1.5, -1.0, 0.0)));
+    let mut entity = world.spawn((Model3d(model), Transform3d::from_xyz(0.0, -1.0, 0.0)));
+    if animate {
+        entity.insert(Animator::new("bend"));
+    } else {
+        // 去掉 Animator 后留下的姿势（弯着的）不该再起作用
+        let bent = glam::Mat4::from_translation(Vec3::Y) * glam::Mat4::from_rotation_z(std::f32::consts::FRAC_PI_2);
+        let mut pose = Pose::default();
+        pose.nodes = vec![glam::Mat4::IDENTITY, bent];
+        entity.insert(pose);
+    }
+    // 开着投影子的光，蒙皮的阴影管线也要跑一遍
+    world.spawn(DirectionalLight { direction: Vec3::NEG_Z, shadows: true, ..Default::default() });
+}
+
+fn bar_pixels(animate: bool) -> Option<(bool, bool, bool)> {
+    let img = render(SIZE, move |app| {
+        unlit(app);
+        app.add_systems(Startup, move |world: &mut World| bending_bar(world, animate));
+    })?;
+    let eye = Transform3d::from_xyz(0.0, 0.0, 5.0);
+    let lit = |p: Vec3| {
+        let (x, y) = pixel_in(Camera3d::default(), eye, p);
+        img.at(x, y)[0] > 100
+    };
+    // 上半截竖着时在 (0, 0.5)，倒向左边后在 (-0.5, 0)
+    // 右边那根一直竖着
+    Some((lit(Vec3::new(0.0, 0.5, 0.0)), lit(Vec3::new(-0.6, 0.0, 0.0)), lit(Vec3::new(1.5, 0.5, 0.0))))
+}
+
+#[test]
+fn skinned_models_follow_their_joints() {
+    let Some(rest) = bar_pixels(false) else {
+        return eprintln!("没有 GPU，跳过");
+    };
+    assert_eq!(rest, (true, false, true), "不播动画（只剩 Pose）：竖着");
+    assert_eq!(bar_pixels(true).unwrap(), (false, true, true), "关节 1 转了 90°：上半截倒向左边");
+}
+
+/// 不蒙皮的部件挂在节点上：动画把节点移到左边 1.5 处，方块跟着走。
+fn sliding_cube(animate: bool) -> Option<Pixels> {
+    use nge_render3d::{Animation, Channel, Interpolation, MaterialId, Model, Node, Part, Property, Skeleton, Trs};
+
+    render(SIZE, move |app| {
+        unlit(app);
+        app.add_systems(Startup, move |world: &mut World| {
+            let left = Vec4::new(-1.5, 0.0, 0.0, 0.0);
+            let mut assets = world.resource_mut::<Assets3d>();
+            let mesh = assets.add_mesh(Mesh::cube(1.0)).unwrap();
+            let model = assets
+                .add_model(Model {
+                    parts: vec![Part { node: Some(0), ..Part::new(mesh, MaterialId::DEFAULT, glam::Mat4::IDENTITY) }],
+                    skeleton: Skeleton { nodes: vec![Node { parent: None, rest: Trs::default() }], skins: vec![] },
+                    animations: vec![Animation {
+                        name: "slide".into(),
+                        duration: 1.0,
+                        channels: vec![Channel { node: 0, property: Property::Translation, interpolation: Interpolation::Step, times: vec![0.0], values: vec![left] }],
+                    }],
+                })
+                .unwrap();
+            let mut entity = world.spawn((Model3d(model), Transform3d::default()));
+            if animate {
+                entity.insert(Animator::new("slide"));
+            }
+        });
+    })
+}
+
+#[test]
+fn animated_nodes_move_their_parts() {
+    let Some(rest) = sliding_cube(false) else {
+        return eprintln!("没有 GPU，跳过");
+    };
+    let eye = Transform3d::from_xyz(0.0, 0.0, 5.0);
+    let (lx, ly) = pixel_in(Camera3d::default(), eye, Vec3::new(-1.5, 0.0, 0.5));
+    assert!(rest.center()[0] > 200 && rest.at(lx, ly)[0] < 10);
+    let moved = sliding_cube(true).unwrap();
+    assert!(moved.center()[0] < 10 && moved.at(lx, ly)[0] > 200, "{:?}", moved.at(lx, ly));
 }

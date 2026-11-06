@@ -735,4 +735,29 @@ mod tests {
         }
         assert_eq!(found, 2, "shimmer、starfield");
     }
+
+    /// 终点的旗子带蒙皮和 wave 动画：播起来布的末端前后摆。
+    #[test]
+    fn flag_waves() {
+        use nge_render3d::{Animator, Assets3d, Image, Model3d, Pose, Transform3d};
+
+        let mut app = App::new();
+        app.add_plugins(Render3dPlugin);
+        let model = app
+            .world_mut()
+            .resource_scope(|world, mut assets: Mut<Assets3d>| assets.load_gltf(&mut world.resource_mut::<Assets<Image>>(), include_bytes!("../assets/flag.glb")))
+            .unwrap();
+        let loaded = app.world().resource::<Assets3d>().model(model).unwrap();
+        assert_eq!((loaded.parts[0].skin, loaded.skeleton.skins[0].joints.len()), (Some(0), 4));
+        let flag = app.world_mut().spawn((Model3d(model), Transform3d::default(), Animator::new("wave"))).id();
+        let tip: Vec<f32> = (0..8)
+            .map(|_| {
+                app.tick(VIEWPORT, 0.125);
+                // 节点按父在前展开：骨头 0–3，最后是布
+                app.world().get::<Pose>(flag).unwrap().nodes[3].w_axis.z
+            })
+            .collect();
+        let (lo, hi) = tip.iter().fold((f32::MAX, f32::MIN), |(lo, hi), &z| (lo.min(z), hi.max(z)));
+        assert!(hi - lo > 0.1, "{tip:?}");
+    }
 }

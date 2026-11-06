@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use bevy_ecs::prelude::*;
 use glam::{Vec2, Vec4};
 use nge_core::{Gfx, wgpu};
-use nge_ecs::{App, ClearColor, Input, Plugin, PreUpdate, RenderFrame, Renderer, Screen, Time};
+use nge_ecs::{App, ClearColor, Input, Interleave, Plugin, PreUpdate, RenderFrame, Renderer, Screen, Time};
 
 use nge_assets::{Assets, GpuImages, Image};
 
@@ -22,6 +22,7 @@ const INITIAL_CAPACITY: u64 = 1024;
 
 /// 注册 [`Atlases`]、指针世界坐标换算和精灵渲染器（`ClearColor` 由 `App` 自带）。没有 `AssetPlugin` 时加一个默认的。
 /// 精灵分两层画：z < 0 的背景排在所有渲染器前面（在 3D 后面），其余的排在已注册的渲染器后面（在 3D 上面），所以要在 `Render3dPlugin` 之后添加。
+/// 开着 `Interleave` 时背景层不画，全部精灵在 3D 之后按深度和模型比（见 docs/3d-more.md）。
 pub struct Render2dPlugin;
 
 impl Plugin for Render2dPlugin {
@@ -74,7 +75,11 @@ enum Layer {
 }
 
 impl Layer {
-    fn contains(self, z: f32) -> bool {
+    /// 和 3D 混排时背景层不画，前面那层画全部（深度交给 3D 的深度缓冲比）。
+    fn contains(self, z: f32, interleave: bool) -> bool {
+        if interleave {
+            return self == Layer::Front;
+        }
         (z < 0.0) == (self == Layer::Back)
     }
 }
@@ -113,12 +118,16 @@ impl Renderer for SpriteRenderer {
         world.resource_scope(|world, mut images: Mut<GpuImages>| images.sync(gfx, world.resource::<Assets<Image>>()));
         let (images, atlases, gpu_images) = (world.resource::<Assets<Image>>(), world.resource::<Atlases>(), world.resource::<GpuImages>());
         let extra = world.resource::<SpriteInstances>();
+        let interleave = world.resource::<Interleave>().0;
+        // 3D 留下了深度（混排、前面有 3D 渲染器）时精灵按深度和模型比
+        let scene_depth = world.resource::<RenderFrame>().depth().cloned();
+        let depth = scene_depth.is_some();
         let shaders = world.resource::<Shaders>();
         gpu.pipes.sync(shaders);
 
         self.items.clear();
         let view = camera.visible(Vec2::from(gfx.viewport.size));
-        for (entity, sprite, transform, draw, parallax, repeat, shader, masking, unlit) in sprites.iter(world).filter(|(_, _, t, ..)| self.layer.contains(t.z)) {
+        for (entity, sprite, transform, draw, parallax, repeat, shader, masking, unlit) in sprites.iter(world).filter(|(_, _, t, ..)| self.layer.contains(t.z, interleave)) {
             let Transform2d { translation: pos, rotation, .. } = drawn(transform, draw, parallax, &camera);
             let region = atlases.region(images, sprite.image);
             let size = sprite.size.unwrap_or(region.size) * transform.scale;
@@ -141,7 +150,7 @@ impl Renderer for SpriteRenderer {
             for &pos in &self.copies {
                 self.items.push(Item {
                     texture: region.texture,
-                    pipe: pipe(module, mode),
+                    pipe: pipe(module, mode, depth),
                     mask: mode == Mode::Write,
                     instance: Instance {
                         pos: pos.into(),
@@ -157,7 +166,7 @@ impl Renderer for SpriteRenderer {
         }
         // 同一张图的额外实例通常是连着放的（一个发射器一批），只在图变了时重新查区域
         let mut last = None;
-        for &(image, sprite) in extra.items.iter().filter(|(_, s)| self.layer.contains(s.z)) {
+        for &(image, sprite) in extra.items.iter().filter(|(_, s)| self.layer.contains(s.z, interleave)) {
             let region = match last {
                 Some((i, region)) if i == image => region,
                 _ => atlases.region(images, image),
@@ -166,7 +175,7 @@ impl Renderer for SpriteRenderer {
             // 粒子、文字、调试线不受光
             self.items.push(Item {
                 texture: region.texture,
-                pipe: 0,
+                pipe: pipe(0, Mode::Normal, depth),
                 mask: false,
                 instance: Instance {
                     pos: sprite.position.into(),
@@ -181,7 +190,7 @@ impl Renderer for SpriteRenderer {
         }
         let masked = self.items.iter().any(|i| i.pipe % 4 >= Mode::Inside as u32);
         if masked && !self.items.iter().any(|i| i.mask) && !std::mem::replace(&mut self.warned_unmasked, true) {
-            log::warn!("z {} 0 的精灵里有只画在遮罩里 / 外的，这一层却没有遮罩（遮罩只管同一层：z < 0、z ≥ 0 各一层）", if self.layer == Layer::Back { "<" } else { "≥" });
+            log::warn!("z {} 0 的精灵里有只画在遮罩里 / 外的，这一层却没有遮罩（遮罩只管同一层：z < 0、z ≥ 0 各一层；和 3D 混排时只有一层）", if self.layer == Layer::Back { "<" } else { "≥" });
         }
         // 没有背景精灵时不开 pass，清屏留给后面的渲染器
         if self.layer == Layer::Back && self.items.is_empty() {
@@ -197,10 +206,14 @@ impl Renderer for SpriteRenderer {
 
         let view_proj = camera.view_proj(Vec2::from(gfx.viewport.size));
         let time = world.resource::<Time>().elapsed as f32;
-        let globals = Globals::new(view_proj.to_cols_array(), time, world.resource::<Lighting2d>());
+        let globals = Globals::new(view_proj.to_cols_array(), scene_depth.as_ref().map(|d| d.view_proj), time, world.resource::<Lighting2d>());
         gfx.queue.write_buffer(&gpu.globals, 0, bytemuck::bytes_of(&globals));
         gpu.write_instances(gfx, &self.instances);
-        let stencil = gpu.stencil_view(gfx, target.texture().size());
+        // 混排时用 3D 的深度（读深度、清模板），否则用自己的模板缓冲
+        let (stencil, depth_ops) = match &scene_depth {
+            Some(d) => (d.view.clone(), Some(wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Discard })),
+            None => (gpu.stencil_view(gfx, target.texture().size()), None),
+        };
 
         let clear = *world.resource::<ClearColor>();
         let load = world.resource_mut::<RenderFrame>().color_load(clear);
@@ -214,7 +227,7 @@ impl Renderer for SpriteRenderer {
             })],
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                 view: &stencil,
-                depth_ops: None,
+                depth_ops,
                 stencil_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(0), store: wgpu::StoreOp::Discard }),
             }),
             ..Default::default()

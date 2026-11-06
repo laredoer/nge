@@ -4,6 +4,7 @@ use bevy_ecs::prelude::Resource;
 use glam::{Mat4, Vec3, Vec4};
 use nge_assets::ImageId;
 
+use crate::animation::{Animation, Skeleton};
 use crate::mesh::Mesh;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -51,17 +52,30 @@ impl Default for Material {
     }
 }
 
-/// 模型里的一个部件：`local` 是相对模型原点的矩阵（已乘上节点层级）。
+/// 模型里的一个部件：`local` 是不播动画时相对模型原点的矩阵（已乘上节点层级）。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Part {
     pub mesh: MeshId,
     pub material: MaterialId,
     pub local: Mat4,
+    /// 挂在节点树（[`Model::skeleton`]）的哪个节点上：播动画时按这个节点这一帧的矩阵画。
+    pub node: Option<u32>,
+    /// 用哪套蒙皮：网格带关节权重时按关节变形，`local` 和 `node` 不再起作用（glTF 的规定）。
+    pub skin: Option<u32>,
+}
+
+impl Part {
+    pub fn new(mesh: MeshId, material: MaterialId, local: Mat4) -> Self {
+        Self { mesh, material, local, node: None, skin: None }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Model {
     pub parts: Vec<Part>,
+    /// 节点树和蒙皮；没有动画、蒙皮的模型可以留空。
+    pub skeleton: Skeleton,
+    pub animations: Vec<Animation>,
 }
 
 #[derive(Resource)]
@@ -84,6 +98,9 @@ impl Default for Assets3d {
 impl Assets3d {
     /// 空网格、索引不是三的倍数或越界时返回错误。
     pub fn add_mesh(&mut self, mesh: Mesh) -> Result<MeshId, String> {
+        if !mesh.skin.is_empty() && mesh.skin.len() != mesh.vertices.len() {
+            return Err(format!("网格有 {} 个顶点，关节权重却有 {} 份", mesh.vertices.len(), mesh.skin.len()));
+        }
         if mesh.indices.is_empty() || mesh.indices.len() % 3 != 0 {
             return Err(format!("网格有 {} 个索引，要是三的倍数且不为空", mesh.indices.len()));
         }
@@ -99,10 +116,20 @@ impl Assets3d {
         MaterialId(self.materials.len() as u32 - 1)
     }
 
-    /// 引用了不存在的网格时返回错误；不存在的材质画的时候退回默认材质。
+    /// 引用了不存在的网格、节点、蒙皮，或者节点树、动画、关节编号不对时返回错误；不存在的材质画的时候退回默认材质。
     pub fn add_model(&mut self, model: Model) -> Result<ModelId, String> {
-        if let Some(part) = model.parts.iter().find(|p| self.mesh(p.mesh).is_none()) {
-            return Err(format!("模型引用了不存在的网格 {:?}", part.mesh));
+        model.skeleton.validate(&model.animations)?;
+        for part in &model.parts {
+            let mesh = self.mesh(part.mesh).ok_or_else(|| format!("模型引用了不存在的网格 {:?}", part.mesh))?;
+            if part.node.is_some_and(|n| n as usize >= model.skeleton.nodes.len()) {
+                return Err(format!("部件挂在不存在的节点 {:?} 上", part.node));
+            }
+            if let Some(skin) = part.skin {
+                let joints = model.skeleton.skins.get(skin as usize).ok_or_else(|| format!("部件用了不存在的蒙皮 {skin}"))?.joints.len();
+                if let Some(bad) = mesh.skin.iter().flat_map(|i| i.joints).find(|&j| j as usize >= joints) {
+                    return Err(format!("网格的关节编号 {bad} 越界（蒙皮只有 {joints} 个关节）"));
+                }
+            }
         }
         self.models.push(model);
         Ok(ModelId(self.models.len() as u32 - 1))
@@ -135,7 +162,7 @@ mod tests {
     use crate::mesh::Vertex;
 
     fn triangle() -> Mesh {
-        Mesh { vertices: vec![Vertex::new(Vec3::ZERO, Vec3::Z, Vec2::ZERO); 3], indices: vec![0, 1, 2] }
+        Mesh { vertices: vec![Vertex::new(Vec3::ZERO, Vec3::Z, Vec2::ZERO); 3], indices: vec![0, 1, 2], ..Default::default() }
     }
 
     #[test]
@@ -164,9 +191,33 @@ mod tests {
         assert_eq!(assets.material(red).metallic, 1.0);
 
         let mesh = assets.add_mesh(triangle()).unwrap();
-        let part = Part { mesh, material: red, local: Mat4::IDENTITY };
-        let model = assets.add_model(Model { parts: vec![part] }).unwrap();
+        let part = Part::new(mesh, red, Mat4::IDENTITY);
+        let model = assets.add_model(Model { parts: vec![part], ..Default::default() }).unwrap();
         assert_eq!(assets.model(model).unwrap().parts, [part]);
-        assert!(assets.add_model(Model { parts: vec![Part { mesh: MeshId(42), ..part }] }).is_err());
+        assert!(assets.add_model(Model { parts: vec![Part { mesh: MeshId(42), ..part }], ..Default::default() }).is_err());
+    }
+
+    #[test]
+    fn skinned_models_are_validated() {
+        use crate::animation::{Node, Skeleton, Skin, Trs};
+        use crate::mesh::Influence;
+
+        let mut assets = Assets3d::default();
+        let influence = |j: u16| Influence { joints: [j, 0, 0, 0], weights: [1.0, 0.0, 0.0, 0.0] };
+        assert!(assets.add_mesh(Mesh { skin: vec![influence(0)], ..triangle() }).is_err(), "权重要和顶点一样多");
+        let mesh = assets.add_mesh(Mesh { skin: vec![influence(0), influence(0), influence(1)], ..triangle() }).unwrap();
+        let skeleton = Skeleton {
+            nodes: vec![Node { parent: None, rest: Trs::default() }; 2],
+            skins: vec![Skin { joints: vec![0, 1], inverse_bind: vec![Mat4::IDENTITY; 2] }],
+        };
+        let part = Part { node: Some(1), skin: Some(0), ..Part::new(mesh, MaterialId::DEFAULT, Mat4::IDENTITY) };
+        let model = |part: Part, skeleton: &Skeleton| Model { parts: vec![part], skeleton: skeleton.clone(), animations: vec![] };
+        assert!(assets.add_model(model(part, &skeleton)).is_ok());
+        assert!(assets.add_model(model(Part { node: Some(2), ..part }, &skeleton)).is_err(), "节点不存在");
+        assert!(assets.add_model(model(Part { skin: Some(1), ..part }, &skeleton)).is_err(), "蒙皮不存在");
+        let one_joint = Skeleton { skins: vec![Skin { joints: vec![0], inverse_bind: vec![Mat4::IDENTITY] }], ..skeleton.clone() };
+        assert!(assets.add_model(model(part, &one_joint)).unwrap_err().contains("关节编号"));
+        let bad_tree = Skeleton { nodes: vec![Node { parent: Some(0), rest: Trs::default() }], skins: vec![] };
+        assert!(assets.add_model(model(Part::new(mesh, MaterialId::DEFAULT, Mat4::IDENTITY), &bad_tree)).is_err(), "节点树也要校验");
     }
 }

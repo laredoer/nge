@@ -151,6 +151,20 @@ function swingAt(x: number, y: number): Built["swing"] {
 const goalAt = (x: number, y: number): SpriteNode => ({ id: "goal", x, y, w: 16, h: 80, color: "#6bcb77", body: { kind: "fixed", sensor: true, collide: true } });
 
 /**
+ * 终点旗杆顶上挥动的 3D 旗子：带骨骼动画的 glTF（布宽 1、高 0.6，从原点往右下挂），放大 40 倍挂在旗杆右上角。
+ * 布摆起来前后各约 20，放在 z = 30 整块都在角色（z = 5）前面：和 `camera3d.interleave` 一起，角色跳过终点时从布后面经过。
+ */
+export const flagOn = (goal: SpriteNode): ModelNode => ({
+  id: "flag",
+  model: "asset:/@platformer/flag.glb",
+  x: (goal.x ?? 0) + (goal.w ?? 0) / 2,
+  y: (goal.y ?? 0) + (goal.h ?? 0) / 2 - 2,
+  z: 30,
+  scale: 40,
+  animation: { clip: "wave" },
+});
+
+/**
  * 用 Tiled 画的关卡（见 docs/tiled.md）。图块集 `tiles` 和 tiles.png 一样；对象层里的对象按类型生成：
  * `coin`、`enemy`（属性 `patrol`：往右巡逻几格）、`lift`（属性 `dx` / `dy`：往哪走，像素，Tiled 里 y 朝下；`duration`）、`crate`、`swing`（铁链的支点）、`goal`。
  */

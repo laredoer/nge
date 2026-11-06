@@ -1,17 +1,19 @@
-//! glTF 2.0 加载：`.glb` 或 `.gltf`，展开默认场景的节点树成一个 [`Model`]。
+//! glTF 2.0 加载：`.glb` 或 `.gltf`，展开默认场景的节点树成一个 [`Model`]，带上蒙皮和动画。
 //!
 //! 走资源层（[`Gltf`]）时外部的 `.bin` 和贴图按相对路径读；[`Assets3d::load_gltf`] 直接给字节时只认内嵌的数据。
 
 use std::collections::HashMap;
 
 use glam::{Mat4, UVec2, Vec2, Vec3, Vec4};
+use gltf::animation::util::ReadOutputs;
 use gltf::image::Format;
 use gltf::material::AlphaMode;
 use gltf::mesh::Mode;
 use nge_assets::{Asset, Assets, Handle, Image, ImageId, LoadContext};
 
+use crate::animation::{Animation, Channel, Interpolation, Node, Property, Skeleton, Skin, Trs};
 use crate::assets::{Assets3d, Material, MaterialId, MeshId, Model, ModelId, Part};
-use crate::mesh::{Mesh, Vertex};
+use crate::mesh::{Influence, Mesh, Vertex};
 
 /// 节点树的最大深度，防止病态文件把栈撑爆。
 const MAX_DEPTH: usize = 256;
@@ -136,12 +138,24 @@ impl Assets3d {
             first_image,
             new_images: Vec::new(),
             parts: Vec::new(),
+            nodes: Vec::new(),
+            node_index: vec![None; doc.nodes().len()],
+            skins: Vec::new(),
         };
         for node in scene.nodes() {
-            loader.node(&node, Mat4::IDENTITY, 0)?;
+            loader.node(&node, Mat4::IDENTITY, None, 0)?;
         }
-        let (parts, new_images) = (loader.parts, loader.new_images);
-        Ok((self.add_model(Model { parts })?, new_images))
+        let skins = loader.skins(doc);
+        let animations = doc.animations().map(|a| loader.animation(&a)).collect();
+        let (mut parts, new_images) = (loader.parts, loader.new_images);
+        for part in &mut parts {
+            // 用到的蒙皮读不出来时按不蒙皮画
+            part.skin = part.skin.and_then(|gltf_skin| loader.skins.iter().position(|&s| s == gltf_skin as usize)).filter(|&i| skins[i].is_some()).map(|i| i as u32);
+        }
+        // 读不出来的蒙皮留个空位，下标才对得上
+        let skins = skins.into_iter().map(|s| s.unwrap_or(Skin { joints: Vec::new(), inverse_bind: Vec::new() })).collect();
+        let model = Model { parts, skeleton: Skeleton { nodes: loader.nodes, skins }, animations };
+        Ok((self.add_model(model)?, new_images))
     }
 }
 
@@ -160,11 +174,18 @@ struct Loader<'a> {
     first_image: usize,
     /// 解出来的贴图，整份加载成功后才放进贴图仓库。
     new_images: Vec<Image>,
+    /// 部件的 `skin` 先记 glTF 的蒙皮编号，最后换成 `skins` 里的下标。
     parts: Vec<Part>,
+    /// 按父在前的顺序展开的节点。
+    nodes: Vec<Node>,
+    /// glTF 节点编号 → `nodes` 里的下标（不在默认场景里的是 None）。
+    node_index: Vec<Option<u32>>,
+    /// 用到的 glTF 蒙皮编号，按第一次用到的顺序。
+    skins: Vec<usize>,
 }
 
 impl Loader<'_> {
-    fn node(&mut self, node: &gltf::Node, parent: Mat4, depth: usize) -> Result<(), String> {
+    fn node(&mut self, node: &gltf::Node, parent: Mat4, parent_index: Option<u32>, depth: usize) -> Result<(), String> {
         if depth >= MAX_DEPTH {
             return Err(format!("glTF 节点层级超过 {MAX_DEPTH} 层"));
         }
@@ -172,6 +193,15 @@ impl Loader<'_> {
             return Err(format!("glTF 节点 {} 出现了不止一次（成环或被多个父节点共用）", node.index()));
         }
         let world = parent * Mat4::from_cols_array_2d(&node.transform().matrix());
+        let (translation, rotation, scale) = node.transform().decomposed();
+        let index = self.nodes.len() as u32;
+        let rest = Trs { translation: translation.into(), rotation: crate::animation::rotation(Vec4::from(rotation)), scale: scale.into() };
+        self.nodes.push(Node { parent: parent_index, rest });
+        self.node_index[node.index()] = Some(index);
+        let skin = node.skin().map(|s| s.index());
+        if let Some(s) = skin.filter(|s| !self.skins.contains(s)) {
+            self.skins.push(s);
+        }
         if let Some(mesh) = node.mesh() {
             for prim in mesh.primitives() {
                 if prim.mode() != Mode::Triangles {
@@ -193,11 +223,12 @@ impl Loader<'_> {
                         self.assets.add_material(Material { metallic: 1.0, roughness: 1.0, ..Default::default() })
                     }),
                 };
-                self.parts.push(Part { mesh: mesh_id, material, local: world });
+                let skinned = skin.filter(|_| self.assets.mesh(mesh_id).is_some_and(|m| !m.skin.is_empty()));
+                self.parts.push(Part { node: Some(index), skin: skinned.map(|s| s as u32), ..Part::new(mesh_id, material, world) });
             }
         }
         for child in node.children() {
-            self.node(&child, world, depth + 1)?;
+            self.node(&child, world, Some(index), depth + 1)?;
         }
         Ok(())
     }
@@ -219,11 +250,90 @@ impl Loader<'_> {
                 Vertex::new(p, n, uvs.get(i).copied().unwrap_or(Vec2::ZERO))
             })
             .collect();
-        let mut mesh = Mesh { vertices, indices };
+        let skin = match (reader.read_joints(0), reader.read_weights(0)) {
+            (Some(joints), Some(weights)) => joints
+                .into_u16()
+                .zip(weights.into_f32())
+                .map(|(joints, weights)| {
+                    // 权重加起来应是 1，导出工具常有误差
+                    let sum: f32 = weights.iter().sum();
+                    let weights = if sum > 0.0 { weights.map(|w| w / sum) } else { weights };
+                    Influence { joints, weights }
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        if !skin.is_empty() && skin.len() != positions.len() {
+            return Err(format!("图元有 {} 个顶点、{} 份关节权重", positions.len(), skin.len()));
+        }
+        let mut mesh = Mesh { vertices, indices, skin };
         if normals.is_none() {
             mesh.compute_normals();
         }
         Ok(mesh)
+    }
+
+    /// 用到的蒙皮，按 `self.skins` 的顺序；关节不在默认场景里、逆绑定矩阵数不对的读不出来（None，warn）。
+    fn skins(&self, doc: &gltf::Document) -> Vec<Option<Skin>> {
+        let skins: Vec<gltf::Skin> = doc.skins().collect();
+        self.skins
+            .iter()
+            .map(|&i| {
+                let skin = &skins[i];
+                let joints: Option<Vec<u32>> = skin.joints().map(|j| self.node_index[j.index()]).collect();
+                let Some(joints) = joints else {
+                    log::warn!("glTF 蒙皮 {i} 的关节不在默认场景里，按不蒙皮画");
+                    return None;
+                };
+                let reader = skin.reader(|b| self.buffers.get(b.index()).map(|d| &d.0[..]));
+                let inverse_bind: Vec<Mat4> = match reader.read_inverse_bind_matrices() {
+                    Some(m) => m.map(|m| Mat4::from_cols_array_2d(&m)).collect(),
+                    None => vec![Mat4::IDENTITY; joints.len()],
+                };
+                if inverse_bind.len() != joints.len() {
+                    log::warn!("glTF 蒙皮 {i} 有 {} 个关节、{} 个逆绑定矩阵，按不蒙皮画", joints.len(), inverse_bind.len());
+                    return None;
+                }
+                Some(Skin { joints, inverse_bind })
+            })
+            .collect()
+    }
+
+    /// 没名字的动画按编号叫（"0"、"1"…）。目标不在默认场景里的通道和变形权重通道跳过。
+    fn animation(&self, animation: &gltf::Animation) -> Animation {
+        let name = animation.name().map_or_else(|| animation.index().to_string(), str::to_owned);
+        let mut channels = Vec::new();
+        for (i, channel) in animation.channels().enumerate() {
+            let target = channel.target();
+            let Some(node) = self.node_index[target.node().index()] else { continue };
+            let reader = channel.reader(|b| self.buffers.get(b.index()).map(|d| &d.0[..]));
+            let (Some(times), Some(outputs)) = (reader.read_inputs(), reader.read_outputs()) else {
+                log::warn!("glTF 动画 {name:?} 的通道 {i} 读不出数据，跳过");
+                continue;
+            };
+            let (property, values): (Property, Vec<Vec4>) = match outputs {
+                ReadOutputs::Translations(v) => (Property::Translation, v.map(|v| Vec3::from(v).extend(0.0)).collect()),
+                ReadOutputs::Rotations(v) => (Property::Rotation, v.into_f32().map(Vec4::from).collect()),
+                ReadOutputs::Scales(v) => (Property::Scale, v.map(|v| Vec3::from(v).extend(0.0)).collect()),
+                ReadOutputs::MorphTargetWeights(_) => {
+                    log::warn!("glTF 动画 {name:?} 的变形权重通道不支持，跳过");
+                    continue;
+                }
+            };
+            let interpolation = match channel.sampler().interpolation() {
+                gltf::animation::Interpolation::Step => Interpolation::Step,
+                gltf::animation::Interpolation::Linear => Interpolation::Linear,
+                gltf::animation::Interpolation::CubicSpline => Interpolation::CubicSpline,
+            };
+            let channel = Channel { node, property, interpolation, times: times.collect(), values };
+            // 坏通道只丢这一条，不让整个模型加载失败
+            match channel.problem(self.nodes.len()) {
+                Some(bad) => log::warn!("glTF 动画 {name:?} 的通道 {i}：{bad}，跳过"),
+                None => channels.push(channel),
+            }
+        }
+        let duration = channels.iter().filter_map(|c| c.times.last().copied()).fold(0.0, f32::max);
+        Animation { name, duration, channels }
     }
 
     fn material(&mut self, m: &gltf::Material, index: usize) -> MaterialId {
@@ -502,6 +612,94 @@ mod tests {
         let model = assets.add_gltf(&mut images, &gltf).unwrap();
         let texture = assets.material(assets.model(model).unwrap().parts[0].material).base_color_texture.unwrap();
         assert_eq!(images.get(texture).unwrap().rgba, [9, 8, 7, 255, 1, 2, 3, 255]);
+    }
+
+    /// 两节骨头的三角形：glTF 节点 1 是根（子节点 2、0），2 是挂在上方 1 处的关节，0 是网格。
+    /// 动画 wave：关节绕 z 线性转 90°，根按 STEP 平移。
+    fn skinned_gltf() -> String {
+        let mut bin: Vec<u8> = Vec::new();
+        let f = |bin: &mut Vec<u8>, v: &[f32]| bin.extend(v.iter().flat_map(|x| x.to_le_bytes()));
+        f(&mut bin, &[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 2.0, 0.0]);
+        bin.extend([0u16, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0].iter().flat_map(|x| x.to_le_bytes()));
+        f(&mut bin, &[1.0, 0.0, 0.0, 0.0, 2.0, 2.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]);
+        f(&mut bin, &Mat4::IDENTITY.to_cols_array());
+        f(&mut bin, &Mat4::from_translation(Vec3::NEG_Y).to_cols_array());
+        f(&mut bin, &[0.0, 1.0]);
+        f(&mut bin, &Quat::IDENTITY.to_array());
+        f(&mut bin, &Quat::from_rotation_z(FRAC_PI_2).to_array());
+        f(&mut bin, &[0.0, 0.0, 0.0, 5.0, 0.0, 0.0]);
+        assert_eq!(bin.len(), 300);
+        let views = [(0, 36), (36, 24), (60, 48), (108, 128), (236, 8), (244, 32), (276, 24)]
+            .map(|(o, l)| format!(r#"{{"buffer":0,"byteOffset":{o},"byteLength":{l}}}"#))
+            .join(",");
+        format!(
+            r#"{{"asset":{{"version":"2.0"}},"scene":0,"scenes":[{{"nodes":[1]}}],
+            "nodes":[{{"mesh":0,"skin":0}},{{"children":[2,0]}},{{"translation":[0,1,0]}}],
+            "meshes":[{{"primitives":[{{"attributes":{{"POSITION":0,"JOINTS_0":1,"WEIGHTS_0":2}}}}]}}],
+            "skins":[{{"joints":[1,2],"inverseBindMatrices":3}}],
+            "animations":[{{"name":"wave","channels":[{{"sampler":0,"target":{{"node":2,"path":"rotation"}}}},{{"sampler":1,"target":{{"node":1,"path":"translation"}}}}],
+              "samplers":[{{"input":4,"output":5}},{{"input":4,"output":6,"interpolation":"STEP"}}]}},{{"channels":[],"samplers":[]}}],
+            "buffers":[{{"byteLength":300,"uri":"data:application/octet-stream;base64,{}"}}],
+            "bufferViews":[{views}],
+            "accessors":[{{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[0,0,0],"max":[1,2,0]}},
+              {{"bufferView":1,"componentType":5123,"count":3,"type":"VEC4"}},
+              {{"bufferView":2,"componentType":5126,"count":3,"type":"VEC4"}},
+              {{"bufferView":3,"componentType":5126,"count":2,"type":"MAT4"}},
+              {{"bufferView":4,"componentType":5126,"count":2,"type":"SCALAR","min":[0],"max":[1]}},
+              {{"bufferView":5,"componentType":5126,"count":2,"type":"VEC4"}},
+              {{"bufferView":6,"componentType":5126,"count":2,"type":"VEC3"}}]}}"#,
+            base64(&bin)
+        )
+    }
+
+    #[test]
+    fn reads_skins_and_animations() {
+        use crate::animation::{Interpolation, Property};
+
+        let (mut assets, mut images) = (Assets3d::default(), Assets::<Image>::with_white());
+        let model = assets.load_gltf(&mut images, skinned_gltf().as_bytes()).unwrap();
+        let model = assets.model(model).unwrap().clone();
+        let parents: Vec<_> = model.skeleton.nodes.iter().map(|n| n.parent).collect();
+        assert_eq!(parents, [None, Some(0), Some(0)], "按父在前展开：根、关节、网格");
+        assert_eq!(model.skeleton.nodes[1].rest.translation, Vec3::Y);
+        let skin = &model.skeleton.skins[0];
+        assert_eq!(skin.joints, [0, 1], "关节换成展开后的下标");
+        assert_eq!(skin.inverse_bind[1], Mat4::from_translation(Vec3::NEG_Y));
+        assert_eq!((model.parts[0].node, model.parts[0].skin), (Some(2), Some(0)));
+        let mesh = assets.mesh(model.parts[0].mesh).unwrap();
+        assert_eq!(mesh.skin[1].joints, [0, 1, 0, 0]);
+        assert_eq!(mesh.skin[1].weights, [0.5, 0.5, 0.0, 0.0], "权重归一化");
+
+        let [wave, unnamed] = &model.animations[..] else { panic!("{:?}", model.animations) };
+        assert_eq!((wave.name.as_str(), wave.duration, unnamed.name.as_str()), ("wave", 1.0, "1"));
+        let rotate = &wave.channels[0];
+        assert_eq!((rotate.node, rotate.property, rotate.interpolation), (1, Property::Rotation, Interpolation::Linear));
+        assert_eq!(rotate.values[1], Vec4::from(Quat::from_rotation_z(FRAC_PI_2)));
+        let shift = &wave.channels[1];
+        assert_eq!((shift.node, shift.property, shift.interpolation), (0, Property::Translation, Interpolation::Step));
+        assert_eq!(shift.values[1], Vec4::new(5.0, 0.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn bad_channels_are_dropped_not_the_model() {
+        // 平移通道改成三次样条：每帧要三个值，只有一个
+        let json = skinned_gltf().replace(r#""interpolation":"STEP""#, r#""interpolation":"CUBICSPLINE""#);
+        let (mut assets, mut images) = (Assets3d::default(), Assets::<Image>::with_white());
+        let model = assets.load_gltf(&mut images, json.as_bytes()).unwrap();
+        let channels = &assets.model(model).unwrap().animations[0].channels;
+        assert_eq!(channels.len(), 1, "只丢坏的那条");
+        assert_eq!(channels[0].property, crate::animation::Property::Rotation);
+    }
+
+    #[test]
+    fn skins_with_joints_outside_the_scene_are_dropped() {
+        // 关节 2 不在场景里（场景只有节点 0）
+        let json = skinned_gltf().replace(r#""scenes":[{"nodes":[1]}]"#, r#""scenes":[{"nodes":[0]}]"#);
+        let (mut assets, mut images) = (Assets3d::default(), Assets::<Image>::with_white());
+        let model = assets.load_gltf(&mut images, json.as_bytes()).unwrap();
+        let model = assets.model(model).unwrap();
+        assert_eq!(model.parts[0].skin, None, "按不蒙皮画");
+        assert!(model.animations[0].channels.is_empty(), "目标不在场景里的通道跳过");
     }
 
     #[test]

@@ -142,6 +142,21 @@ pub struct ModelNode {
     pub tap: bool,
     /// 跟着这个精灵走（见 docs/joints.md）：x、y、z 成了精灵坐标里的偏移，`rotation` 在精灵的角度上再转。
     pub attach: Option<String>,
+    /// 播模型里的哪段动画（见 docs/3d-more.md）。
+    pub animation: Option<ModelAnimation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct ModelAnimation {
+    pub clip: String,
+    #[serde(default = "one")]
+    pub speed: f32,
+    #[serde(default = "yes", rename = "loop")]
+    pub looping: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 fn one() -> f32 {
@@ -162,11 +177,13 @@ pub struct Camera3dNode {
     pub ortho: Option<f32>,
     /// 每帧跟着 2D 相机走（正交，3D 的一个单位是 2D 的一个 point），`x`、`y`、`target`、`fov`、`ortho` 都不看。
     pub match2d: bool,
+    /// 模型和精灵按深度混排（见 docs/3d-more.md）。
+    pub interleave: bool,
 }
 
 impl Default for Camera3dNode {
     fn default() -> Self {
-        Self { x: 0.0, y: 2.0, z: None, target: [0.0; 3], fov: 60.0, ortho: None, match2d: false }
+        Self { x: 0.0, y: 2.0, z: None, target: [0.0; 3], fov: 60.0, ortho: None, match2d: false, interleave: false }
     }
 }
 
@@ -195,6 +212,9 @@ pub struct LightNode {
     /// 方向光的照度 / 点光源的强度；不填用引擎默认值。
     pub intensity: Option<f32>,
     pub range: Option<f32>,
+    /// 方向光投影子（见 docs/3d-more.md）。
+    #[serde(default)]
+    pub shadows: bool,
 }
 
 fn down() -> [f32; 3] {

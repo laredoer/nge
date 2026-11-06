@@ -14,11 +14,13 @@ pub struct DirectionalLight {
     /// 线性 RGB。
     pub color: Vec3,
     pub illuminance: f32,
+    /// 投影子（见 [`Shadows`](crate::Shadows)）。只有第一盏开着的生效。
+    pub shadows: bool,
 }
 
 impl Default for DirectionalLight {
     fn default() -> Self {
-        Self { direction: Vec3::new(-1.0, -2.0, -1.0), color: Vec3::ONE, illuminance: 3.0 }
+        Self { direction: Vec3::new(-1.0, -2.0, -1.0), color: Vec3::ONE, illuminance: 3.0, shadows: false }
     }
 }
 
@@ -73,10 +75,14 @@ pub(crate) struct Globals {
     /// 视点：w = 1 是相机位置，w = 0 是正交相机朝向相机的方向（[`Camera3d::eye`](crate::Camera3d::eye)）。
     pub eye: [f32; 4],
     pub ambient: [f32; 4],
-    /// 方向光数量、点光源数量。
+    /// 方向光数量、点光源数量、投影子的方向光（第几盏 + 1，0 是没有）。
     pub counts: [u32; 4],
     pub dirs: [DirRaw; MAX_DIRECTIONAL_LIGHTS],
     pub points: [PointRaw; MAX_POINT_LIGHTS],
+    /// 投影子的光：世界 → 阴影图的裁剪空间。
+    pub light_view_proj: [[f32; 4]; 4],
+    /// 法线方向往外推多少（世界单位）、阴影图一个像素在 uv 里多大。
+    pub shadow: [f32; 4],
 }
 
 impl Globals {
@@ -101,6 +107,9 @@ impl Globals {
                 break;
             }
             g.dirs[n] = DirRaw { to_light: to_light.extend(0.0).into(), color: (light.color * light.illuminance).extend(0.0).into() };
+            if light.shadows && g.counts[2] == 0 {
+                g.counts[2] = n as u32 + 1;
+            }
             n += 1;
         }
         g.counts[0] = n as u32;
@@ -127,7 +136,7 @@ mod tests {
 
     #[test]
     fn packs_lights_with_premultiplied_color() {
-        let dir = DirectionalLight { direction: Vec3::new(0.0, -2.0, 0.0), color: Vec3::new(1.0, 0.5, 0.0), illuminance: 2.0 };
+        let dir = DirectionalLight { direction: Vec3::new(0.0, -2.0, 0.0), color: Vec3::new(1.0, 0.5, 0.0), illuminance: 2.0, shadows: false };
         let point = PointLight { color: Vec3::ONE, intensity: 3.0, range: 7.0 };
         let ambient = AmbientLight { color: Vec3::new(0.5, 0.5, 1.0), brightness: 0.2 };
         let (g, dropped) = Globals::new(Mat4::IDENTITY, Vec4::new(1.0, 2.0, 3.0, 1.0), ambient, [&dir], [(&point, Vec3::X)]);
@@ -159,6 +168,17 @@ mod tests {
 
     #[test]
     fn layout_matches_shader() {
-        assert_eq!(size_of::<Globals>(), 64 + 16 * 3 + 32 * MAX_DIRECTIONAL_LIGHTS + 32 * MAX_POINT_LIGHTS);
+        assert_eq!(size_of::<Globals>(), 64 + 16 * 3 + 32 * MAX_DIRECTIONAL_LIGHTS + 32 * MAX_POINT_LIGHTS + 64 + 16);
+    }
+
+    #[test]
+    fn first_shadowed_light_casts_and_zero_ones_do_not_count() {
+        let plain = DirectionalLight::default();
+        let zero = DirectionalLight { direction: Vec3::ZERO, shadows: true, ..Default::default() };
+        let shadowed = DirectionalLight { shadows: true, ..Default::default() };
+        let (g, _) = Globals::new(Mat4::IDENTITY, Vec4::W, AmbientLight::default(), [&plain, &zero, &shadowed, &shadowed], []);
+        assert_eq!(g.counts[..3], [3, 0, 2], "第二盏（排掉方向是 0 的以后）投影子");
+        let (g, _) = Globals::new(Mat4::IDENTITY, Vec4::W, AmbientLight::default(), [&plain], []);
+        assert_eq!(g.counts[2], 0);
     }
 }

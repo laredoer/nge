@@ -1,7 +1,7 @@
 import { batch, mount, type NativeComponentRef, platform, signal, Text, View } from "nsh";
 import { floatText, gameView, KeyButton, saved, sound, tween, type Scene, type SpriteNode } from "../../ts/nge";
 import { COIN_SHADER, FLASH, FLASH_MS, night, portalOver, SHADERS } from "./effects";
-import { finish, LEVELS, NEW_PROGRESS, progressOf, ROWS, TILE, type Progress } from "./levels";
+import { finish, flagOn, LEVELS, NEW_PROGRESS, progressOf, ROWS, TILE, type Progress } from "./levels";
 
 /** Rust 发的事件：掉出关卡或被敌人撞到送回起点、按 R 重新开始、踩到敌人。 */
 interface Events {
@@ -21,12 +21,13 @@ const NEXT_DELAY = 1500;
 /** 视差背景：远山（一张能无缝接上的山丘贴图，横向重复铺满）跟着相机挪 0.2、树挪 0.5，竖直方向跟着关卡（立在地上）。z < 0，画在 3D 箱子后面。树按相机在 x = 0 时摆，所以铺得宽。 */
 const BACKDROP: SpriteNode[] = [
   // 底边对齐地面的底边
-  { id: "hills", texture: "asset:/@platformer/hills.png", x: 0, y: 120 - TILE, w: 384, h: 240, z: -10, color: "#232c42", parallax: [0.2, 1], repeat: "x" },
+  // 模型和精灵按深度混排（camera3d.interleave），背景的 z 要比箱子（前后各 20 多）更靠后，才不会盖住箱子
+  { id: "hills", texture: "asset:/@platformer/hills.png", x: 0, y: 120 - TILE, w: 384, h: 240, z: -100, color: "#232c42", parallax: [0.2, 1], repeat: "x" },
   ...Array.from({ length: 24 }, (_, i): SpriteNode[] => {
     const x = -600 + i * 110 + (i % 4) * 17;
     return [
-      { id: `trunk-${i}`, x, y: 40, w: 10, h: 80, z: -6, color: "#2a3550", parallax: [0.5, 1] },
-      { id: `crown-${i}`, x, y: 90 + (i % 2) * 14, w: 44, rotation: 45, z: -5, color: "#2f3d5c", parallax: [0.5, 1] },
+      { id: `trunk-${i}`, x, y: 40, w: 10, h: 80, z: -60, color: "#2a3550", parallax: [0.5, 1] },
+      { id: `crown-${i}`, x, y: 90 + (i % 2) * 14, w: 44, rotation: 45, z: -50, color: "#2f3d5c", parallax: [0.5, 1] },
     ];
   }).flat(),
 ];
@@ -87,10 +88,11 @@ function App() {
     audio: { preload: [COIN_SOUND, WIN_SOUND] },
     physics: { gravity: [0, -1800] },
     camera: { follow: "player", y: 60, smooth: 0.15, bounds: { left: 0, right: now().right, bottom: -160, top: (ROWS - 1) * TILE } },
-    camera3d: { match2d: true },
-    lights: [{ id: "sun", kind: "directional", direction: [-1, -2, -1.5] }],
+    camera3d: { match2d: true, interleave: true },
+    // 箱子顶上的小箱子在大箱子顶面投下影子
+    lights: [{ id: "sun", kind: "directional", direction: [-1, -2, -1.5], shadows: true }],
     ambient: { brightness: 0.35 },
-    models: [now().crate.model],
+    models: [now().crate.model, flagOn(now().goal)],
     joints: now().swing.joints,
     tilemaps: now().tilemaps,
     sprites: [

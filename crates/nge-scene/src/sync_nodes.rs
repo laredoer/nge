@@ -4,7 +4,8 @@ use bevy_ecs::prelude::*;
 use glam::{EulerRot, Quat, Vec2, Vec3, Vec4};
 use nge_particles::ParticleEmitter;
 use nge_render2d::Transform2d;
-use nge_render3d::{AmbientLight, Camera3d, DirectionalLight, GltfModel, Model3d, PointLight, Transform3d};
+use nge_ecs::Interleave;
+use nge_render3d::{AmbientLight, Animator, Camera3d, DirectionalLight, GltfModel, Model3d, PointLight, Pose, Transform3d};
 use nge_text::{ScreenText, Text2d};
 
 use crate::attach::Attach;
@@ -81,7 +82,13 @@ pub(crate) fn sync_emitters(mut commands: Commands, scene: Res<Scene>, mut asset
     });
 }
 
-pub(crate) fn sync_models(mut commands: Commands, scene: Res<Scene>, mut assets: SceneAssets, nodes: Query<(Entity, &Declared<ModelNode>)>) {
+pub(crate) fn sync_models(
+    mut commands: Commands,
+    scene: Res<Scene>,
+    mut assets: SceneAssets,
+    nodes: Query<(Entity, &Declared<ModelNode>)>,
+    mut animators: Query<&mut Animator>,
+) {
     sync_list(&mut commands, &scene.models, &nodes, |commands, entity, before, node| {
         let [rx, ry, rz] = node.rotation.map(f32::to_radians);
         let transform = Transform3d {
@@ -92,8 +99,26 @@ pub(crate) fn sync_models(mut commands: Commands, scene: Res<Scene>, mut assets:
         let mut entity = commands.entity(entity);
         entity.remove::<(Spin, Tappable, Attach)>().insert(transform);
         // 模型没换时保留已经展开的 Model3d，不闪
-        if before.is_none_or(|b| b.model != node.model) {
+        let same_model = before.is_some_and(|b| b.model == node.model);
+        if !same_model {
             entity.remove::<Model3d>().insert(GltfModel(assets.model(&node.model)));
+        }
+        match &node.animation {
+            None => {
+                entity.remove::<(Animator, Pose)>();
+            }
+            Some(a) => {
+                // 同一个模型、同一段动画：只改速度和循环，接着播
+                match animators.get_mut(entity.id()).ok().filter(|old| same_model && old.clip == a.clip) {
+                    Some(mut old) => {
+                        old.speed = a.speed;
+                        old.looping = a.looping;
+                    }
+                    None => {
+                        entity.insert(Animator { speed: a.speed, looping: a.looping, ..Animator::new(a.clip.clone()) });
+                    }
+                }
+            }
         }
         if let Some(sprite) = &node.attach {
             entity.insert(Attach { sprite: sprite.clone(), offset: transform.translation, rotation: transform.rotation });
@@ -120,6 +145,7 @@ pub(crate) fn sync_lights(mut commands: Commands, scene: Res<Scene>, nodes: Quer
                     direction: Vec3::from(node.direction),
                     color: rgb(node.color).unwrap_or(d.color),
                     illuminance: node.intensity.unwrap_or(d.illuminance),
+                    shadows: node.shadows,
                 });
             }
             LightKind::Point => {
@@ -139,11 +165,13 @@ pub(crate) fn sync_camera3d(
     mut commands: Commands,
     mut camera: Query<(Entity, &mut Camera3d, &mut Transform3d, Has<Match2d>), With<SceneCamera>>,
     mut ambient: ResMut<AmbientLight>,
+    mut interleave: ResMut<Interleave>,
     mut last_camera: Local<Option<Option<Camera3dNode>>>,
     mut last_ambient: Local<Option<Option<AmbientNode>>>,
 ) {
     if last_camera.as_ref() != Some(&scene.camera3d) {
         let cam = scene.camera3d.clone().unwrap_or_default();
+        interleave.0 = cam.interleave;
         let (eye, target) = (Vec3::new(cam.x, cam.y, cam.z.unwrap_or(6.0)), Vec3::from(cam.target));
         // 正上方 / 正下方看时 y 不能当 up，改用 -z（画面上方朝 -z）
         let up = if (target - eye).normalize_or_zero().cross(Vec3::Y).length_squared() < 1e-8 { Vec3::NEG_Z } else { Vec3::Y };
@@ -269,6 +297,30 @@ mod tests {
     }
 
     #[test]
+    fn model_animation_keeps_playing_when_only_speed_changes() {
+        let mut app = app();
+        let declare = |app: &mut nge_ecs::App, model: &str, animation: serde_json::Value| {
+            frame(app, Some(json!({ "models": [{ "id": "flag", "model": model, "animation": animation }] })));
+        };
+        declare(&mut app, "asset:/@t/a.glb", json!({ "clip": "wave" }));
+        let world = app.world_mut();
+        let entity = world.query_filtered::<Entity, With<Declared<ModelNode>>>().single(world).unwrap();
+        let animator = |app: &nge_ecs::App| app.world().get::<Animator>(entity).cloned();
+        assert_eq!(animator(&app), Some(Animator::new("wave")), "默认原速、循环");
+        app.world_mut().get_mut::<Animator>(entity).unwrap().time = 0.5;
+
+        declare(&mut app, "asset:/@t/a.glb", json!({ "clip": "wave", "speed": 2, "loop": false }));
+        assert_eq!(animator(&app), Some(Animator { speed: 2.0, looping: false, time: 0.5, ..Animator::new("wave") }), "只改速度和循环：接着播");
+        declare(&mut app, "asset:/@t/a.glb", json!({ "clip": "idle" }));
+        assert_eq!(animator(&app).map(|a| (a.clip, a.time)), Some(("idle".into(), 0.0)), "换了动画从头播");
+        app.world_mut().get_mut::<Animator>(entity).unwrap().time = 0.5;
+        declare(&mut app, "asset:/@t/b.glb", json!({ "clip": "idle" }));
+        assert_eq!(animator(&app).map(|a| a.time), Some(0.0), "换了模型从头播");
+        frame(&mut app, Some(json!({ "models": [{ "id": "flag", "model": "asset:/@t/b.glb" }] })));
+        assert!(animator(&app).is_none() && app.world().get::<Pose>(entity).is_none(), "不播了去掉");
+    }
+
+    #[test]
     fn lights_camera3d_and_ambient() {
         let mut app = app();
         frame(&mut app, Some(json!({
@@ -287,12 +339,19 @@ mod tests {
         assert!((t.rotation * Vec3::NEG_Z - Vec3::NEG_Z).length() < 1e-5, "看向原点");
         assert_eq!(world.resource::<AmbientLight>().brightness, 0.5);
 
+        assert!(!sun.shadows && !world.resource::<nge_ecs::Interleave>().0, "默认都关");
+        frame(&mut app, Some(json!({ "lights": [{ "id": "sun", "kind": "directional", "shadows": true }], "camera3d": { "interleave": true } })));
+        let world = app.world_mut();
+        assert!(world.query::<&DirectionalLight>().single(world).unwrap().shadows);
+        assert!(world.resource::<nge_ecs::Interleave>().0);
+
         frame(&mut app, Some(json!({ "lights": [{ "id": "sun", "kind": "point" }] })));
         let world = app.world_mut();
         assert_eq!(world.query::<&DirectionalLight>().iter(world).count(), 0, "换类型时去掉旧的灯");
         assert_eq!(world.query::<&PointLight>().iter(world).count(), 1);
         let t = *world.query_filtered::<&Transform3d, With<Camera3d>>().single(world).unwrap();
         assert_eq!(t.translation, Vec3::new(0.0, 2.0, 6.0), "不声明时回到默认相机");
+        assert!(!world.resource::<nge_ecs::Interleave>().0, "不声明时关掉混排");
     }
 
     #[test]

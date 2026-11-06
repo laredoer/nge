@@ -181,6 +181,17 @@ export interface ModelNode {
    * `rotation` 在精灵的角度上再转，`spin` 不起作用。精灵不存在时模型留在原地。
    */
   attach?: string;
+  /** 播模型里的一段骨骼 / 节点动画（glTF 的 animations），见 docs/3d-more.md。只改 speed、loop 时不从头播。 */
+  animation?: ModelAnimation;
+}
+
+export interface ModelAnimation {
+  /** 动画名；glTF 里没名字的按编号叫（"0"、"1"…）。找不到时停在不播动画的姿势。 */
+  clip: string;
+  /** 播放速度，默认 1；负数倒着播。 */
+  speed?: number;
+  /** 循环，默认 true；false 时停在最后一帧。 */
+  loop?: boolean;
 }
 
 /**
@@ -229,6 +240,8 @@ export interface Camera3dNode {
   ortho?: number;
   /** 每帧跟着 2D 相机走（跟随、震屏都跟上）：正交，3D 的一个单位是 2D 的一个 point，模型放在 (x, y, 0) 就在 2D 世界的 (x, y)。开着时 `x`、`y`、`target`、`fov`、`ortho` 都不看。 */
   match2d?: boolean;
+  /** 模型和精灵按深度混排：模型后面的精灵被挡住、前面的露出来（精灵的 z 当作 3D 的 z），见 docs/3d-more.md。默认关：z < 0 的精灵画在模型下面，其余画在上面。 */
+  interleave?: boolean;
 }
 
 export interface LightNode {
@@ -245,6 +258,8 @@ export interface LightNode {
   intensity?: number;
   /** 点光源的照射范围。 */
   range?: number;
+  /** 方向光投影子（只算第一盏开着的），见 docs/3d-more.md。 */
+  shadows?: boolean;
 }
 
 /**

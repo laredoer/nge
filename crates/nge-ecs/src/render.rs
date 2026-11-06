@@ -13,10 +13,27 @@ impl Default for ClearColor {
     }
 }
 
+/// 3D 模型和 2D 精灵按深度混排（见 docs/3d-more.md）：开着时 3D 渲染器把深度留给精灵，精灵按自己的 z 在 3D 空间里的深度和模型比，
+/// z < 0 的精灵也不再固定画在模型后面。要配合跟 2D 对齐的 3D 相机（`camera3d.match2d`）用。
+#[derive(Resource, Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Interleave(pub bool);
+
+/// 3D 渲染器这一帧留下的深度（深度 + 模板格式）和它用的 3D 相机矩阵。
+#[derive(Debug, Clone)]
+pub struct SceneDepth {
+    pub view: wgpu::TextureView,
+    /// 世界坐标 → 裁剪空间（列主序）。
+    pub view_proj: [f32; 16],
+}
+
+/// 和 3D 渲染器共用的深度缓冲格式（深度 + 模板：精灵的遮罩也写在里面）。
+pub const SCENE_DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth24PlusStencil8;
+
 /// 本帧的渲染状态，每帧渲染前重置。渲染器按插件添加的顺序执行。
 #[derive(Resource, Debug, Default)]
 pub struct RenderFrame {
     cleared: bool,
+    depth: Option<SceneDepth>,
 }
 
 impl RenderFrame {
@@ -25,8 +42,19 @@ impl RenderFrame {
         if std::mem::replace(&mut self.cleared, true) { wgpu::LoadOp::Load } else { wgpu::LoadOp::Clear(clear.0) }
     }
 
+    /// 3D 渲染器留下深度（[`Interleave`] 开着时）。
+    pub fn set_depth(&mut self, depth: SceneDepth) {
+        self.depth = Some(depth);
+    }
+
+    /// 这一帧前面的渲染器留下的深度。
+    pub fn depth(&self) -> Option<&SceneDepth> {
+        self.depth.as_ref()
+    }
+
     pub(crate) fn reset(&mut self) {
         self.cleared = false;
+        self.depth = None;
     }
 }
 

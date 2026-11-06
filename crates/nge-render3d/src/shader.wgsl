@@ -9,6 +9,9 @@ struct Globals {
     counts: vec4u,
     dirs: array<DirLight, 4>,
     points: array<PointLight, 8>,
+    light_view_proj: mat4x4f,
+    // 法线方向往外推多少、阴影图一个像素在 uv 里多大
+    shadow: vec4f,
 }
 struct Draw {
     model: mat4x4f,
@@ -17,10 +20,15 @@ struct Draw {
     // metallic, roughness, alpha_cutoff（< 0 表示不透明）, 镜像（> 0）
     params: vec4f,
     emissive: vec4f,
+    // x：关节矩阵从第几个开始（蒙皮的）
+    skin: vec4u,
 }
 
 @group(0) @binding(0) var<uniform> g: Globals;
+@group(0) @binding(1) var shadow_map: texture_depth_2d;
+@group(0) @binding(2) var shadow_sampler: sampler_comparison;
 @group(1) @binding(0) var<uniform> d: Draw;
+@group(1) @binding(1) var<storage, read> joints: array<mat4x4f>;
 @group(2) @binding(0) var base_tex: texture_2d<f32>;
 @group(2) @binding(1) var base_sampler: sampler;
 
@@ -37,15 +45,37 @@ struct VsOut {
     @location(2) uv: vec2f,
 }
 
-@vertex
-fn vs(v: VsIn) -> VsOut {
-    let world = d.model * vec4f(v.position, 1.0);
+struct SkinIn {
+    @location(3) joints: vec4u,
+    @location(4) weights: vec4f,
+}
+
+fn vertex(position: vec4f, normal: vec4f, uv: vec2f) -> VsOut {
+    let world = d.model * position;
     var o: VsOut;
     o.clip = g.view_proj * world;
     o.world = world.xyz;
-    o.normal = (d.normal * vec4f(v.normal, 0.0)).xyz;
-    o.uv = v.uv;
+    o.normal = (d.normal * normal).xyz;
+    o.uv = uv;
     return o;
+}
+
+@vertex
+fn vs(v: VsIn) -> VsOut {
+    return vertex(vec4f(v.position, 1.0), vec4f(v.normal, 0.0), v.uv);
+}
+
+/// 关节矩阵按权重混合；没有权重的顶点不动。法线也用它变换（关节大多只转不拉伸，够用）。
+@vertex
+fn vs_skinned(v: VsIn, s: SkinIn) -> VsOut {
+    let o = d.skin.x;
+    let j = s.joints;
+    let w = s.weights;
+    var m = joints[o + j.x] * w.x + joints[o + j.y] * w.y + joints[o + j.z] * w.z + joints[o + j.w] * w.w;
+    if dot(w, vec4f(1.0)) <= 0.0 {
+        m = mat4x4f(vec4f(1.0, 0.0, 0.0, 0.0), vec4f(0.0, 1.0, 0.0, 0.0), vec4f(0.0, 0.0, 1.0, 0.0), vec4f(0.0, 0.0, 0.0, 1.0));
+    }
+    return vertex(m * vec4f(v.position, 1.0), m * vec4f(v.normal, 0.0), v.uv);
 }
 
 const PI: f32 = 3.14159265;
@@ -71,6 +101,22 @@ fn shade(n: vec3f, v: vec3f, l: vec3f, radiance: vec3f, albedo: vec3f, metallic:
     return (diffuse + specular) * radiance * n_l;
 }
 
+/// 这一点被投影子的光照到多少（0 全挡、1 全照到）：3×3 PCF，阴影图外面算照到。
+fn lit(world: vec3f, n: vec3f) -> f32 {
+    let p = g.light_view_proj * vec4f(world + n * g.shadow.x, 1.0);
+    let uv = vec2f(p.x * 0.5 + 0.5, 0.5 - p.y * 0.5);
+    if any(uv < vec2f(0.0)) || any(uv > vec2f(1.0)) || p.z > 1.0 {
+        return 1.0;
+    }
+    var sum = 0.0;
+    for (var dy = -1; dy <= 1; dy++) {
+        for (var dx = -1; dx <= 1; dx++) {
+            sum += textureSampleCompareLevel(shadow_map, shadow_sampler, uv + vec2f(f32(dx), f32(dy)) * g.shadow.y, p.z);
+        }
+    }
+    return sum / 9.0;
+}
+
 @fragment
 fn fs(i: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4f {
     let base = textureSample(base_tex, base_sampler, i.uv) * d.base_color;
@@ -90,7 +136,11 @@ fn fs(i: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4f {
     var color = g.ambient.rgb * base.rgb + d.emissive.rgb;
     for (var k = 0u; k < g.counts.x; k++) {
         let light = g.dirs[k];
-        color += shade(n, v, light.to_light.xyz, light.color.rgb, base.rgb, metallic, roughness);
+        var radiance = light.color.rgb;
+        if g.counts.z == k + 1u {
+            radiance *= lit(i.world, n);
+        }
+        color += shade(n, v, light.to_light.xyz, radiance, base.rgb, metallic, roughness);
     }
     for (var k = 0u; k < g.counts.y; k++) {
         let light = g.points[k];

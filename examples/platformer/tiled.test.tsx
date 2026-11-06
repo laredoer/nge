@@ -1,7 +1,7 @@
 // `tiled()`：Tiled 地图转成瓦片地图和对象（见 docs/tiled.md），和平台跳跃用 Tiled 画的第三关。
 import { expect, test } from "nsh/test";
 import { tiled, type TiledMap } from "../../ts/tiled";
-import { fromTiled, LEVELS, LINKS, TILE } from "./levels";
+import { flagOn, fromTiled, LEVELS, LINKS, TILE } from "./levels";
 import level3 from "./maps/level3.json";
 
 const base = (): TiledMap => ({
@@ -129,4 +129,10 @@ test("铁链一节节挂着，3D 箱子跟着看不见的刚体", () => {
     expect(built.crate.model.attach).toBe(built.crate.body.id);
     expect(built.crate.body.body?.kind ?? "dynamic").toBe("dynamic");
   }
+});
+
+test("旗子挂在旗杆右上角、在角色前面、播 wave", () => {
+  const goal = LEVELS[0].built.goal;
+  const flag = flagOn(goal);
+  expect([flag.x, flag.y, flag.z, flag.animation?.clip]).toEqual([goal.x! + 8, goal.y! + 38, 30, "wave"]);
 });
