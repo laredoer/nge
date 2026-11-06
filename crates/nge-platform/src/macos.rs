@@ -15,13 +15,12 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, AnyProtocol, NSObjectProtocol, ProtocolObject};
 use objc2::{ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{NSEvent, NSEventMask, NSEventModifierFlags, NSEventType, NSText, NSView, NSWindow, NSWindowDidResignKeyNotification};
-use objc2_game_controller::{GCController, GCControllerButtonInput, GCControllerDirectionPad, GCExtendedGamepad};
 use objc2_foundation::{NSNotification, NSNotificationCenter, NSObject, NSPoint, NSRunLoop, NSRunLoopCommonModes};
 use objc2_quartz_core::CADisplayLink;
 use raw_window_handle::{AppKitDisplayHandle, AppKitWindowHandle, RawDisplayHandle, RawWindowHandle};
 use serde_json::{Value as JsonValue, json};
 
-use crate::{keys, pad};
+use crate::{gc, keys, pad};
 use crate::shared::Proxy;
 
 /// 把 `factory` 包成 NSH 原生组件工厂，注册到 `AppOptions.components`。
@@ -83,7 +82,7 @@ impl Shared {
     fn poll_pads(&self) {
         let key = self.view.window().is_some_and(|w| w.isKeyWindow());
         if key && !self.view.isHiddenOrHasHiddenAncestor() {
-            self.update_pads(&read_pads());
+            self.update_pads(&gc::read_pads());
         } else {
             self.update_pads(&[]);
         }
@@ -139,33 +138,6 @@ impl Shared {
         let ours = event.window(self.view.mtm()).is_some_and(|w| w == window);
         ours && window.isKeyWindow() && !self.view.isHiddenOrHasHiddenAncestor() && !editing(&window)
     }
-}
-
-/// 所有连着的、有 extendedGamepad 的手柄这一帧的读数。
-fn read_pads() -> Vec<pad::Reading> {
-    let pressed = |b: Retained<GCControllerButtonInput>| unsafe { b.isPressed() };
-    let maybe = |b: Option<Retained<GCControllerButtonInput>>| b.is_some_and(pressed);
-    let axes = |d: Retained<GCControllerDirectionPad>| unsafe { [d.xAxis().value(), d.yAxis().value()] };
-    let read = |g: &GCExtendedGamepad| unsafe {
-        pad::Reading {
-            a: pressed(g.buttonA()),
-            b: pressed(g.buttonB()),
-            x: pressed(g.buttonX()),
-            y: pressed(g.buttonY()),
-            l1: pressed(g.leftShoulder()),
-            r1: pressed(g.rightShoulder()),
-            l3: maybe(g.leftThumbstickButton()),
-            r3: maybe(g.rightThumbstickButton()),
-            menu: pressed(g.buttonMenu()),
-            options: maybe(g.buttonOptions()),
-            l2: g.leftTrigger().value(),
-            r2: g.rightTrigger().value(),
-            dpad: axes(g.dpad()),
-            left: axes(g.leftThumbstick()),
-            right: axes(g.rightThumbstick()),
-        }
-    };
-    unsafe { GCController::controllers() }.iter().filter_map(|c| unsafe { c.extendedGamepad() }).map(|g| read(&g)).collect()
 }
 
 /// 平台层自己用的 prop：游戏视图要吞的键（`code` 名的数组），不转给游戏。

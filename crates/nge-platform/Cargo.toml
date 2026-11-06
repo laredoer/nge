@@ -14,13 +14,13 @@ raw-window-handle.workspace = true
 
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
 objc2.workspace = true
+objc2-game-controller.workspace = true
 objc2-foundation.workspace = true
 objc2-quartz-core.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 nsh-platform-macos.workspace = true
 objc2-app-kit.workspace = true
-objc2-game-controller.workspace = true
 block2.workspace = true
 
 [target.'cfg(target_os = "ios")'.dependencies]
