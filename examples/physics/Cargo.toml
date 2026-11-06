@@ -16,8 +16,15 @@ nge-audio.workspace = true
 nge-render2d.workspace = true
 nge-render3d.workspace = true
 nge-scene.workspace = true
-nge-platform = { workspace = true, features = ["dev"] }
+nge-platform.workspace = true
 nsh-core.workspace = true
+
+# 生成的宿主（nsh run / nsh package）里注册游戏视图用
+[target.'cfg(target_os = "macos")'.dependencies]
+nsh-platform-macos.workspace = true
+
+[target.'cfg(target_os = "ios")'.dependencies]
+nsh-platform-ios.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true

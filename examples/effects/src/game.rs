@@ -58,7 +58,7 @@ struct StressEmitter;
 #[derive(Resource, Default)]
 struct Taps(u32);
 
-/// `assets` 是 `assets!()` 列出的 (uri, 源文件路径)，`cargo run` 时从源文件读。
+/// `assets` 是 `assets!()` 列出的 (uri, 源文件路径)，Mac 上 `nsh run` 时从源文件读。
 pub fn app<'a>(assets: impl IntoIterator<Item = (&'a str, &'a str)>) -> App {
     with_assets(AssetPlugin::new().files(assets))
 }

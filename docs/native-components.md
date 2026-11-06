@@ -53,7 +53,7 @@ nsh 0.3 自带的宿主不能注册应用自己的原生组件，所以引擎自
 - **iOS 最低版本**：`nsh package --target ios` 不设 `IPHONEOS_DEPLOYMENT_TARGET` 时按 iOS 10 链接，QuickJS 的 `___chkstk_darwin` 找不到。`.cargo/config.toml` 的 `[env]` 设成 15.0，和 nsh 要求的最低版本一致。
 - **GPU 上限**：iOS 模拟器的 `max_inter_stage_shader_variables` 是 15，比 WebGPU 默认的 16 少，引擎按默认上限建设备时渲染线程直接退出。改成默认上限和硬件上限取较差的（`device_limits`），自写的宿主也受益。
 - **窗口大小、性能浮层**：生成的宿主用 `nsh run --fps` 打开性能浮层。
-- **真机签名**：nsh 0.4.0 的 `nsh package --target ios` 把描述文件里的通配钥匙串组（`TEAM.*`）原样签进应用，iOS 以「签名无效或开发者未被信任」拒绝启动，信任了开发者也一样。打完包用 `examples/platformer/tools/resign-ios.sh <ipa> <证书 SHA-1> <输出 ipa>` 重签：权限取描述文件里的，钥匙串组换成 `<前缀>.<bundle id>`，再加 `--generate-entitlement-der`。两处是一起改的，没分开验证是哪一处起作用。上游修好以后删掉这个脚本。
+- **真机签名**：nsh 0.4.0 的 `nsh package --target ios` 把描述文件里的通配钥匙串组（`TEAM.*`）原样签进应用，iOS 以「签名无效或开发者未被信任」拒绝启动，信任了开发者也一样。打完包用 `tools/resign-ios.sh <ipa> <证书 SHA-1> <输出 ipa>` 重签：权限取描述文件里的，钥匙串组换成 `<前缀>.<bundle id>`，再加 `--generate-entitlement-der`。两处是一起改的，没分开验证是哪一处起作用。上游修好以后删掉这个脚本。
 - **包里的资源**：`nsh package` 把 `assets!()` 的资源放在 `<App>.app/nsh/assets/` 下，引擎原来只找 `Contents/Resources/nsh/assets`（Mac 的 .app）和程序旁边的 `assets`；iOS 的 .app 没有 `Contents/Resources`，真机上就回头去读编译时 Mac 上的路径。`bundle_dir` 加上程序旁边的 `nsh/assets`。
 - **iOS 的系统字体**：fontdb 在 iOS 上按 Linux 的目录找系统字体，一个也找不到；字体库是空的时候 cosmic-text 排版直接 panic（「no default font found」），渲染线程退出。改成 iOS 上读 `/System/Library/Fonts`（应用能读），并且字体库是空的时候不排不指定字体的文字，不再 panic。fontdb 默认的 sans-serif 是 Arial，cosmic-text 在 iOS 上按 Linux 的 Noto 系列回退，都不一定有，所以 iOS 上不指定字体时依次用 PingFang SC、Helvetica Neue、Helvetica 里第一个有的。
 

@@ -14,7 +14,7 @@ nge-physics2d.workspace = true
 nge-render2d.workspace = true
 nge-render3d.workspace = true
 nge-scene.workspace = true
-nge-platform = { workspace = true, features = ["dev"] }
+nge-platform.workspace = true
 nsh-core.workspace = true
 # derive(Resource) 展开时需要 bevy_ecs 路径
 bevy_ecs.workspace = true

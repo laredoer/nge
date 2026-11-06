@@ -14,5 +14,3 @@ pub mod macos;
 
 #[cfg(target_os = "ios")]
 pub mod ios;
-#[cfg(target_os = "ios")]
-pub mod ios_app;

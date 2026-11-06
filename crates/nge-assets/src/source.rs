@@ -1,10 +1,8 @@
-//! `asset:/…` 文件从哪里读：App 包里的资源目录、开发服务器，或者编译时记下的源文件。
+//! `asset:/…` 文件从哪里读：App 包里的资源目录，或者编译时记下的源文件。
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
-
-use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 
 /// 按 uri 读出文件的全部字节。在资源层的后台线程上调用。
 pub trait AssetSource: Send + Sync {
@@ -30,34 +28,7 @@ impl AssetSource for DirSource {
     }
 }
 
-/// 开发服务器（`nsh dev`）：`<base>/<asset 路径>`，base 形如 `http://127.0.0.1:8790/assets/`。
-pub struct HttpSource(pub String);
-
-impl AssetSource for HttpSource {
-    fn read(&self, uri: &str) -> Result<Vec<u8>, String> {
-        let sep = if self.0.ends_with('/') { "" } else { "/" };
-        let path: Vec<String> = asset_path(uri)?.split('/').map(|part| utf8_percent_encode(part, PATH_SEGMENT).to_string()).collect();
-        let url = format!("{}{sep}{}", self.0, path.join("/"));
-        let mut response = ureq::get(&url)
-            .config()
-            .timeout_global(Some(HTTP_TIMEOUT))
-            .build()
-            .call()
-            .map_err(|e| format!("{url}: {e}"))?;
-        response.body_mut().with_config().limit(MAX_HTTP_BYTES).read_to_vec().map_err(|e| format!("{url}: {e}"))
-    }
-}
-
-/// URL 路径段里要转义的字符（`@` 照原样，和 nsh 的资源路径一致）。
-const PATH_SEGMENT: &AsciiSet = &CONTROLS.add(b' ').add(b'"').add(b'#').add(b'%').add(b'<').add(b'>').add(b'?').add(b'`').add(b'{').add(b'}').add(b'[').add(b']').add(b'\\').add(b'^').add(b'|');
-
-/// 开发服务器卡住时，一个文件最多等这么久。
-const HTTP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-
-/// 单个资源文件的大小上限（开发服务器）。
-const MAX_HTTP_BYTES: u64 = 256 << 20;
-
-/// 编译时记下的源文件（NSH 的 `assets!()`：uri → 构建时的绝对路径）。`cargo run` 时用。
+/// 编译时记下的源文件（NSH 的 `assets!()`：uri → 构建时的绝对路径）。Mac 上 `nsh run` 时用。
 #[derive(Default)]
 pub struct SourceFiles(pub HashMap<String, PathBuf>);
 
@@ -103,7 +74,7 @@ impl AssetSource for MemorySource {
 
 static GLOBAL: RwLock<Option<Arc<dyn AssetSource>>> = RwLock::new(None);
 
-/// 平台层在创建引擎之前调用（比如 dev host 换成开发服务器）。没调用时用 [`bundle_dir`]。
+/// 平台层在创建引擎之前调用，换成别的来源。没调用时用 [`bundle_dir`]。
 pub fn set_source(source: Arc<dyn AssetSource>) {
     *GLOBAL.write().unwrap_or_else(|e| e.into_inner()) = Some(source);
 }
@@ -164,28 +135,6 @@ mod tests {
         assert_eq!(source.read("asset:/@game/a.txt").unwrap(), b"hi");
         assert!(source.read("asset:/@game/missing.txt").is_err());
         std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn http_source_fetches_from_the_dev_server() {
-        use std::io::{Read, Write};
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let server = std::thread::spawn(move || {
-            for status in ["200 OK", "200 OK", "404 Not Found"] {
-                let (mut stream, _) = listener.accept().unwrap();
-                let mut request = [0; 1024];
-                let n = stream.read(&mut request).unwrap();
-                let line = String::from_utf8_lossy(&request[..n]).lines().next().unwrap_or_default().to_owned();
-                let body = line.clone();
-                write!(stream, "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
-            }
-        });
-        let source = HttpSource(format!("http://127.0.0.1:{port}/assets"));
-        assert_eq!(String::from_utf8(source.read("asset:/@game/a.png").unwrap()).unwrap(), "GET /assets/@game/a.png HTTP/1.1");
-        assert_eq!(String::from_utf8(source.read("asset:/@game/砖 1#.png").unwrap()).unwrap(), "GET /assets/@game/%E7%A0%96%201%23.png HTTP/1.1", "按路径段转义");
-        assert!(source.read("asset:/@game/missing.png").unwrap_err().contains("404"));
-        server.join().unwrap();
     }
 
     #[test]

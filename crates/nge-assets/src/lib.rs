@@ -1,7 +1,7 @@
 //! 资源层：`asset:/` 路径、后台加载、2D / 3D 共用的贴图。
 //!
 //! 文件按 NSH 的约定放在游戏 crate 的 `assets/` 目录，`asset!("a.png")` 拿到 `asset:/@<包名>/a.png`。
-//! 从哪里读由平台层决定（[`set_source`]），`cargo run` 时回退到 `assets!()` 记下的源文件（[`AssetPlugin::files`]）。
+//! 从哪里读由平台层决定（[`set_source`]），Mac 上 `nsh run` 时回退到 `assets!()` 记下的源文件（[`AssetPlugin::files`]）。
 
 mod gpu;
 mod image;
@@ -17,7 +17,7 @@ use nge_ecs::{App, Plugin, PreUpdate};
 pub use gpu::GpuImages;
 pub use image::{Image, ImageId, MAX_TEXTURE_SIDE};
 pub use server::{Asset, AssetEvent, AssetServer, Assets, Handle, LoadContext, LoadState};
-pub use source::{AssetSource, Chain, DirSource, HttpSource, MemorySource, SourceFiles, asset_path, bundle_dir, platform_source, set_source};
+pub use source::{AssetSource, Chain, DirSource, MemorySource, SourceFiles, asset_path, bundle_dir, platform_source, set_source};
 
 /// 资源系统集：`PreUpdate` 里最先收回后台加载的结果。
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
@@ -35,7 +35,7 @@ impl AssetPlugin {
         Self::default()
     }
 
-    /// 编译时的源文件，平台来源里找不到时用（`cargo run`）：
+    /// 编译时的源文件，平台来源里找不到时用（Mac 上 `nsh run` 时没有 bundle）：
     /// `.files(assets!().iter().map(|f| (f.uri, f.source)))`。
     pub fn files<'a>(mut self, files: impl IntoIterator<Item = (&'a str, &'a str)>) -> Self {
         self.files.0.extend(files.into_iter().map(|(uri, path)| (uri.to_owned(), PathBuf::from(path))));

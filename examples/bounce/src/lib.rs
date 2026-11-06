@@ -1,5 +1,4 @@
-//! The app's Rust UI: its root component, which `nsh run`, `nsh package`
-//! and `cargo run` mount.
+//! The app's Rust UI: its root component, which `nsh run` and `nsh package` mount.
 
 use nge_nsh::{FRAME_STATS, GameViewExt, game_ref, game_view};
 use nsh_base::theme;
@@ -18,8 +17,21 @@ pub fn factory() -> nge_core::GameFactory {
     std::sync::Arc::new(|gfx| Box::new(game::Bounce::new(gfx)))
 }
 
+/// 把游戏视图注册进 `nsh run` / `nsh package` 生成的宿主（见 docs/generated-hosts.md）。
+#[cfg(target_os = "macos")]
+#[native_components(macos)]
+fn components(components: &nsh_platform_macos::Components) {
+    components.register(nge_core::GAME_COMPONENT, nge_platform::macos::component(factory()));
+}
+
+#[cfg(target_os = "ios")]
+#[native_components(ios)]
+fn components(components: &nsh_platform_ios::Components) {
+    components.register(nge_core::GAME_COMPONENT, nge_platform::ios::component(factory()));
+}
+
 /// The app's UI set (`nsh.json` `"rust"`): what a TSX entry may import from
-/// `nsh-game/native` (`README.md`, "Adding a TSX entry").
+/// `nsh-game/native`.
 #[native_module("nsh-game/native")]
 fn ui_set(registry: &mut Registry) {
     registry.register::<App>();

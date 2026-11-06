@@ -8,18 +8,44 @@ use nge_core::{Engine, GameFactory, Viewport, create_surface};
 use nsh_platform_ios::{ComponentContext, ComponentFactory, NativeComponent};
 use objc2::rc::Retained;
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
-use objc2_foundation::{NSObject, NSRunLoop, NSRunLoopCommonModes};
+use block2::RcBlock;
+use objc2_foundation::{NSNotification, NSNotificationCenter, NSObject, NSRunLoop, NSRunLoopCommonModes};
 use objc2_quartz_core::CADisplayLink;
 use objc2_quartz_core::CAFrameRateRange;
-use objc2_ui_kit::{UITraitEnvironment, UIView, UIWindow};
+use objc2_ui_kit::{UIApplication, UIApplicationDidEnterBackgroundNotification, UIApplicationState, UIApplicationWillEnterForegroundNotification, UITraitEnvironment, UIView, UIWindow};
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle, UiKitDisplayHandle, UiKitWindowHandle};
 use serde_json::{Value as JsonValue, json};
 
 use crate::shared::Proxy;
 
-/// 把 `factory` 包成 NSH 原生组件工厂，注册到 `AppOptions.components`。
+/// 把 `factory` 包成 NSH 原生组件工厂，注册到宿主的 `Components`。
 pub fn component(factory: GameFactory) -> ComponentFactory {
-    Rc::new(move |ctx| Box::new(GameView::new(ctx, factory.clone())))
+    Rc::new(move |ctx| {
+        watch_app_state();
+        Box::new(GameView::new(ctx, factory.clone()))
+    })
+}
+
+/// 监听 App 进后台 / 回前台（第一次建游戏视图时装上，跟 App 同生命周期）。不靠宿主转告：nsh 生成的宿主不会通知原生组件。
+fn watch_app_state() {
+    thread_local! {
+        static WATCHING: Cell<bool> = const { Cell::new(false) };
+    }
+    if WATCHING.with(|w| w.replace(true)) {
+        return;
+    }
+    // 装上之前 App 可能已经在后台（游戏视图晚挂载），先按当前状态起步
+    if let Some(mtm) = MainThreadMarker::new() {
+        let background = UIApplication::sharedApplication(mtm).applicationState() == UIApplicationState::Background;
+        APP_ACTIVE.with(|a| a.set(!background));
+    }
+    let center = NSNotificationCenter::defaultCenter();
+    for (name, active) in unsafe { [(UIApplicationDidEnterBackgroundNotification, false), (UIApplicationWillEnterForegroundNotification, true)] } {
+        let handler = RcBlock::new(move |_: NonNull<NSNotification>| set_app_active(active));
+        // 观察者要一直留着；返回的令牌泄漏掉，免得释放时被移除
+        let token = unsafe { center.addObserverForName_object_queue_usingBlock(Some(name), None, None, &handler) };
+        std::mem::forget(token);
+    }
 }
 
 struct Shared {
@@ -36,7 +62,7 @@ thread_local! {
 }
 
 /// App 进后台 / 回前台（主线程）：后台不能再提交 GPU 命令，否则会被系统杀掉。
-pub(crate) fn set_app_active(active: bool) {
+fn set_app_active(active: bool) {
     APP_ACTIVE.with(|a| a.set(active));
     LIVE.with(|live| {
         let mut live = live.borrow_mut();

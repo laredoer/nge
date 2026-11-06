@@ -111,6 +111,8 @@ nsh dev --server-only            # 在 examples/scene 下，监听 App.tsx
 cargo run -p scene               # 自写 dev host，连 ws://127.0.0.1:8790/ws
 ```
 
+后来改成 nsh 生成的宿主，自写 dev host 已经删掉，现在用 `nsh run examples/scene`（见 [generated-hosts.md](generated-hosts.md)）。
+
 ## 任务拆分
 
 1. `nge-scene`：协议类型和解析（颜色、角度），加单元测试

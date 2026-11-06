@@ -11,6 +11,4 @@ nge-ecs.workspace = true
 bevy_ecs.workspace = true
 glam.workspace = true
 image = { workspace = true, features = ["jpeg"] }
-ureq = { version = "3", default-features = false }
-percent-encoding = "2"
 log.workspace = true

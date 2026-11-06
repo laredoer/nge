@@ -15,6 +15,19 @@ pub fn factory() -> nge_core::GameFactory {
     nge_ecs::factory(game::app)
 }
 
+/// 把游戏视图注册进 `nsh run` / `nsh package` 生成的宿主（见 docs/generated-hosts.md）。
+#[cfg(target_os = "macos")]
+#[native_components(macos)]
+fn components(components: &nsh_platform_macos::Components) {
+    components.register(nge_core::GAME_COMPONENT, nge_platform::macos::component(factory()));
+}
+
+#[cfg(target_os = "ios")]
+#[native_components(ios)]
+fn components(components: &nsh_platform_ios::Components) {
+    components.register(nge_core::GAME_COMPONENT, nge_platform::ios::component(factory()));
+}
+
 #[native_module("dodge/native")]
 fn ui_set(registry: &mut Registry) {
     registry.register::<App>();
