@@ -37,6 +37,45 @@ export interface SpriteNode {
    * 只有原来那一份能点（`tap`）、有碰撞体（`body`）。见 docs/repeat.md。
    */
   repeat?: "x" | "y" | "xy";
+  /** 用 `scene.shaders` 或内置的哪个精灵着色器画（flash、outline、wave、circle），见 docs/effects2d.md。不认识、编不过的按原样画。 */
+  shader?: string;
+  /** 交给着色器的 4 个数（`e.params`），不写用着色器的默认值。 */
+  params?: [number, number, number, number];
+  /** 当遮罩：不画出来，只记下不透明（alpha ≥ 0.5）的地方。z < 0 和 z ≥ 0 的精灵各用各的遮罩。 */
+  mask?: boolean;
+  /** 只画在遮罩里（"inside"）或遮罩外（"outside"）。 */
+  masked?: "inside" | "outside";
+  /** 开着 2D 光照时不受光（自己发光的东西）。 */
+  unlit?: boolean;
+}
+
+/** 2D 光照：写了就开，受光的精灵颜色乘上环境光加上照到它的灯。粒子、文字不受光。 */
+export interface LightingNode {
+  /** 环境光，默认 "#ffffff"（不变暗）。 */
+  ambient?: string;
+  /** 最多 32 盏。 */
+  lights?: Light2dNode[];
+}
+
+/** 2D 点光源：中心最亮，到 `radius` 减到 0。 */
+export interface Light2dNode {
+  /** `follow` 时是相对那个精灵的偏移。 */
+  x?: number;
+  y?: number;
+  radius: number;
+  /** 默认 "#ffffff"。 */
+  color?: string;
+  /** 默认 1。 */
+  intensity?: number;
+  /** 跟着这个精灵（有刚体时是插值过的位置）。 */
+  follow?: string;
+}
+
+/** 后处理的一遍：`shader` 是 `scene.shaders` 或内置的后处理（grayscale、vignette、pixelate）。 */
+export interface PostNode {
+  shader: string;
+  /** 交给着色器的 4 个数（`p.params`），不写用着色器的默认值。 */
+  params?: [number, number, number, number];
 }
 
 /** 精灵的刚体和碰撞体。尺寸是精灵本地的大小，会乘精灵的 scale。 */
@@ -262,6 +301,11 @@ export interface Scene {
   /** 重力（point / s²），默认 [0, -981]。 */
   physics?: { gravity?: [number, number] };
   joints?: JointNode[];
+  /** 自己写的着色器：名字 → WGSL。精灵着色器写 `fn effect(e: Effect) -> vec4f`，后处理写 `fn post(p: Post) -> vec4f`。见 docs/effects2d.md。 */
+  shaders?: Record<string, string>;
+  lighting?: LightingNode;
+  /** 整帧画完以后按顺序过一遍的后处理。 */
+  post?: PostNode[];
   audio?: AudioNode;
   /** 时间缩放，默认 1；0 暂停（物理、补间、动画、粒子、相机平滑都停），0.5 慢一半。声音不受影响。 */
   timeScale?: number;

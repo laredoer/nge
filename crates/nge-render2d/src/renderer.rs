@@ -5,59 +5,18 @@ use std::collections::HashSet;
 use bevy_ecs::prelude::*;
 use glam::{Vec2, Vec4};
 use nge_core::{Gfx, wgpu};
-use nge_ecs::{App, ClearColor, Input, Plugin, PreUpdate, RenderFrame, Renderer, Screen};
+use nge_ecs::{App, ClearColor, Input, Plugin, PreUpdate, RenderFrame, Renderer, Screen, Time};
 
 use nge_assets::{Assets, GpuImages, Image};
 
 use crate::assets::{Atlases, TextureId};
-use crate::batch::{Batch, Instance, Item, batch};
+use crate::batch::{Batch, Instance, Item, LIT, batch};
 use crate::camera::{Camera2d, DrawAt, Parallax, Transform2d, drawn};
+use crate::effects::{Globals, Lighting2d, Masking, PostEffects, Shaders, SpriteShader, Unlit};
+use crate::pipes::{Mode, Pipes, STENCIL_FORMAT, pipe};
+use crate::post::PostRenderer;
 use crate::repeat::{Repeat, copies};
 use crate::sprite::{Sprite, SpriteInstances};
-
-const SHADER: &str = r#"
-struct Globals { view_proj: mat4x4f }
-@group(0) @binding(0) var<uniform> globals: Globals;
-@group(1) @binding(0) var tex: texture_2d<f32>;
-@group(1) @binding(1) var samp: sampler;
-
-struct Inst {
-    @location(0) pos: vec2f,
-    @location(1) size: vec2f,
-    @location(2) rotation_z: vec2f,
-    @location(3) uv: vec4f,
-    @location(4) color: vec4f,
-}
-struct Out {
-    @builtin(position) clip: vec4f,
-    @location(0) uv: vec2f,
-    @location(1) color: vec4f,
-}
-
-@vertex
-fn vs(@builtin(vertex_index) vi: u32, i: Inst) -> Out {
-    var corners = array<vec2f, 6>(
-        vec2f(-0.5, -0.5), vec2f(0.5, -0.5), vec2f(0.5, 0.5),
-        vec2f(-0.5, -0.5), vec2f(0.5, 0.5), vec2f(-0.5, 0.5),
-    );
-    let c = corners[vi];
-    let local = c * i.size;
-    let s = sin(i.rotation_z.x);
-    let k = cos(i.rotation_z.x);
-    let p = vec2f(local.x * k - local.y * s, local.x * s + local.y * k) + i.pos;
-    var out: Out;
-    out.clip = globals.view_proj * vec4f(p, 0.0, 1.0);
-    // 世界 y 朝上、图片 v 朝下
-    out.uv = i.uv.xy + vec2f(c.x + 0.5, 0.5 - c.y) * i.uv.zw;
-    out.color = i.color;
-    return out;
-}
-
-@fragment
-fn fs(in: Out) -> @location(0) vec4f {
-    return textureSample(tex, samp, in.uv) * in.color;
-}
-"#;
 
 const INITIAL_CAPACITY: u64 = 1024;
 
@@ -70,9 +29,13 @@ impl Plugin for Render2dPlugin {
         nge_assets::ensure_plugin(app);
         app.init_resource::<Atlases>()
             .init_resource::<SpriteInstances>()
+            .init_resource::<Shaders>()
+            .init_resource::<Lighting2d>()
+            .init_resource::<PostEffects>()
             .add_systems(PreUpdate, (pointer_world.in_set(PointerWorld), clear_sprite_instances))
             .prepend_renderer(SpriteRenderer::new(Layer::Back))
-            .add_renderer(SpriteRenderer::new(Layer::Front));
+            .add_renderer(SpriteRenderer::new(Layer::Front))
+            .set_post_process(PostRenderer::default());
     }
 }
 
@@ -91,7 +54,9 @@ fn clear_sprite_instances(mut instances: ResMut<SpriteInstances>) {
 }
 
 struct Gpu {
-    pipeline: wgpu::RenderPipeline,
+    pipes: Pipes,
+    /// 遮罩用的模板缓冲，跟着渲染目标的大小走。
+    stencil: Option<(wgpu::TextureView, wgpu::Extent3d)>,
     globals: wgpu::Buffer,
     globals_group: wgpu::BindGroup,
     sampler: wgpu::Sampler,
@@ -124,11 +89,13 @@ struct SpriteRenderer {
     copies: Vec<Vec2>,
     /// 份数太多时警告过的精灵（每个只警告一次）。
     warned: HashSet<Entity>,
+    /// 提示过「这一层有只画在遮罩里 / 外的精灵、却没有遮罩」。
+    warned_unmasked: bool,
 }
 
 impl SpriteRenderer {
     fn new(layer: Layer) -> Self {
-        Self { layer, gpu: None, items: Vec::new(), instances: Vec::new(), batches: Vec::new(), copies: Vec::new(), warned: HashSet::new() }
+        Self { layer, gpu: None, items: Vec::new(), instances: Vec::new(), batches: Vec::new(), copies: Vec::new(), warned: HashSet::new(), warned_unmasked: false }
     }
 }
 
@@ -141,15 +108,17 @@ fn rotated_half(size: Vec2, rotation: f32) -> Vec2 {
 impl Renderer for SpriteRenderer {
     fn render(&mut self, world: &mut World, gfx: &Gfx, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView) {
         let gpu = self.gpu.get_or_insert_with(|| Gpu::new(gfx));
-        let mut sprites = world.query::<(Entity, &Sprite, &Transform2d, Option<&DrawAt>, Option<&Parallax>, Option<&Repeat>)>();
+        let mut sprites = world.query::<(Entity, &Sprite, &Transform2d, Option<&DrawAt>, Option<&Parallax>, Option<&Repeat>, Option<&SpriteShader>, Option<&Masking>, Has<Unlit>)>();
         let camera = world.query::<&Camera2d>().iter(world).next().copied().unwrap_or_default();
         world.resource_scope(|world, mut images: Mut<GpuImages>| images.sync(gfx, world.resource::<Assets<Image>>()));
         let (images, atlases, gpu_images) = (world.resource::<Assets<Image>>(), world.resource::<Atlases>(), world.resource::<GpuImages>());
         let extra = world.resource::<SpriteInstances>();
+        let shaders = world.resource::<Shaders>();
+        gpu.pipes.sync(shaders);
 
         self.items.clear();
         let view = camera.visible(Vec2::from(gfx.viewport.size));
-        for (entity, sprite, transform, draw, parallax, repeat) in sprites.iter(world).filter(|(_, _, t, ..)| self.layer.contains(t.z)) {
+        for (entity, sprite, transform, draw, parallax, repeat, shader, masking, unlit) in sprites.iter(world).filter(|(_, _, t, ..)| self.layer.contains(t.z)) {
             let Transform2d { translation: pos, rotation, .. } = drawn(transform, draw, parallax, &camera);
             let region = atlases.region(images, sprite.image);
             let size = sprite.size.unwrap_or(region.size) * transform.scale;
@@ -166,16 +135,22 @@ impl Renderer for SpriteRenderer {
                 }
                 _ => self.copies.push(pos),
             }
+            let mode = Mode::of(masking);
+            let module = shader.map_or(0, |s| gpu.pipes.module(gfx, shaders, &s.name));
+            let params = shader.map_or([0.0; 4], |s| s.params.into());
             for &pos in &self.copies {
                 self.items.push(Item {
                     texture: region.texture,
+                    pipe: pipe(module, mode),
+                    mask: mode == Mode::Write,
                     instance: Instance {
                         pos: pos.into(),
                         size: size.into(),
                         rotation_z: [rotation, transform.z],
                         uv: region.uv.into(),
                         color: to_rgba8(sprite.color),
-                        _pad: 0,
+                        flags: if unlit { 0 } else { LIT },
+                        params,
                     },
                 });
             }
@@ -188,17 +163,25 @@ impl Renderer for SpriteRenderer {
                 _ => atlases.region(images, image),
             };
             last = Some((image, region));
+            // 粒子、文字、调试线不受光
             self.items.push(Item {
                 texture: region.texture,
+                pipe: 0,
+                mask: false,
                 instance: Instance {
                     pos: sprite.position.into(),
                     size: sprite.size.into(),
                     rotation_z: [sprite.rotation, sprite.z],
                     uv: region.uv.into(),
                     color: to_rgba8(sprite.color),
-                    _pad: 0,
+                    flags: 0,
+                    params: [0.0; 4],
                 },
             });
+        }
+        let masked = self.items.iter().any(|i| i.pipe % 4 >= Mode::Inside as u32);
+        if masked && !self.items.iter().any(|i| i.mask) && !std::mem::replace(&mut self.warned_unmasked, true) {
+            log::warn!("z {} 0 的精灵里有只画在遮罩里 / 外的，这一层却没有遮罩（遮罩只管同一层：z < 0、z ≥ 0 各一层）", if self.layer == Layer::Back { "<" } else { "≥" });
         }
         // 没有背景精灵时不开 pass，清屏留给后面的渲染器
         if self.layer == Layer::Back && self.items.is_empty() {
@@ -208,10 +191,16 @@ impl Renderer for SpriteRenderer {
         for id in std::iter::once(TextureId::WHITE).chain(self.batches.iter().map(|b| b.texture)) {
             gpu.cache_texture(gfx, gpu_images, id);
         }
+        for b in &self.batches {
+            gpu.pipes.prepare(gfx, b.pipe);
+        }
 
         let view_proj = camera.view_proj(Vec2::from(gfx.viewport.size));
-        gfx.queue.write_buffer(&gpu.globals, 0, bytemuck::bytes_of(&view_proj.to_cols_array()));
+        let time = world.resource::<Time>().elapsed as f32;
+        let globals = Globals::new(view_proj.to_cols_array(), time, world.resource::<Lighting2d>());
+        gfx.queue.write_buffer(&gpu.globals, 0, bytemuck::bytes_of(&globals));
         gpu.write_instances(gfx, &self.instances);
+        let stencil = gpu.stencil_view(gfx, target.texture().size());
 
         let clear = *world.resource::<ClearColor>();
         let load = world.resource_mut::<RenderFrame>().color_load(clear);
@@ -223,15 +212,25 @@ impl Renderer for SpriteRenderer {
                 resolve_target: None,
                 ops: wgpu::Operations { load, store: wgpu::StoreOp::Store },
             })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &stencil,
+                depth_ops: None,
+                stencil_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(0), store: wgpu::StoreOp::Discard }),
+            }),
             ..Default::default()
         });
         if self.batches.is_empty() {
             return;
         }
-        pass.set_pipeline(&gpu.pipeline);
+        pass.set_stencil_reference(1);
         pass.set_bind_group(0, &gpu.globals_group, &[]);
         pass.set_vertex_buffer(0, gpu.instances.slice(..));
+        let mut current = None;
         for b in &self.batches {
+            if current != Some(b.pipe) {
+                pass.set_pipeline(gpu.pipes.get(b.pipe));
+                current = Some(b.pipe);
+            }
             pass.set_bind_group(1, gpu.texture(b.texture), &[]);
             pass.draw(0..6, b.range.clone());
         }
@@ -245,51 +244,16 @@ fn to_rgba8(color: Vec4) -> [u8; 4] {
 impl Gpu {
     fn new(gfx: &Gfx) -> Self {
         let device = &gfx.device;
-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("sprites"),
-            source: wgpu::ShaderSource::Wgsl(SHADER.into()),
-        });
-        let attributes = wgpu::vertex_attr_array![
-            0 => Float32x2, 1 => Float32x2, 2 => Float32x2, 3 => Float32x4, 4 => Unorm8x4
-        ];
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("sprites"),
-            layout: None,
-            vertex: wgpu::VertexState {
-                module: &module,
-                entry_point: Some("vs"),
-                buffers: &[Some(wgpu::VertexBufferLayout {
-                    array_stride: size_of::<Instance>() as u64,
-                    step_mode: wgpu::VertexStepMode::Instance,
-                    attributes: &attributes,
-                })],
-                compilation_options: Default::default(),
-            },
-            primitive: Default::default(),
-            depth_stencil: None,
-            multisample: Default::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &module,
-                entry_point: Some("fs"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: gfx.format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
+        let pipes = Pipes::new(gfx, size_of::<Globals>() as u64);
         let globals = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("sprite globals"),
-            size: 64,
+            size: size_of::<Globals>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let globals_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("sprite globals"),
-            layout: &pipeline.get_bind_group_layout(0),
+            layout: &pipes.globals_layout,
             entries: &[wgpu::BindGroupEntry { binding: 0, resource: globals.as_entire_binding() }],
         });
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -299,7 +263,26 @@ impl Gpu {
             ..Default::default()
         });
         let instances = instance_buffer(device, INITIAL_CAPACITY);
-        Self { pipeline, globals, globals_group, sampler, textures: Vec::new(), instances, capacity: INITIAL_CAPACITY }
+        Self { pipes, stencil: None, globals, globals_group, sampler, textures: Vec::new(), instances, capacity: INITIAL_CAPACITY }
+    }
+
+    /// 模板缓冲跟着渲染目标的大小走（返回的 view 是克隆，便宜）。
+    fn stencil_view(&mut self, gfx: &Gfx, size: wgpu::Extent3d) -> wgpu::TextureView {
+        let size = wgpu::Extent3d { depth_or_array_layers: 1, ..size };
+        if self.stencil.as_ref().is_none_or(|(_, s)| *s != size) {
+            let texture = gfx.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("sprite stencil"),
+                size,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: STENCIL_FORMAT,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            });
+            self.stencil = Some((texture.create_view(&Default::default()), size));
+        }
+        self.stencil.as_ref().expect("刚创建").0.clone()
     }
 
     /// 贴图加载好了就建 bind group 缓存起来；没加载好的什么也不做（画的时候用白色）。
@@ -314,7 +297,7 @@ impl Gpu {
         }
         self.textures[index] = Some(gfx.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("sprite texture"),
-            layout: &self.pipeline.get_bind_group_layout(1),
+            layout: &self.pipes.texture_layout,
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(view) },
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },

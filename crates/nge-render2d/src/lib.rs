@@ -5,7 +5,10 @@
 mod assets;
 mod batch;
 mod camera;
+mod effects;
 mod gizmos;
+mod pipes;
+mod post;
 mod renderer;
 mod repeat;
 mod sprite;
@@ -14,6 +17,7 @@ pub use assets::{AtlasId, Atlases, Grid, TextureId};
 pub use nge_assets::{AssetPlugin, AssetServer, Assets, Image, ImageId, MAX_TEXTURE_SIDE};
 pub use camera::{Camera2d, DrawAt, Parallax, Transform2d, drawn};
 pub use nge_ecs::ClearColor;
+pub use effects::{Light2d, Lighting2d, MAX_LIGHTS, Masking, PostEffect, PostEffects, Shaders, SpriteShader, Unlit};
 pub use gizmos::{GIZMO_Z, Gizmos};
 pub use renderer::{PointerWorld, Render2dPlugin};
 pub use repeat::{MAX_COPIES, Repeat};

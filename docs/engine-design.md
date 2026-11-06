@@ -80,6 +80,7 @@
 | **背景重复** | 精灵的 `repeat`（`"x"`、`"y"`、`"xy"`）沿世界的轴一个挨一个铺满视野，和视差一起用；只画和视野相交的几份；见 [repeat.md](repeat.md) | 平台跳跃的远山换成一张山丘贴图横向重复，跑到哪都有 |
 | **iOS 手柄和硬件键盘** | iOS 的 display link 每帧读 GameController：手柄和 Mac 共用读数和合并，硬件键盘按 HID 用法码换成同一套键名；按着 ⌘ 的不发，进后台补发松开；见 [ios-input.md](ios-input.md) | 平台跳跃在 iPad 上用键盘或手柄玩，数字键选关 |
 | **关节和 2D 刚体带动 3D 模型** | `nge-physics2d` 的 `Joint`（焊死、转动、滑动、绳子、弹簧，带角度范围和马达），TSX 的 `scene.joints` 按精灵 id 连；模型节点的 `attach` 跟着精灵的位置和角度走；调试视图画关节；见 [joints.md](joints.md) | 平台跳跃有一串甩着的铁链吊球，终点前的 3D 箱子能推着走、跳上去 |
+| **2D 特效** | 着色器库（内置 flash、outline、wave、circle 和 grayscale、vignette、pixelate，TSX 的 `scene.shaders` 写 WGSL）；精灵的 `shader`、`params`，模板遮罩（`mask`、`masked`），2D 点光源和环境光（`scene.lighting`），后处理链（`scene.post`）；编不过的着色器报错不崩；见 [effects2d.md](effects2d.md) | 平台跳跃的金币扫过亮光，被撞回去时闪白，终点上方有圆形传送门；第三关是夜里，角色带灯、四角压暗 |
 | **M6 Android** | SurfaceView 和 Vulkan，JNI 胶水层 | 示例游戏在 Android 真机上能跑 |
 
 ## 待定

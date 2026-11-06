@@ -113,6 +113,7 @@ pub(crate) fn sync_sprites(mut commands: Commands, scene: Res<Scene>, mut assets
             }
             None => entity.remove::<Repeat>(),
         };
+        crate::effects::apply_sprite(&mut entity, node);
         // anim 没变时接着播，不从头开始
         if before.map(|b| &b.anim) != Some(&node.anim) {
             let anim = node.anim.as_ref().and_then(|a| FrameAnimation::new(a.frames.clone(), a.fps, a.looped));

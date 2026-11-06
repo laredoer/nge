@@ -1,5 +1,6 @@
 import { batch, mount, type NativeComponentRef, platform, signal, Text, View } from "nsh";
 import { floatText, gameView, KeyButton, saved, sound, tween, type Scene, type SpriteNode } from "../../ts/nge";
+import { COIN_SHADER, FLASH, FLASH_MS, night, portalOver, SHADERS } from "./effects";
 import { finish, LEVELS, NEW_PROGRESS, progressOf, ROWS, TILE, type Progress } from "./levels";
 
 /** Rust 发的事件：掉出关卡或被敌人撞到送回起点、按 R 重新开始、踩到敌人。 */
@@ -45,6 +46,9 @@ function App() {
   const falls = signal(0);
   const won = signal<number | null>(null);
   const stomped = signal<string[]>([]);
+  /** 刚被撞回起点：角色闪白一下。 */
+  const flashing = signal(false);
+  let flashEnd: ReturnType<typeof setTimeout> | undefined;
   let started = Date.now();
   let next: ReturnType<typeof setTimeout> | undefined;
   /** 换关后、新关卡建好（`levelStart`）之前：路上的事件是上一关的，不算。 */
@@ -77,7 +81,9 @@ function App() {
 
   const scene = (): Scene => ({
     level: levelId(),
-    background: "#1b2233",
+    background: LEVELS[level()].night ? "#0b0f1e" : "#1b2233",
+    shaders: SHADERS,
+    ...(LEVELS[level()].night ? night(now().goal) : {}),
     audio: { preload: [COIN_SOUND, WIN_SOUND] },
     physics: { gravity: [0, -1800] },
     camera: { follow: "player", y: 60, smooth: 0.15, bounds: { left: 0, right: now().right, bottom: -160, top: (ROWS - 1) * TILE } },
@@ -89,9 +95,10 @@ function App() {
     tilemaps: now().tilemaps,
     sprites: [
       ...BACKDROP,
-      { id: "player", x: 3 * TILE, y: 16, w: 24, h: 32, z: 5, color: "#ff7a59", body: { fixedRotation: true, friction: 0, collide: true } },
+      { id: "player", x: 3 * TILE, y: 16, w: 24, h: 32, z: 5, color: "#ff7a59", body: { fixedRotation: true, friction: 0, collide: true }, ...(flashing() ? FLASH : {}) },
+      // 金币自己发光，夜里也不暗
       ...now().coins.filter((c) => !taken().includes(c.id)).map(
-        (c): SpriteNode => ({ id: c.id, x: c.x, y: c.y, w: 14, z: 2, rotation: 45, color: "#ffd93d", body: { kind: "fixed", sensor: true } }),
+        (c): SpriteNode => ({ id: c.id, x: c.x, y: c.y, w: 14, z: 2, rotation: 45, color: "#ffd93d", body: { kind: "fixed", sensor: true }, ...COIN_SHADER, unlit: true }),
       ),
       ...now().lifts.map(({ node }): SpriteNode => ({ ...node, z: 1, color: "#c08552", body: { kind: "kinematic", friction: 0 } })),
       // 踩到的不删：去掉刚体、变透明，巡逻补间接着走，重新开始时直接恢复
@@ -103,6 +110,7 @@ function App() {
       now().crate.body,
       ...now().swing.sprites,
       now().goal,
+      ...portalOver(now().goal),
     ],
   });
 
@@ -150,7 +158,11 @@ function App() {
           if (index < LEVELS.length && index < progress().unlocked) play(index);
         }}
         onRespawn={(e) => {
-          if (!switching) falls.set(e.falls);
+          if (switching) return;
+          falls.set(e.falls);
+          flashing.set(true);
+          clearTimeout(flashEnd);
+          flashEnd = setTimeout(() => flashing.set(false), FLASH_MS);
         }}
         onStomp={(e) => {
           if (switching) return;

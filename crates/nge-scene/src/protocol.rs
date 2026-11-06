@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::anim::AnimNode;
 use crate::audio::AudioNode;
+use crate::effects::{LightingNode, MaskedNode, PostNode};
 use crate::joints::JointNode;
 use crate::nodes::{AmbientNode, Camera3dNode, EmitterNode, LightNode, ModelNode, TextNode};
 use crate::physics::{BodyNode, PhysicsNode};
@@ -31,6 +32,12 @@ pub struct Scene {
     pub physics: Option<PhysicsNode>,
     /// 关节（见 docs/joints.md）。
     pub joints: Vec<JointNode>,
+    /// 游戏写的着色器：名字 → WGSL（见 docs/effects2d.md）。
+    pub shaders: std::collections::HashMap<String, String>,
+    /// 2D 光照，写了就开。
+    pub lighting: Option<LightingNode>,
+    /// 后处理，按顺序。
+    pub post: Vec<PostNode>,
     pub audio: Option<AudioNode>,
     /// 时间缩放，1 正常、0 暂停。
     #[serde(rename = "timeScale")]
@@ -103,6 +110,17 @@ pub struct SpriteNode {
     pub parallax: Option<ParallaxNode>,
     /// 沿哪个轴一个挨一个重复铺满视野（见 docs/repeat.md）。
     pub repeat: Option<RepeatNode>,
+    /// 用着色器库里的哪个着色器画，`params` 交给它（不写用着色器的默认值）。
+    pub shader: Option<String>,
+    pub params: Option<[f32; 4]>,
+    /// 当遮罩：不画出来，只记下不透明的地方。
+    #[serde(default)]
+    pub mask: bool,
+    /// 只画在遮罩里或者遮罩外。
+    pub masked: Option<MaskedNode>,
+    /// 开着 2D 光照时不受光。
+    #[serde(default)]
+    pub unlit: bool,
 }
 
 /// `repeat`：`"x"`、`"y"` 或 `"xy"`。

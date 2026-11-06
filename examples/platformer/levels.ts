@@ -186,9 +186,10 @@ export function fromTiled(map: TiledMap): Built {
   };
 }
 
-export const LEVELS: { name: string; built: Built }[] = [
+/** `night`：夜里，开 2D 光照（见 effects.ts）。 */
+export const LEVELS: { name: string; built: Built; night?: boolean }[] = [
   ...DESCRIBED.map((level) => ({ name: level.name, built: build(level) })),
-  { name: "云端", built: fromTiled(level3) },
+  { name: "云端", built: fromTiled(level3), night: true },
 ];
 
 /** 存档：解锁到第几关（从 1 数），每关最好的用时（秒，键是关卡号）。 */

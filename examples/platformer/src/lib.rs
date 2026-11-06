@@ -718,4 +718,21 @@ mod tests {
         run(&mut app, 1);
         assert!(player(&mut app).1.y.abs() < 1.0, "暂停中按的跳不留到继续后 {:?}", player(&mut app));
     }
+
+    /// effects.ts 里自己写的着色器都编得过：按「名字: `代码`」取出来，`fn effect` 的按精灵着色器、`fn post` 的按后处理校验。
+    #[test]
+    fn demo_shaders_compile() {
+        let ts = include_str!("../effects.ts");
+        let start = ts.find("export const SHADERS").expect("有 SHADERS");
+        let end = start + ts[start..].find("\n};").expect("SHADERS 结束");
+        let mut found = 0;
+        for chunk in ts[start..end].split("`").skip(1).step_by(2) {
+            let checked = if chunk.contains("fn post(") { nge_render2d::Shaders::check_post(chunk) } else { nge_render2d::Shaders::check_sprite(chunk) };
+            if let Err(e) = checked {
+                panic!("{chunk}\n编不过：{e}");
+            }
+            found += 1;
+        }
+        assert_eq!(found, 2, "shimmer、starfield");
+    }
 }

@@ -12,7 +12,7 @@ mod input;
 mod render;
 mod resources;
 
-pub use app::{App, Plugin, PostUpdate, PreUpdate, Renderer, Startup, Update, factory};
+pub use app::{App, Plugin, PostProcess, PostUpdate, PreUpdate, Renderer, Startup, Update, factory};
 pub use input::{Input, Pointer, Stick};
 pub use render::{ClearColor, RenderFrame};
 pub use resources::{NshCommand, Outbox, Props, Screen, Time};

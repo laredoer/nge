@@ -9,6 +9,7 @@ mod attach;
 mod audio;
 mod behave;
 mod camera;
+mod effects;
 mod joints;
 mod level;
 mod match2d;
@@ -35,6 +36,7 @@ pub use anim::{ANIM_END, AnimEnd, AnimNode, Ease, FrameAnimation, TWEEN, TWEEN_E
 pub use audio::{AudioNode, PlaySound, SOUND};
 pub use behave::{Spin, Tappable};
 pub use camera::{SHAKE, Shake};
+pub use effects::{Light2dNode, LightingNode, MaskedNode, PostNode};
 pub use joints::{JointKindName, JointNode, MotorNode};
 pub use level::{LEVEL_START, LevelStart};
 pub use nodes::{AmbientNode, AnchorName, BURST, Burst, Camera3dNode, EmitterNode, FLOAT_TEXT, FloatText, LightKind, LightNode, ModelNode, Particles, TextNode};
@@ -126,6 +128,7 @@ impl Plugin for ScenePlugin {
             physics::sync_gravity,
             joints::sync_joints,
             audio::sync_audio,
+            effects::sync_effects,
         );
         app.insert_resource(textures)
             .init_resource::<resolve::UriAtlases>()
@@ -152,6 +155,7 @@ impl Plugin for ScenePlugin {
             // 精灵和关节都同步完了再连：关节可以在精灵之后才出现，反过来也行
             .add_systems(PostUpdate, joints::resolve.before(PhysicsStepped))
             .add_systems(PostUpdate, attach::attach.after(PhysicsStepped).before(behave::follow))
+            .add_systems(PostUpdate, effects::lighting.after(PhysicsStepped).after(behave::follow).after(camera::camera_rig))
             .add_systems(PostUpdate, (behave::follow, physics::collide.after(PhysicsStepped), camera::camera_rig.after(PhysicsStepped), match2d::match_2d.after(camera::camera_rig)));
     }
 }
