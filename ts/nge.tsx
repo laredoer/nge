@@ -1,5 +1,5 @@
 // nge 的 TSX 绑定：<GameView> 组件和场景类型（和 crates/nge-scene 的协议一一对应）。
-import { nativeComponent, Text, View, type GestureResponderEvent, type NativeComponentProps, type NativeComponentRef } from "nsh";
+import { nativeComponent, signal, Storage, Text, untracked, View, type GestureResponderEvent, type NativeComponentProps, type NativeComponentRef, type Signal } from "nsh";
 
 /** 一个精灵。坐标是世界坐标（point，y 朝上，原点在视口中心），角度用度（逆时针）。 */
 export interface SpriteNode {
@@ -221,6 +221,8 @@ export interface Scene {
   audio?: AudioNode;
   /** 时间缩放，默认 1；0 暂停（物理、补间、动画、粒子、相机平滑都停），0.5 慢一半。声音不受影响。 */
   timeScale?: number;
+  /** 关卡：换了值（字符串或数字）就把场景整个重建，同 id 的节点也不留上一关的状态；Rust 收到 `LevelStart`。见 docs/levels.md。 */
+  level?: string | number;
 }
 
 /** 背景音乐和总音量。音量是线性的：0 静音，1 原音量。 */
@@ -434,6 +436,8 @@ interface BuiltinEvents {
   animEnd: AnimEnd;
   tweenEnd: TweenEnd;
   key: KeyInput;
+  /** 换关（场景的 `level` 换了值）后新关卡的实体建好了：要对新关卡发的命令（补间等）在这里发。 */
+  levelStart: { level: string };
   fps: FrameStats;
   error: EngineError;
 }
@@ -444,14 +448,14 @@ export type GameViewProps<P, E> = NativeComponentProps<Partial<BuiltinProps> & P
 
 /**
  * 生成游戏视图组件。`props` / `events` 是游戏自己的通道名（Rust 侧 `add_prop` / `add_state` / `add_event`），
- * 类型由泛型给出；内置 prop `scene`、事件 `tap` / `collide` / `animEnd` / `tweenEnd` / `key` / `fps` / `error`，触摸自动转成引擎的 `touch` command。
+ * 类型由泛型给出；内置 prop `scene`、事件 `tap` / `collide` / `animEnd` / `tweenEnd` / `key` / `levelStart` / `fps` / `error`，触摸自动转成引擎的 `touch` command。
  */
 export function gameView<P extends object = {}, E extends object = {}>(
   spec: { props?: readonly (keyof P & string)[]; events?: readonly (keyof E & string)[] } = {},
 ) {
   const Native = nativeComponent<BuiltinProps & P, BuiltinEvents & E>("nge.game", {
     props: [...new Set(["scene", "captureKeys", ...(spec.props ?? [])])] as (keyof (BuiltinProps & P) & string)[],
-    events: [...new Set(["tap", "collide", "animEnd", "tweenEnd", "key", "fps", "error", ...(spec.events ?? [])])] as (keyof (BuiltinEvents & E) & string)[],
+    events: [...new Set(["tap", "collide", "animEnd", "tweenEnd", "key", "levelStart", "fps", "error", ...(spec.events ?? [])])] as (keyof (BuiltinEvents & E) & string)[],
   });
 
   return (props: GameViewProps<P, E>) => {
@@ -481,4 +485,32 @@ export function gameView<P extends object = {}, E extends object = {}>(
       />
     );
   };
+}
+
+/**
+ * 存在设备上的 signal（nsh 的 `Storage`，键名是 `nge:<key>`）：一开始是 `initial`，读到存档后换成存的值；
+ * `set` / `update` 时一起写进存档。读到存档之前就 `set` 过的，以 `set` 的为准（存档整个被换掉，读档只要几毫秒，一般碰不到）。
+ * 存的值结构不对（以前的版本存的）时这里不管，读的地方自己补齐。同一个 key 只调一次，调两次是两个互不同步的 signal。见 docs/levels.md。
+ */
+export function saved<T>(key: string, initial: T): Signal<T> {
+  const value = signal<T>(initial);
+  const storageKey = `nge:${key}`;
+  let changed = false;
+  Storage.getItem(storageKey).then(
+    (raw) => {
+      if (raw === null || changed) return;
+      try {
+        value.set(JSON.parse(raw) as T);
+      } catch {
+        console.warn(`存档 ${storageKey} 不是合法的 JSON，用初始值`);
+      }
+    },
+    (e) => console.warn(`读存档 ${storageKey} 失败: ${e}`),
+  );
+  const set = (next: T) => {
+    changed = true;
+    value.set(next);
+    Storage.setItem(storageKey, JSON.stringify(next)).catch((e) => console.warn(`写存档 ${storageKey} 失败: ${e}`));
+  };
+  return Object.assign(() => value(), { set, update: (fn: (v: T) => T) => set(fn(untracked(value))) }) as Signal<T>;
 }

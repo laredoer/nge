@@ -32,6 +32,9 @@ pub struct Scene {
     /// 时间缩放，1 正常、0 暂停。
     #[serde(rename = "timeScale")]
     pub time_scale: Option<f32>,
+    /// 关卡：换了值就整个重建场景（见 docs/levels.md）。数字和字符串都行。
+    #[serde(deserialize_with = "crate::level::level_id")]
+    pub level: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]

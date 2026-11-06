@@ -8,6 +8,7 @@ mod anim;
 mod audio;
 mod behave;
 mod camera;
+mod level;
 mod match2d;
 mod nodes;
 mod physics;
@@ -32,6 +33,7 @@ pub use anim::{ANIM_END, AnimEnd, AnimNode, Ease, FrameAnimation, TWEEN, TWEEN_E
 pub use audio::{AudioNode, PlaySound, SOUND};
 pub use behave::{Spin, Tappable};
 pub use camera::{SHAKE, Shake};
+pub use level::{LEVEL_START, LevelStart};
 pub use nodes::{AmbientNode, AnchorName, BURST, Burst, Camera3dNode, EmitterNode, FLOAT_TEXT, FloatText, LightKind, LightNode, ModelNode, Particles, TextNode};
 pub use physics::{BodyKind, BodyNode, COLLIDE, Collide, PUSH, PhysicsNode, Push, ShapeName};
 pub use protocol::{Bounds, CameraNode, Color, SCENE, Scene, SpriteNode, TAP, Tap};
@@ -135,7 +137,10 @@ impl Plugin for ScenePlugin {
             .add_event(ANIM_END)
             .add_event(TWEEN_END)
             .add_event(COLLIDE)
-            .add_systems(PreUpdate, synced.run_if(resource_changed::<Scene>).before(PointerWorld))
+            .add_event(LEVEL_START)
+            .add_message::<LevelStart>()
+            .add_systems(PreUpdate, level::switch_level.run_if(resource_changed::<Scene>).before(sync::sync_sprites))
+            .add_systems(PreUpdate, synced.run_if(resource_changed::<Scene>).after(level::switch_level).before(PointerWorld))
             .add_systems(PreUpdate, match2d::match_2d.after(sync_nodes::sync_camera3d).after(camera::sync_camera).before(PointerWorld))
             .add_systems(Update, (behave::spin, behave::tap, behave::burst, behave::float_text, physics::push, audio::play_sound, anim::animate))
             // 补间最后写，盖过 spin / push 这一帧的改动

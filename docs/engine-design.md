@@ -75,6 +75,7 @@
 | **2.5D 相机** | `Camera3d::ortho` 正交投影，`camera3d.match2d` 让 3D 相机跟着 2D 相机；见 [camera25d.md](camera25d.md) | 平台跳跃终点前的 3D 箱子随相机跟随、震屏始终和关卡对齐 |
 | **示例换成生成的宿主** | 其余 8 个示例照平台跳跃改用 `#[native_components]`，删掉 dev host、`ios_app`、`HttpSource`；iOS 的前后台暂停改成组件自己监听通知；见 [generated-hosts.md](generated-hosts.md) | 每个示例 `nsh run` 能跑、`nsh check` 通过 |
 | **视差背景** | 精灵和瓦片地图的 `parallax`（一个数或 `[x, y]`），渲染和点击都按画的位置；z < 0 的精灵画在 3D 后面；见 [parallax.md](parallax.md) | 平台跳跃的远山和树按不同速度跟着相机，3D 箱子在背景前面 |
+| **关卡切换和存档** | 场景的 `level` 换了值时实体全部重建、清掉一次性效果、相机直接对准，Rust 收到 `LevelStart`；TSX 的 `saved()` 把 signal 存在设备上；见 [levels.md](levels.md) | 平台跳跃两关，通关进下一关，数字键选已解锁的关，最好成绩重开后还在 |
 | **M6 Android** | SurfaceView 和 Vulkan，JNI 胶水层 | 示例游戏在 Android 真机上能跑 |
 
 ## 待定

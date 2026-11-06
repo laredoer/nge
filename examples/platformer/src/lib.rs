@@ -15,7 +15,7 @@ use nge_ecs::{App, Input, Outbox, Startup, Time, Update};
 use nge_physics2d::{Contact, Physics, Velocity};
 use nge_render2d::{Render2dPlugin, Transform2d};
 use nge_render3d::Render3dPlugin;
-use nge_scene::{SceneId, ScenePlugin};
+use nge_scene::{LevelStart, SceneId, ScenePlugin};
 use nsh_core::prelude::assets;
 use serde::Serialize;
 
@@ -201,6 +201,13 @@ fn control(
     }
 }
 
+/// 换关：重生点、掉坑次数、踩过的敌人都是上一关的，重新来。
+fn reset_on_level_start(mut starts: MessageReader<LevelStart>, mut ctl: ResMut<Controller>) {
+    if starts.read().count() > 0 {
+        *ctl = Controller::default();
+    }
+}
+
 pub fn app() -> App {
     build(AudioPlugin::default())
 }
@@ -219,7 +226,7 @@ fn build(audio: AudioPlugin) -> App {
         .init_resource::<Sfx>()
         .add_systems(Startup, load_sfx)
         .init_resource::<debug::DebugView>()
-        .add_systems(Update, (control, debug::debug_view).chain());
+        .add_systems(Update, (reset_on_level_start, control, debug::debug_view).chain());
     app
 }
 
@@ -438,6 +445,33 @@ mod tests {
         assert!((p - start).length() < 0.1 && v.length() < 1e-3, "送回起点、速度清零 {p} {v}");
     }
 
+    /// 换关时重生点、掉坑次数重新算：新关卡的起点不一样。
+    #[test]
+    fn a_new_level_resets_the_spawn_and_the_falls() {
+        let mut app = app();
+        let scene = |level: u32, x: f32| {
+            let mut s = level_with_pit();
+            s["level"] = json!(level);
+            s["sprites"][0]["x"] = json!(x);
+            s
+        };
+        app.prop("scene", Some(&scene(1, 0.0)));
+        run(&mut app, 20);
+        key(&mut app, "ArrowRight", true);
+        (0..120).find(|_| run(&mut app, 1).iter().any(|(n, _)| n == "respawn")).expect("第一关掉坑");
+        key(&mut app, "ArrowRight", false);
+        app.prop("scene", Some(&scene(2, -200.0)));
+        run(&mut app, 20);
+        key(&mut app, "ArrowRight", true);
+        let respawn = (0..240).find_map(|_| run(&mut app, 1).into_iter().find(|(n, _)| n == "respawn")).expect("第二关掉坑");
+        assert_eq!(respawn.1, json!({ "falls": 1 }), "掉坑次数从 0 重新数");
+        assert!((player(&mut app).0.x + 200.0).abs() < 0.1, "送回第二关的起点");
+    }
+
+    fn level_with_pit() -> Value {
+        level(Some((22, 24)))
+    }
+
     fn voices(app: &mut App) -> usize {
         nge_assets::AssetServer::apply(app.world_mut(), true);
         run(app, 1);
@@ -490,9 +524,9 @@ mod tests {
         for name in ["jump", "fall", "stomp", "coin", "win"] {
             assert!(uris.contains(&format!("asset:/@platformer/{name}.wav").as_str()), "{name} 不在 {uris:?}");
         }
-        let tsx = include_str!("../App.tsx");
+        let tsx = [include_str!("../App.tsx"), include_str!("../levels.ts")].concat();
         assert!(tsx.contains("asset:/@platformer/coin.wav") && tsx.contains("asset:/@platformer/win.wav"));
-        assert!(tsx.contains(&format!("id: `{ENEMY}${{i}}`")), "App.tsx 的敌人 id 用 {ENEMY} 开头");
+        assert!(tsx.contains(&format!("id: `{ENEMY}${{i}}`")), "levels.ts 的敌人 id 用 {ENEMY} 开头");
         assert!(uris.contains(&"asset:/@platformer/crate.glb") && tsx.contains("asset:/@platformer/crate.glb"), "2.5D 的箱子");
     }
 
