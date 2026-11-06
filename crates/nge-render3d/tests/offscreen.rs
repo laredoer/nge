@@ -284,6 +284,24 @@ fn sprites_draw_over_3d_without_clearing_it() {
 }
 
 #[test]
+fn background_sprites_draw_under_3d() {
+    use nge_render2d::{Render2dPlugin, Sprite, Transform2d};
+    let Some(img) = render(SIZE, |app| {
+        unlit(app);
+        app.add_plugins(Render2dPlugin);
+        app.add_systems(Startup, |world: &mut World| {
+            solid(world, Vec4::new(1.0, 0.0, 0.0, 1.0), Mesh::cube(1.0), Transform3d::default());
+            // 铺满画面的背景（z < 0）和一个在上面的小方块
+            world.spawn((Sprite::color(Vec2::splat(1000.0), Vec4::new(0.0, 0.0, 1.0, 1.0)), Transform2d::default().with_z(-1.0)));
+        });
+    }) else {
+        return eprintln!("没有 GPU，跳过");
+    };
+    assert!(close(img.center(), [255, 0, 0, 255]), "模型盖住背景 {:?}", img.center());
+    assert!(close(img.at(2, 2), [0, 0, 255, 255]), "模型外面是背景 {:?}", img.at(2, 2));
+}
+
+#[test]
 fn gltf_model_renders_with_texture() {
     let size = 256;
     let Some(img) = render(size, |app| {

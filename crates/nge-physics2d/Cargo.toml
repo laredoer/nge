@@ -4,6 +4,7 @@ description = "nge 的 2D 物理（rapier2d）：刚体、碰撞体、碰撞事�
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+license.workspace = true
 
 [dependencies]
 nge-ecs.workspace = true

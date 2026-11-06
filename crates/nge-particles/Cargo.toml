@@ -4,6 +4,7 @@ description = "NSH 游戏引擎 2D 粒子：CPU 模拟，走精灵批量绘制"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+license.workspace = true
 
 [dependencies]
 nge-ecs.workspace = true

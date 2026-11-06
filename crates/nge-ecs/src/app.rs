@@ -139,6 +139,12 @@ impl App {
         self
     }
 
+    /// 排在所有已注册的渲染器前面（先画，在最底下）。
+    pub fn prepend_renderer(&mut self, renderer: impl Renderer) -> &mut Self {
+        self.renderers.insert(0, Box::new(renderer));
+        self
+    }
+
     pub fn world(&self) -> &World {
         &self.world
     }

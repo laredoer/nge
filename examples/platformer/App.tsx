@@ -74,6 +74,22 @@ const ENEMIES = [14, 31, 69].map((c, i) => ({ id: `enemy-${i}`, x: (c + 0.5) * T
 /** 终点前转着的 3D 箱子（2.5D）：3D 相机跟着 2D 相机（`match2d`），模型的 (x, y) 就是关卡里的位置。 */
 const CRATE = { id: "crate", model: "asset:/@platformer/crate.glb", x: 73.5 * TILE, y: 56, scale: 40, rotation: [20, 0, 0] as [number, number, number], spin: 60 };
 
+/** 视差背景：横向远山跟着相机挪 0.2、树挪 0.5，竖直方向跟着关卡（立在地上）。z < 0，画在 3D 箱子后面。横向按相机在 x = 0 时摆，所以远山铺得窄、树铺得宽。 */
+const BACKDROP: SpriteNode[] = [
+  // 转 45° 的方块当山，下尖对齐地面的底边
+  ...Array.from({ length: 12 }, (_, i): SpriteNode => {
+    const w = [220, 260, 180][i % 3];
+    return { id: `mountain-${i}`, x: -600 + i * 170, y: w * Math.SQRT1_2 - TILE, w, rotation: 45, z: -10, color: "#232c42", parallax: [0.2, 1] };
+  }),
+  ...Array.from({ length: 24 }, (_, i): SpriteNode[] => {
+    const x = -600 + i * 110 + (i % 4) * 17;
+    return [
+      { id: `trunk-${i}`, x, y: 40, w: 10, h: 80, z: -6, color: "#2a3550", parallax: [0.5, 1] },
+      { id: `crown-${i}`, x, y: 90 + (i % 2) * 14, w: 44, rotation: 45, z: -5, color: "#2f3d5c", parallax: [0.5, 1] },
+    ];
+  }).flat(),
+];
+
 const GOAL: SpriteNode = { id: "goal", x: 76 * TILE, y: 40, w: 16, h: 80, color: "#6bcb77", body: { kind: "fixed", sensor: true, collide: true } };
 
 function App() {
@@ -95,6 +111,7 @@ function App() {
     models: [CRATE],
     tilemaps: [LEVEL],
     sprites: [
+      ...BACKDROP,
       { id: "player", x: 3 * TILE, y: 16, w: 24, h: 32, z: 5, color: "#ff7a59", body: { fixedRotation: true, friction: 0, collide: true } },
       ...COINS.filter((c) => !taken().includes(c.id)).map(
         (c): SpriteNode => ({ id: c.id, x: c.x, y: c.y, w: 14, z: 2, rotation: 45, color: "#ffd93d", body: { kind: "fixed", sensor: true } }),

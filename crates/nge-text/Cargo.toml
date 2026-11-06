@@ -4,6 +4,7 @@ description = "NSH 游戏引擎文字：在游戏画面里画文字（glyphon）
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+license.workspace = true
 
 [dependencies]
 nge-core.workspace = true

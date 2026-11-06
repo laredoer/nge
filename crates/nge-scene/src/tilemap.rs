@@ -8,7 +8,7 @@ use nge_physics2d::Collider;
 use nge_render2d::{Sprite, SpriteImage, Transform2d};
 use serde::Deserialize;
 
-use crate::protocol::Scene;
+use crate::protocol::{ParallaxNode, Scene};
 use crate::resolve::SceneAssets;
 use crate::sync::{Declared, Node, sync_list};
 
@@ -36,6 +36,8 @@ pub struct TilemapNode {
     pub restitution: f32,
     #[serde(default)]
     pub collide: bool,
+    /// 视差，加在每个瓦片上；碰撞体不跟着挪（见 docs/parallax.md）。
+    pub parallax: Option<ParallaxNode>,
 }
 
 fn default_friction() -> f32 {
@@ -112,6 +114,7 @@ pub(crate) fn sync_tilemaps(mut commands: Commands, scene: Res<Scene>, mut asset
         if matches!(image, SpriteImage::Texture(_)) {
             log::warn!("瓦片地图 {:?} 的 texture 不是图集，每格都画整张图", node.id);
         }
+        let parallax = ParallaxNode::resolve(node.parallax, &node.id);
         let origin = Vec2::new(node.x, node.y);
         let tile = node.tile;
         let center = |c: f32, r: f32| origin + Vec2::new(c * tile, -r * tile);
@@ -124,10 +127,16 @@ pub(crate) fn sync_tilemaps(mut commands: Commands, scene: Res<Scene>, mut asset
             };
             let at = center((i % cols) as f32 + 0.5, (i / cols) as f32 + 0.5);
             let sprite = Sprite { image, size: Some(Vec2::splat(tile)), color: Vec4::ONE };
-            commands.spawn((sprite, Transform2d::from_xy(at.x, at.y).with_z(node.z), ChildOf(map)));
+            let mut tile = commands.spawn((sprite, Transform2d::from_xy(at.x, at.y).with_z(node.z), ChildOf(map)));
+            if let Some(p) = parallax {
+                tile.insert(p);
+            }
         }
         // 负数都是空格，写进 solid 也不算实心
         let solid: Vec<bool> = data.iter().map(|v| *v >= 0 && node.solid.contains(v)).collect();
+        if parallax.is_some_and(|p| p.0 != Vec2::ONE) && solid.contains(&true) {
+            log::warn!("瓦片地图 {:?} 设了视差又有实心格子：碰撞体在声明的位置，和画面对不上", node.id);
+        }
         for run in merge(&solid, cols) {
             let size = Vec2::new(run.w as f32, run.h as f32) * tile;
             let at = center(run.col as f32 + run.w as f32 / 2.0, run.row as f32 + run.h as f32 / 2.0);
@@ -184,6 +193,16 @@ mod tests {
         let (s, t) = world.query_filtered::<(&Sprite, &Transform2d), With<ChildOf>>().iter(world).next().unwrap();
         assert_eq!((s.size, t.z), (Some(Vec2::splat(10.0)), 2.0));
         assert!(solids(&mut app).is_empty(), "不写 solid 就不碰撞");
+    }
+
+    #[test]
+    fn parallax_applies_to_every_tile_but_not_the_colliders() {
+        let mut app = app();
+        frame(&mut app, Some(json!({ "tilemaps": [{ "id": "m", "texture": "grid", "tile": 10, "cols": 2, "data": [0, 1, 1, -1], "solid": [1], "parallax": [0.4, 1] }] })));
+        let world = app.world_mut();
+        let drawn: Vec<Option<nge_render2d::Parallax>> = world.query_filtered::<Option<&nge_render2d::Parallax>, (With<Sprite>, With<ChildOf>)>().iter(world).map(|p| p.copied()).collect();
+        assert_eq!(drawn, [Some(nge_render2d::Parallax(Vec2::new(0.4, 1.0))); 3]);
+        assert_eq!(world.query_filtered::<(), (With<TileSolid>, With<nge_render2d::Parallax>)>().iter(world).count(), 0);
     }
 
     #[test]

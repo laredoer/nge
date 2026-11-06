@@ -4,7 +4,7 @@ use glam::{UVec2, Vec2, Vec4};
 use nge_core::{Ctx, Emit, Gfx, Viewport, wgpu};
 use nge_ecs::prelude::*;
 use nge_render2d::prelude::*;
-use nge_render2d::{SpriteImage, SpriteInstance, SpriteInstances, TextureId};
+use nge_render2d::{Parallax, SpriteImage, SpriteInstance, SpriteInstances, TextureId};
 
 const SIZE: u32 = 64;
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
@@ -126,6 +126,19 @@ fn sprite_instances_are_drawn_with_entity_sprites() {
     assert_eq!(at(&pixels, 30, 32), [255, 0, 0, 255], "红色额外实例在绿色精灵上面");
     assert_eq!(at(&pixels, 4, 32), [0, 255, 0, 255]);
     assert_eq!(at(&pixels, 48, 48), [0, 0, 255, 255]);
+}
+
+#[test]
+fn parallax_sprites_are_drawn_where_drawn_says() {
+    let Some(gfx) = gfx() else { return eprintln!("没有可用 GPU，跳过") };
+    let pixels = render(&gfx, |world| {
+        world.spawn(Camera2d { position: Vec2::new(1000.0, 0.0), ..Default::default() });
+        // 钉在屏幕上的（parallax 0）画在中间；同样位置的普通精灵跟着世界走，在视口外
+        world.spawn((Sprite::color(Vec2::splat(16.0), Vec4::new(1.0, 0.0, 0.0, 1.0)), Transform2d::default(), Parallax(Vec2::ZERO)));
+        world.spawn((Sprite::color(Vec2::splat(64.0), Vec4::new(0.0, 1.0, 0.0, 1.0)), Transform2d::default().with_z(-1.0)));
+    });
+    assert_eq!(at(&pixels, 32, 32), [255, 0, 0, 255]);
+    assert_ne!(at(&pixels, 4, 4), [0, 255, 0, 255], "普通精灵不在画面里");
 }
 
 #[test]

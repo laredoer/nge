@@ -4,6 +4,7 @@ description = "NSH 游戏引擎声明式场景：TSX 描述精灵，按 id 增�
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+license.workspace = true
 
 [dependencies]
 nge-core.workspace = true

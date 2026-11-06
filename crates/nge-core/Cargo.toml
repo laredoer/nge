@@ -4,6 +4,7 @@ description = "NSH 游戏引擎核心：Game trait、渲染线程帧循环、帧
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+license.workspace = true
 
 [dependencies]
 wgpu.workspace = true
