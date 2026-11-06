@@ -1,5 +1,7 @@
 // 平台跳跃的关卡数据，以及按数据生成地图、金币、移动平台、敌人。
 import type { ModelNode, SpriteNode, TilemapNode, Tween } from "../../ts/nge";
+import { tiled, type TiledMap } from "../../ts/tiled";
+import level3 from "./maps/level3.json";
 
 export const TILE = 32;
 export const ROWS = 15;
@@ -27,7 +29,8 @@ export interface Level {
   crate: number;
 }
 
-export const LEVELS: Level[] = [
+/** 用代码描述的关卡。 */
+const DESCRIBED: Level[] = [
   {
     name: "草原",
     cols: 80,
@@ -63,7 +66,7 @@ export const LEVELS: Level[] = [
 ];
 
 export interface Built {
-  tilemap: TilemapNode;
+  tilemaps: TilemapNode[];
   coins: { id: string; x: number; y: number }[];
   lifts: { node: SpriteNode; to: Tween["to"]; duration: number }[];
   enemies: { id: string; x: number; to: { x: number } }[];
@@ -106,18 +109,55 @@ export function build(level: Level): Built {
     ...level.groundCoins.map((c, i) => ({ id: `coin-g${i}`, x: (c + 0.5) * TILE, y: standY(c) + 28 })),
     ...level.extraCoins.map(([c, y], i) => ({ id: `coin-x${i}`, x: c * TILE, y })),
   ];
-  const lifts = level.lifts.map((l, i) => ({
-    node: { id: `lift-${i}`, x: l.col * TILE, y: l.y, w: 64, h: 16 } as SpriteNode,
-    to: l.to.col === undefined ? { y: l.to.y } : { x: l.to.col * TILE },
-    duration: l.duration,
-  }));
+  const lifts = level.lifts.map((l, i) => lift(`lift-${i}`, l.col * TILE, l.y, l.to.col === undefined ? { y: l.to.y } : { x: l.to.col * TILE }, l.duration));
   // id 以 enemy- 开头（Rust 按这个认），kinematic
   const enemies = level.enemies.map((c, i) => ({ id: `enemy-${i}`, x: (c + 0.5) * TILE, to: { x: (c + 3.5) * TILE } }));
   // 终点前转着的 3D 箱子（2.5D）：3D 相机跟着 2D 相机（`match2d`），模型的 (x, y) 就是关卡里的位置
-  const crate: ModelNode = { id: "crate", model: "asset:/@platformer/crate.glb", x: level.crate * TILE, y: 56, scale: 40, rotation: [20, 0, 0], spin: 60 };
-  const goal: SpriteNode = { id: "goal", x: (cols - 4) * TILE, y: 40, w: 16, h: 80, color: "#6bcb77", body: { kind: "fixed", sensor: true, collide: true } };
-  return { tilemap, coins, lifts, enemies, crate, goal, right: cols * TILE };
+  return { tilemaps: [tilemap], coins, lifts, enemies, crate: crateAt(level.crate * TILE, 56), goal: goalAt((cols - 4) * TILE, 40), right: cols * TILE };
 }
+
+const lift = (id: string, x: number, y: number, to: Tween["to"], duration: number) => ({ node: { id, x, y, w: 64, h: 16 } as SpriteNode, to, duration });
+const crateAt = (x: number, y: number): ModelNode => ({ id: "crate", model: "asset:/@platformer/crate.glb", x, y, scale: 40, rotation: [20, 0, 0], spin: 60 });
+const goalAt = (x: number, y: number): SpriteNode => ({ id: "goal", x, y, w: 16, h: 80, color: "#6bcb77", body: { kind: "fixed", sensor: true, collide: true } });
+
+/**
+ * 用 Tiled 画的关卡（见 docs/tiled.md）。图块集 `tiles` 和 tiles.png 一样；对象层里的对象按类型生成：
+ * `coin`、`enemy`（属性 `patrol`：往右巡逻几格）、`lift`（属性 `dx` / `dy`：往哪走，像素，Tiled 里 y 朝下；`duration`）、`crate`、`goal`。
+ */
+export function fromTiled(map: TiledMap): Built {
+  // 地图底行的顶边在 y = 0，和代码描述的关卡一样
+  const { tilemaps, objects, width } = tiled(map, { textures: { tiles: "asset:/@platformer/tiles.png" }, y: (map.height - 1) * map.tileheight });
+  const of = (type: string) => objects.filter((o) => o.type === type);
+  const num = (o: { properties: Record<string, unknown> }, name: string, fallback: number) => {
+    const v = o.properties[name];
+    return typeof v === "number" ? v : fallback;
+  };
+  const one = (type: string) => {
+    const found = of(type)[0];
+    if (found === undefined) throw new Error(`Tiled 关卡里没有 ${type}`);
+    return found;
+  };
+  const crate = one("crate");
+  const goal = one("goal");
+  return {
+    tilemaps,
+    coins: of("coin").map((o, i) => ({ id: `coin-t${i}`, x: o.x, y: o.y })),
+    lifts: of("lift").map((o, i) => {
+      const [dx, dy] = [num(o, "dx", 0), num(o, "dy", 0)];
+      if (dx !== 0 && dy !== 0) throw new Error(`Tiled 关卡的移动平台 ${o.id} 只能往一个方向走（dx 和 dy 只给一个）`);
+      return lift(`lift-${i}`, o.x, o.y, dy === 0 ? { x: o.x + dx } : { y: o.y - dy }, num(o, "duration", 2));
+    }),
+    enemies: of("enemy").map((o, i) => ({ id: `enemy-${i}`, x: o.x, to: { x: o.x + num(o, "patrol", 3) * TILE } })),
+    crate: crateAt(crate.x, crate.y),
+    goal: goalAt(goal.x, goal.y),
+    right: width,
+  };
+}
+
+export const LEVELS: { name: string; built: Built }[] = [
+  ...DESCRIBED.map((level) => ({ name: level.name, built: build(level) })),
+  { name: "云端", built: fromTiled(level3) },
+];
 
 /** 存档：解锁到第几关（从 1 数），每关最好的用时（秒，键是关卡号）。 */
 export interface Progress {

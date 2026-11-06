@@ -33,7 +33,7 @@
 ## TSX（`examples/platformer/App.tsx`）
 
 - 关卡用一个 `tileAt(列, 行)` 函数生成 `data`：两头石墙、一行草地带三个坑、六块木平台、一段石台阶。坑边正上方不放平台（角色 32 高，平台底边低于 96 时从地面起跳会撞头掉坑）。
-- 两块移动平台（见 [moving-platforms.md](moving-platforms.md)）：第三个坑加宽到 6 格，上面一块左右来回；第二个坑里一块上下来回，把角色送到高处的金币 `coin-x1`（放在坑里，降下来时底下没有地面，不会把人压进地里）。都是 kinematic 精灵，挂上时 `ref` 里各发一条 `repeat: -1, yoyo: true` 的补间（没写 `from`，来回的范围从平台当时的位置算，所以只在挂上和换关时发）。关卡数据在 `levels.ts`，见 [levels.md](levels.md)。
+- 两块移动平台（见 [moving-platforms.md](moving-platforms.md)）：第三个坑加宽到 6 格，上面一块左右来回；第二个坑里一块上下来回，把角色送到高处的金币 `coin-x1`（放在坑里，降下来时底下没有地面，不会把人压进地里）。都是 kinematic 精灵，挂上时 `ref` 里各发一条 `repeat: -1, yoyo: true` 的补间（没写 `from`，来回的范围从平台当时的位置算，所以只在挂上和换关时发）。关卡数据在 `levels.ts`，见 [levels.md](levels.md)；第三关是 `maps/level3.json`，见 [tiled.md](tiled.md)。
 - 金币是 `sensor` 的固定刚体；角色的 `body.collide` 开着，所以穿过金币时发 `collide`，TSX 把它从列表里去掉、`floatText` 飘「+1」。终点也是 sensor。
 - 相机 `follow: "player"`，`bounds` 是整张关卡（下面多留 160 让坑看得见）。
 

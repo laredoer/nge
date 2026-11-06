@@ -1,6 +1,6 @@
 import { batch, mount, type NativeComponentRef, platform, signal, Text, View } from "nsh";
 import { floatText, gameView, KeyButton, saved, sound, tween, type Scene, type SpriteNode } from "../../ts/nge";
-import { build, finish, LEVELS, NEW_PROGRESS, progressOf, ROWS, TILE, type Progress } from "./levels";
+import { finish, LEVELS, NEW_PROGRESS, progressOf, ROWS, TILE, type Progress } from "./levels";
 
 /** Rust 发的事件：掉出关卡或被敌人撞到送回起点、按 R 重新开始、踩到敌人。 */
 interface Events {
@@ -14,8 +14,6 @@ const GameView = gameView<{}, Events>({ events: ["respawn", "restart", "stomp"] 
 const COIN_SOUND = "asset:/@platformer/coin.wav";
 const WIN_SOUND = "asset:/@platformer/win.wav";
 
-/** 每关生成一次，换关时直接用。 */
-const BUILT = LEVELS.map(build);
 /** 通关后多久进下一关（毫秒）。 */
 const NEXT_DELAY = 1500;
 
@@ -54,7 +52,7 @@ function App() {
   let next: ReturnType<typeof setTimeout> | undefined;
   /** 换关后、新关卡建好（`levelStart`）之前：路上的事件是上一关的，不算。 */
   let switching = true;
-  const now = () => BUILT[level()];
+  const now = () => LEVELS[level()].built;
 
   // 在 levelStart 里发：平台、敌人已经建出来了
   const startTweens = () => {
@@ -90,7 +88,7 @@ function App() {
     lights: [{ id: "sun", kind: "directional", direction: [-1, -2, -1.5] }],
     ambient: { brightness: 0.35 },
     models: [now().crate],
-    tilemaps: [now().tilemap],
+    tilemaps: now().tilemaps,
     sprites: [
       ...BACKDROP,
       { id: "player", x: 3 * TILE, y: 16, w: 24, h: 32, z: 5, color: "#ff7a59", body: { fixedRotation: true, friction: 0, collide: true } },
