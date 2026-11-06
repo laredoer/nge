@@ -32,6 +32,11 @@ export interface SpriteNode {
   body?: BodyNode;
   /** 视差：相机移动时跟着挪的比例，默认 1。0.5 像远处的东西，0 钉在屏幕上，大于 1 像前景。`[x, y]` 两个方向分开，背景常用 `[0.3, 1]`（竖直方向跟着关卡）。按相机在原点时摆。 */
   parallax?: number | [number, number];
+  /**
+   * 沿世界的哪个轴一个挨一个重复铺满视野，步长是画出来的宽、高（含 scale，不管 rotation）。远山、云、无限长的地面用它，一个节点就够。
+   * 只有原来那一份能点（`tap`）、有碰撞体（`body`）。见 docs/repeat.md。
+   */
+  repeat?: "x" | "y" | "xy";
 }
 
 /** 精灵的刚体和碰撞体。尺寸是精灵本地的大小，会乘精灵的 scale。 */

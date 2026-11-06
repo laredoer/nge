@@ -4,7 +4,7 @@ use glam::{UVec2, Vec2, Vec4};
 use nge_core::{Ctx, Emit, Gfx, Viewport, wgpu};
 use nge_ecs::prelude::*;
 use nge_render2d::prelude::*;
-use nge_render2d::{Parallax, SpriteImage, SpriteInstance, SpriteInstances, TextureId};
+use nge_render2d::{Parallax, Repeat, SpriteImage, SpriteInstance, SpriteInstances, TextureId};
 
 const SIZE: u32 = 64;
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
@@ -139,6 +139,38 @@ fn parallax_sprites_are_drawn_where_drawn_says() {
     });
     assert_eq!(at(&pixels, 32, 32), [255, 0, 0, 255]);
     assert_ne!(at(&pixels, 4, 4), [0, 255, 0, 255], "普通精灵不在画面里");
+}
+
+#[test]
+fn repeated_sprites_fill_the_view_along_their_axis() {
+    let Some(gfx) = gfx() else { return eprintln!("没有可用 GPU，跳过") };
+    let pixels = render(&gfx, |world| {
+        // 相机挪到很远的地方，16 × 8 的条带横着铺满，竖着只有一行
+        world.spawn(Camera2d { position: Vec2::new(5000.0, 0.0), ..Default::default() });
+        world.spawn((Sprite::color(Vec2::new(16.0, 8.0), Vec4::new(1.0, 0.0, 0.0, 1.0)), Transform2d::default(), Repeat { x: true, y: false }));
+    });
+    for x in [1, 20, 32, 45, 62] {
+        assert_eq!(at(&pixels, x, 32), [255, 0, 0, 255], "x = {x}");
+    }
+    assert_ne!(at(&pixels, 32, 10), [255, 0, 0, 255], "竖着不重复");
+}
+
+#[test]
+fn repeated_sprites_tile_from_where_parallax_draws_them() {
+    let Some(gfx) = gfx() else { return eprintln!("没有可用 GPU，跳过") };
+    let pixels = render(&gfx, |world| {
+        // 竖直视差 0：钉在屏幕中间那一行；不按视差铺的话条带在 y = 0，远在视野下面
+        world.spawn(Camera2d { position: Vec2::new(5000.0, 1000.0), ..Default::default() });
+        world.spawn((
+            Sprite::color(Vec2::new(16.0, 8.0), Vec4::new(1.0, 0.0, 0.0, 1.0)),
+            Transform2d::default(),
+            Parallax(Vec2::new(1.0, 0.0)),
+            Repeat { x: true, y: false },
+        ));
+    });
+    for x in [1, 32, 62] {
+        assert_eq!(at(&pixels, x, 32), [255, 0, 0, 255], "x = {x}");
+    }
 }
 
 #[test]

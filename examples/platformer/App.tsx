@@ -17,13 +17,10 @@ const WIN_SOUND = "asset:/@platformer/win.wav";
 /** 通关后多久进下一关（毫秒）。 */
 const NEXT_DELAY = 1500;
 
-/** 视差背景：横向远山跟着相机挪 0.2、树挪 0.5，竖直方向跟着关卡（立在地上）。z < 0，画在 3D 箱子后面。横向按相机在 x = 0 时摆，所以远山铺得窄、树铺得宽。 */
+/** 视差背景：远山（一张能无缝接上的山丘贴图，横向重复铺满）跟着相机挪 0.2、树挪 0.5，竖直方向跟着关卡（立在地上）。z < 0，画在 3D 箱子后面。树按相机在 x = 0 时摆，所以铺得宽。 */
 const BACKDROP: SpriteNode[] = [
-  // 转 45° 的方块当山，下尖对齐地面的底边
-  ...Array.from({ length: 12 }, (_, i): SpriteNode => {
-    const w = [220, 260, 180][i % 3];
-    return { id: `mountain-${i}`, x: -600 + i * 170, y: w * Math.SQRT1_2 - TILE, w, rotation: 45, z: -10, color: "#232c42", parallax: [0.2, 1] };
-  }),
+  // 底边对齐地面的底边
+  { id: "hills", texture: "asset:/@platformer/hills.png", x: 0, y: 120 - TILE, w: 384, h: 240, z: -10, color: "#232c42", parallax: [0.2, 1], repeat: "x" },
   ...Array.from({ length: 24 }, (_, i): SpriteNode[] => {
     const x = -600 + i * 110 + (i % 4) * 17;
     return [

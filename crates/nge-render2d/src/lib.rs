@@ -7,6 +7,7 @@ mod batch;
 mod camera;
 mod gizmos;
 mod renderer;
+mod repeat;
 mod sprite;
 
 pub use assets::{AtlasId, Atlases, Grid, TextureId};
@@ -15,6 +16,7 @@ pub use camera::{Camera2d, DrawAt, Parallax, Transform2d, drawn};
 pub use nge_ecs::ClearColor;
 pub use gizmos::{GIZMO_Z, Gizmos};
 pub use renderer::{PointerWorld, Render2dPlugin};
+pub use repeat::{MAX_COPIES, Repeat};
 pub use sprite::{Sprite, SpriteImage, SpriteInstance, SpriteInstances};
 
 pub mod prelude {

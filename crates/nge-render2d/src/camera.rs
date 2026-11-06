@@ -36,6 +36,14 @@ impl Camera2d {
         Vec2::from_angle(self.rotation).rotate(local) + self.position
     }
 
+    /// 视野在世界里的外接框 (min, max)：四个角换到世界坐标后取最小、最大（相机转了时比视野大）。
+    pub fn visible(&self, size: Vec2) -> (Vec2, Vec2) {
+        // 和 view_proj 一样，视口至少 1 × 1
+        let size = size.max(Vec2::ONE);
+        let corners = [Vec2::ZERO, Vec2::new(size.x, 0.0), size, Vec2::new(0.0, size.y)].map(|c| self.screen_to_world(size, c));
+        corners.iter().fold((Vec2::INFINITY, Vec2::NEG_INFINITY), |(lo, hi), &c| (lo.min(c), hi.max(c)))
+    }
+
     /// 世界坐标 → 视图内坐标（左上角原点，y 朝下），[`Self::screen_to_world`] 的逆。
     pub fn world_to_screen(&self, size: Vec2, world: Vec2) -> Vec2 {
         let local = Vec2::from_angle(-self.rotation).rotate(world - self.position) * self.zoom.max(MIN_ZOOM);
@@ -96,6 +104,19 @@ mod tests {
         let ndc = Vec3::new(clip.x, clip.y, clip.z) / clip.w;
         // ndc → 视图坐标
         Vec2::new((ndc.x + 1.0) / 2.0 * size.x, (1.0 - ndc.y) / 2.0 * size.y)
+    }
+
+    #[test]
+    fn visible_is_the_box_around_the_rotated_zoomed_view() {
+        let size = Vec2::new(200.0, 100.0);
+        let cam = Camera2d { position: Vec2::new(10.0, 20.0), zoom: 2.0, rotation: 0.0 };
+        let (lo, hi) = cam.visible(size);
+        assert_close(lo, Vec2::new(-40.0, -5.0));
+        assert_close(hi, Vec2::new(60.0, 45.0));
+        // 转 90°：宽高对调
+        let (lo, hi) = Camera2d { rotation: std::f32::consts::FRAC_PI_2, ..cam }.visible(size);
+        assert_close(lo, Vec2::new(-15.0, -30.0));
+        assert_close(hi, Vec2::new(35.0, 70.0));
     }
 
     fn assert_close(a: Vec2, b: Vec2) {

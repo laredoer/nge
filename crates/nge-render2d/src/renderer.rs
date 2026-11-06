@@ -1,5 +1,7 @@
 //! 精灵渲染器：每帧从 World 提取精灵 → 合批 → 一个实例缓冲 + 每批一次 draw。
 
+use std::collections::HashSet;
+
 use bevy_ecs::prelude::*;
 use glam::{Vec2, Vec4};
 use nge_core::{Gfx, wgpu};
@@ -10,6 +12,7 @@ use nge_assets::{Assets, GpuImages, Image};
 use crate::assets::{Atlases, TextureId};
 use crate::batch::{Batch, Instance, Item, batch};
 use crate::camera::{Camera2d, DrawAt, Parallax, Transform2d, drawn};
+use crate::repeat::{Repeat, copies};
 use crate::sprite::{Sprite, SpriteInstances};
 
 const SHADER: &str = r#"
@@ -117,39 +120,65 @@ struct SpriteRenderer {
     items: Vec<Item>,
     instances: Vec<Instance>,
     batches: Vec<Batch>,
+    /// 重复的精灵这一帧画在哪些位置（复用）。
+    copies: Vec<Vec2>,
+    /// 份数太多时警告过的精灵（每个只警告一次）。
+    warned: HashSet<Entity>,
 }
 
 impl SpriteRenderer {
     fn new(layer: Layer) -> Self {
-        Self { layer, gpu: None, items: Vec::new(), instances: Vec::new(), batches: Vec::new() }
+        Self { layer, gpu: None, items: Vec::new(), instances: Vec::new(), batches: Vec::new(), copies: Vec::new(), warned: HashSet::new() }
     }
+}
+
+/// 转了 `rotation`（弧度）的 `size` 矩形的外接框的一半；`size` 可以是负的（镜像）。
+fn rotated_half(size: Vec2, rotation: f32) -> Vec2 {
+    let (s, c) = rotation.sin_cos();
+    Vec2::new(size.x.abs() * c.abs() + size.y.abs() * s.abs(), size.x.abs() * s.abs() + size.y.abs() * c.abs()) / 2.0
 }
 
 impl Renderer for SpriteRenderer {
     fn render(&mut self, world: &mut World, gfx: &Gfx, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView) {
         let gpu = self.gpu.get_or_insert_with(|| Gpu::new(gfx));
-        let mut sprites = world.query::<(&Sprite, &Transform2d, Option<&DrawAt>, Option<&Parallax>)>();
+        let mut sprites = world.query::<(Entity, &Sprite, &Transform2d, Option<&DrawAt>, Option<&Parallax>, Option<&Repeat>)>();
         let camera = world.query::<&Camera2d>().iter(world).next().copied().unwrap_or_default();
         world.resource_scope(|world, mut images: Mut<GpuImages>| images.sync(gfx, world.resource::<Assets<Image>>()));
         let (images, atlases, gpu_images) = (world.resource::<Assets<Image>>(), world.resource::<Atlases>(), world.resource::<GpuImages>());
         let extra = world.resource::<SpriteInstances>();
 
         self.items.clear();
-        for (sprite, transform, draw, parallax) in sprites.iter(world).filter(|(_, t, ..)| self.layer.contains(t.z)) {
+        let view = camera.visible(Vec2::from(gfx.viewport.size));
+        for (entity, sprite, transform, draw, parallax, repeat) in sprites.iter(world).filter(|(_, _, t, ..)| self.layer.contains(t.z)) {
             let Transform2d { translation: pos, rotation, .. } = drawn(transform, draw, parallax, &camera);
             let region = atlases.region(images, sprite.image);
             let size = sprite.size.unwrap_or(region.size) * transform.scale;
-            self.items.push(Item {
-                texture: region.texture,
-                instance: Instance {
-                    pos: pos.into(),
-                    size: size.into(),
-                    rotation_z: [rotation, transform.z],
-                    uv: region.uv.into(),
-                    color: to_rgba8(sprite.color),
-                    _pad: 0,
-                },
-            });
+            self.copies.clear();
+            // 没写大小、贴图还在加载时大小是 1×1，先不铺
+            let sized = sprite.size.is_some() || images.size(region.texture).is_some();
+            match repeat {
+                Some(&repeat) if sized => {
+                    if let Err(n) = copies(pos, size.abs(), rotated_half(size, rotation), repeat, view, &mut self.copies)
+                        && self.warned.insert(entity)
+                    {
+                        log::warn!("重复的精灵一帧要画 {n} 份（步长 {}，视野 {} × {}），超过上限：只画原来那一份", size.abs(), view.1.x - view.0.x, view.1.y - view.0.y);
+                    }
+                }
+                _ => self.copies.push(pos),
+            }
+            for &pos in &self.copies {
+                self.items.push(Item {
+                    texture: region.texture,
+                    instance: Instance {
+                        pos: pos.into(),
+                        size: size.into(),
+                        rotation_z: [rotation, transform.z],
+                        uv: region.uv.into(),
+                        color: to_rgba8(sprite.color),
+                        _pad: 0,
+                    },
+                });
+            }
         }
         // 同一张图的额外实例通常是连着放的（一个发射器一批），只在图变了时重新查区域
         let mut last = None;
@@ -319,3 +348,19 @@ fn instance_buffer(device: &wgpu::Device, capacity: u64) -> wgpu::Buffer {
     })
 }
 
+
+#[cfg(test)]
+mod tests {
+    use glam::Vec2;
+
+    use super::rotated_half;
+
+    #[test]
+    fn rotated_half_is_half_the_box_around_the_turned_sprite() {
+        let close = |a: Vec2, b: Vec2| assert!((a - b).length() < 1e-4, "{a} {b}");
+        close(rotated_half(Vec2::new(40.0, 20.0), 0.0), Vec2::new(20.0, 10.0));
+        close(rotated_half(Vec2::new(-40.0, 20.0), std::f32::consts::FRAC_PI_2), Vec2::new(10.0, 20.0));
+        let d = 10.0 * std::f32::consts::SQRT_2;
+        close(rotated_half(Vec2::splat(20.0), std::f32::consts::FRAC_PI_4), Vec2::splat(d));
+    }
+}

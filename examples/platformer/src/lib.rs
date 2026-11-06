@@ -528,6 +528,7 @@ mod tests {
         assert!(tsx.contains("asset:/@platformer/coin.wav") && tsx.contains("asset:/@platformer/win.wav"));
         assert!(tsx.contains(&format!("id: `{ENEMY}${{i}}`")), "levels.ts 的敌人 id 用 {ENEMY} 开头");
         assert!(uris.contains(&"asset:/@platformer/crate.glb") && tsx.contains("asset:/@platformer/crate.glb"), "2.5D 的箱子");
+        assert!(uris.contains(&"asset:/@platformer/hills.png") && tsx.contains("asset:/@platformer/hills.png"), "横向重复的远山");
     }
 
     #[test]

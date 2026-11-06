@@ -98,6 +98,23 @@ pub struct SpriteNode {
     pub body: Option<BodyNode>,
     /// 视差：相机移动时跟着挪的比例，不填是 1（见 docs/parallax.md）。
     pub parallax: Option<ParallaxNode>,
+    /// 沿哪个轴一个挨一个重复铺满视野（见 docs/repeat.md）。
+    pub repeat: Option<RepeatNode>,
+}
+
+/// `repeat`：`"x"`、`"y"` 或 `"xy"`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RepeatNode {
+    X,
+    Y,
+    Xy,
+}
+
+impl From<RepeatNode> for nge_render2d::Repeat {
+    fn from(node: RepeatNode) -> Self {
+        Self { x: node != RepeatNode::Y, y: node != RepeatNode::X }
+    }
 }
 
 /// `parallax`：一个数（x、y 一样），或者 `[x, y]`。
