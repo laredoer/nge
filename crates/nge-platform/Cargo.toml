@@ -4,6 +4,7 @@ description = "NSH 游戏引擎平台层：把引擎挂成 NSH 原生组件（ma
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+license.workspace = true
 
 [dependencies]
 nge-core.workspace = true

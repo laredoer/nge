@@ -4,6 +4,7 @@ description = "NSH 游戏引擎 ECS 层：基于 bevy_ecs 的 App、调度、时
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+license.workspace = true
 
 [dependencies]
 nge-core.workspace = true
