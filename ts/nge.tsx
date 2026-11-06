@@ -137,6 +137,44 @@ export interface ModelNode {
   spin?: number;
   /** 可点击：点中时发 tap 事件（带 3D 命中点）。 */
   tap?: boolean;
+  /**
+   * 跟着这个精灵（通常是 2D 刚体）走和转，见 docs/joints.md。这时 x、y、z 是精灵坐标里的偏移（x、y 跟着精灵转），
+   * `rotation` 在精灵的角度上再转，`spin` 不起作用。精灵不存在时模型留在原地。
+   */
+  attach?: string;
+}
+
+/**
+ * 关节：把两个带 body 的精灵（或一个精灵和世界）连起来，见 docs/joints.md。
+ * 锚点、轴都是世界坐标，按两头精灵**声明的**位置和角度换算；精灵后来才有、删掉了，关节跟着连上、拆掉。
+ */
+export interface JointNode {
+  id: string;
+  /** 精灵 id；不写时连到世界上。 */
+  a?: string;
+  b: string;
+  /** fixed 焊死；revolute 绕支点转；prismatic 沿 axis 滑、不转；rope 最远 length；spring 拉向 length。 */
+  kind: "fixed" | "revolute" | "prismatic" | "rope" | "spring";
+  /**
+   * fixed / revolute / prismatic 只有一个支点：只写 anchorA 或 anchorB 时两头都用它，都不写是 b 的位置。
+   * rope / spring 两头各一个：anchorA 不写是 a 的位置（连世界时必须写），anchorB 不写是 b 的位置。
+   */
+  anchorA?: [number, number];
+  anchorB?: [number, number];
+  /** prismatic 滑的方向，默认 [1, 0]。 */
+  axis?: [number, number];
+  /** revolute：b 相对 a 能转的角度范围（度，从声明时算起）；prismatic：沿轴的范围（point，从支点算起）。 */
+  limits?: [number, number];
+  /** 马达：revolute 的 speed 是度 / 秒，prismatic 是 point / s；maxForce 不写时不限。 */
+  motor?: { speed: number; maxForce?: number };
+  /** rope 的最大长度、spring 的静止长度；不写时是两个锚点声明时的距离。 */
+  length?: number;
+  /** spring 的劲度，按加速度算、和质量无关，默认 100。 */
+  stiffness?: number;
+  /** spring 的阻尼，默认 10。 */
+  damping?: number;
+  /** 连着的两个精灵之间还碰撞，默认不碰。 */
+  collide?: boolean;
 }
 
 /** 3D 相机：在 (x, y, z) 看向 target。不填时在 (0, 2, 6) 看向原点。 */
@@ -223,6 +261,7 @@ export interface Scene {
   ambient?: { color?: string; brightness?: number };
   /** 重力（point / s²），默认 [0, -981]。 */
   physics?: { gravity?: [number, number] };
+  joints?: JointNode[];
   audio?: AudioNode;
   /** 时间缩放，默认 1；0 暂停（物理、补间、动画、粒子、相机平滑都停），0.5 慢一半。声音不受影响。 */
   timeScale?: number;

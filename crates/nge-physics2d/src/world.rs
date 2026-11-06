@@ -12,21 +12,26 @@ use rapier2d::prelude::{
 };
 use rapier2d::prelude::{Cuboid, QueryFilter as RapierFilter, Ray};
 
+use crate::joint::Linked;
 use crate::{Collider, Collision, Contact, Impulse, LockRotation, MAX_STEPS, QueryFilter, RayHit, RigidBody, STEP, Shape, Velocity};
 
 /// rapier 的世界，加上实体和刚体 / 碰撞体的对应关系。
 #[derive(Resource)]
 pub struct Physics {
-    world: PhysicsWorld,
-    entities: HashMap<Entity, Handles>,
+    pub(crate) world: PhysicsWorld,
+    pub(crate) entities: HashMap<Entity, Handles>,
+    /// 关节实体 → 建好的关节。
+    pub(crate) joints: HashMap<Entity, Linked>,
+    /// 连到世界上的关节用的固定刚体（原点，没有碰撞体），用到时才建。
+    pub(crate) ground: Option<RigidBodyHandle>,
     /// 刚删掉的碰撞体：rapier 下一步才发它们的停止接触，那时已经查不到 user_data 了。
     removed: HashMap<ColliderHandle, Entity>,
     accumulator: f32,
 }
 
 /// 一个实体在物理里的东西，以及上一次和组件同步时的值（用来判断游戏改没改）。
-struct Handles {
-    body: Option<RigidBodyHandle>,
+pub(crate) struct Handles {
+    pub(crate) body: Option<RigidBodyHandle>,
     collider: Option<ColliderHandle>,
     kind: Option<RigidBody>,
     shape: Option<Collider>,
@@ -44,7 +49,7 @@ impl Physics {
         world.gravity = vector(gravity);
         world.integration_parameters.dt = STEP;
         world.integration_parameters.length_unit = pixels_per_meter;
-        Self { world, entities: HashMap::new(), removed: HashMap::new(), accumulator: 0.0 }
+        Self { world, entities: HashMap::new(), joints: HashMap::new(), ground: None, removed: HashMap::new(), accumulator: 0.0 }
     }
 
     pub fn gravity(&self) -> Vec2 {
@@ -115,9 +120,19 @@ impl Physics {
         self.world.intersect_shape(Pose::from_translation(vector(center)), &shape, self.filter(filter)).filter_map(|(c, _)| self.entity_of(c)).collect()
     }
 
-    /// （刚体数，碰撞体数）。
+    /// （刚体数，碰撞体数）。连到世界上的关节用的固定刚体不算。
     pub fn len(&self) -> (usize, usize) {
-        (self.world.bodies.len(), self.world.colliders.len())
+        (self.world.bodies.len() - usize::from(self.ground.is_some()), self.world.colliders.len())
+    }
+
+    /// 这个关节实体已经连上了（两头都是刚体、参数没问题）。
+    pub fn is_linked(&self, joint: Entity) -> bool {
+        self.joints.get(&joint).is_some_and(Linked::is_linked)
+    }
+
+    /// 建到物理里的关节数。
+    pub fn joints(&self) -> usize {
+        self.world.impulse_joints.len()
     }
 
     /// 每个碰撞体：（实体，形状，刚体种类，是不是 sensor，物理里的位置和角度）。
@@ -161,7 +176,7 @@ impl Physics {
     }
 }
 
-fn vector(v: Vec2) -> Vector {
+pub(crate) fn vector(v: Vec2) -> Vector {
     Vector::new(v.x, v.y)
 }
 

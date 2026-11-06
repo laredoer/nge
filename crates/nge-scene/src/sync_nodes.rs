@@ -7,6 +7,7 @@ use nge_render2d::Transform2d;
 use nge_render3d::{AmbientLight, Camera3d, DirectionalLight, GltfModel, Model3d, PointLight, Transform3d};
 use nge_text::{ScreenText, Text2d};
 
+use crate::attach::Attach;
 use crate::behave::{Follow, Spin, Tappable};
 use crate::match2d::Match2d;
 use crate::nodes::{AmbientNode, Camera3dNode, EmitterNode, LightKind, LightNode, ModelNode, Particles, TextNode};
@@ -89,12 +90,17 @@ pub(crate) fn sync_models(mut commands: Commands, scene: Res<Scene>, mut assets:
             scale: Vec3::splat(node.scale),
         };
         let mut entity = commands.entity(entity);
-        entity.remove::<(Spin, Tappable)>().insert(transform);
+        entity.remove::<(Spin, Tappable, Attach)>().insert(transform);
         // 模型没换时保留已经展开的 Model3d，不闪
         if before.is_none_or(|b| b.model != node.model) {
             entity.remove::<Model3d>().insert(GltfModel(assets.model(&node.model)));
         }
-        if node.spin != 0.0 {
+        if let Some(sprite) = &node.attach {
+            entity.insert(Attach { sprite: sprite.clone(), offset: transform.translation, rotation: transform.rotation });
+            if node.spin != 0.0 {
+                log::warn!("模型 {:?} 跟着精灵走，spin 不生效", node.id);
+            }
+        } else if node.spin != 0.0 {
             entity.insert(Spin(node.spin.to_radians()));
         }
         if node.tap {

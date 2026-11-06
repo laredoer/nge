@@ -5,9 +5,11 @@
 //! 节点一旦在 TSX 里改了，就以 TSX 声明的为准整体覆盖。
 
 mod anim;
+mod attach;
 mod audio;
 mod behave;
 mod camera;
+mod joints;
 mod level;
 mod match2d;
 mod nodes;
@@ -33,6 +35,7 @@ pub use anim::{ANIM_END, AnimEnd, AnimNode, Ease, FrameAnimation, TWEEN, TWEEN_E
 pub use audio::{AudioNode, PlaySound, SOUND};
 pub use behave::{Spin, Tappable};
 pub use camera::{SHAKE, Shake};
+pub use joints::{JointKindName, JointNode, MotorNode};
 pub use level::{LEVEL_START, LevelStart};
 pub use nodes::{AmbientNode, AnchorName, BURST, Burst, Camera3dNode, EmitterNode, FLOAT_TEXT, FloatText, LightKind, LightNode, ModelNode, Particles, TextNode};
 pub use physics::{BodyKind, BodyNode, COLLIDE, Collide, PUSH, PhysicsNode, Push, ShapeName};
@@ -121,6 +124,7 @@ impl Plugin for ScenePlugin {
             sync_nodes::sync_lights,
             sync_nodes::sync_camera3d,
             physics::sync_gravity,
+            joints::sync_joints,
             audio::sync_audio,
         );
         app.insert_resource(textures)
@@ -145,6 +149,9 @@ impl Plugin for ScenePlugin {
             .add_systems(Update, (behave::spin, behave::tap, behave::burst, behave::float_text, physics::push, audio::play_sound, anim::animate))
             // 补间最后写，盖过 spin / push 这一帧的改动
             .add_systems(Update, (anim::start_tweens, anim::tween).chain().after(behave::spin).after(physics::push))
+            // 精灵和关节都同步完了再连：关节可以在精灵之后才出现，反过来也行
+            .add_systems(PostUpdate, joints::resolve.before(PhysicsStepped))
+            .add_systems(PostUpdate, attach::attach.after(PhysicsStepped).before(behave::follow))
             .add_systems(PostUpdate, (behave::follow, physics::collide.after(PhysicsStepped), camera::camera_rig.after(PhysicsStepped), match2d::match_2d.after(camera::camera_rig)));
     }
 }

@@ -140,6 +140,8 @@ pub struct ModelNode {
     pub spin: f32,
     #[serde(default)]
     pub tap: bool,
+    /// 跟着这个精灵走（见 docs/joints.md）：x、y、z 成了精灵坐标里的偏移，`rotation` 在精灵的角度上再转。
+    pub attach: Option<String>,
 }
 
 fn one() -> f32 {

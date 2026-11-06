@@ -126,7 +126,7 @@ mod tests {
     fn rotation_widens_what_counts_as_visible() {
         // 转了 90° 的 40 × 200：外接框半宽 100，离视野左边 150 的那份也露出来
         let mut out = Vec::new();
-        copies(Vec2::new(-150.0, 0.0), Vec2::new(40.0, 200.0), Vec2::new(100.0, 20.0), X, VIEW, &mut out);
+        copies(Vec2::new(-150.0, 0.0), Vec2::new(40.0, 200.0), Vec2::new(100.0, 20.0), X, VIEW, &mut out).unwrap();
         assert_eq!(out.first().map(|p| p.x), Some(-190.0));
     }
 }

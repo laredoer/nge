@@ -2,9 +2,9 @@
 
 use bevy_ecs::prelude::*;
 use glam::{Vec2, Vec4};
-use nge_render2d::{DrawAt, Gizmos, SpriteInstances};
+use nge_render2d::{DrawAt, Gizmos, SpriteInstances, Transform2d};
 
-use crate::{Collider, Physics, RigidBody, Shape};
+use crate::{Collider, Joint, Physics, RigidBody, Shape};
 
 /// 开关物理调试视图，默认关。
 #[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -17,13 +17,20 @@ pub(crate) const FIXED: Vec4 = Vec4::new(0.6, 0.6, 0.6, 1.0);
 pub(crate) const DYNAMIC: Vec4 = Vec4::new(0.3, 1.0, 0.4, 1.0);
 pub(crate) const KINEMATIC: Vec4 = Vec4::new(0.3, 0.6, 1.0, 1.0);
 pub(crate) const SENSOR: Vec4 = Vec4::new(1.0, 0.85, 0.2, 0.6);
+pub(crate) const JOINT: Vec4 = Vec4::new(1.0, 0.4, 0.9, 1.0);
 
 pub(crate) fn enabled(debug: Res<PhysicsDebug>) -> bool {
     debug.enabled
 }
 
 /// 物理一步之后画；有 `DrawAt` 的画在插值过的位置上，和精灵贴着。没有 2D 渲染时什么也不做。
-pub(crate) fn draw(physics: Res<Physics>, drawn: Query<Option<&DrawAt>, With<Collider>>, instances: Option<ResMut<SpriteInstances>>) {
+pub(crate) fn draw(
+    physics: Res<Physics>,
+    drawn: Query<Option<&DrawAt>, With<Collider>>,
+    joints: Query<(Entity, &Joint)>,
+    poses: Query<(&Transform2d, Option<&DrawAt>)>,
+    instances: Option<ResMut<SpriteInstances>>,
+) {
     let Some(instances) = instances else { return };
     let mut gizmos = Gizmos::from(instances);
     // 按实体排、sensor 最后画：增删实体时重叠处谁盖住谁不跟着变
@@ -47,5 +54,22 @@ pub(crate) fn draw(physics: Res<Physics>, drawn: Query<Option<&DrawAt>, With<Col
                 gizmos.line(center, center + Vec2::from_angle(rotation) * r.abs(), WIDTH, color);
             }
         }
+    }
+    // 连上了的关节：两个锚点之间一条线，锚点各一个小圆
+    let world = |entity: Option<Entity>, anchor: Vec2| match entity {
+        None => Some(anchor),
+        Some(e) => poses.get(e).ok().map(|(t, d)| {
+            let (center, rotation) = d.map_or((t.translation, t.rotation), |d| (d.translation, d.rotation));
+            center + Vec2::from_angle(rotation).rotate(anchor)
+        }),
+    };
+    for (entity, joint) in &joints {
+        if !physics.is_linked(entity) {
+            continue;
+        }
+        let (Some(a), Some(b)) = (world(joint.a, joint.anchor_a), world(Some(joint.b), joint.anchor_b)) else { continue };
+        gizmos.line(a, b, WIDTH, JOINT);
+        gizmos.circle(a, 2.0, WIDTH, JOINT);
+        gizmos.circle(b, 2.0, WIDTH, JOINT);
     }
 }

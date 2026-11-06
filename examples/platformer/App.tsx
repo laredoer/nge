@@ -84,7 +84,8 @@ function App() {
     camera3d: { match2d: true },
     lights: [{ id: "sun", kind: "directional", direction: [-1, -2, -1.5] }],
     ambient: { brightness: 0.35 },
-    models: [now().crate],
+    models: [now().crate.model],
+    joints: now().swing.joints,
     tilemaps: now().tilemaps,
     sprites: [
       ...BACKDROP,
@@ -99,6 +100,8 @@ function App() {
           ? { id, x, y: 12, w: 24, h: 24, z: 4, color: "#00000000" }
           : { id, x, y: 12, w: 24, h: 24, z: 4, color: "#9b59b6", body: { kind: "kinematic", friction: 0 } },
       ),
+      now().crate.body,
+      ...now().swing.sprites,
       now().goal,
     ],
   });

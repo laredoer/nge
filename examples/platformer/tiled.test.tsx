@@ -1,7 +1,7 @@
 // `tiled()`：Tiled 地图转成瓦片地图和对象（见 docs/tiled.md），和平台跳跃用 Tiled 画的第三关。
 import { expect, test } from "nsh/test";
 import { tiled, type TiledMap } from "../../ts/tiled";
-import { fromTiled, LEVELS, TILE } from "./levels";
+import { fromTiled, LEVELS, LINKS, TILE } from "./levels";
 import level3 from "./maps/level3.json";
 
 const base = (): TiledMap => ({
@@ -110,5 +110,23 @@ test("第三关：Tiled 画的地图生成和代码描述的关卡一样的东�
   expect(built.coins[0]).toEqual({ id: "coin-t0", x: 8 * TILE, y: 156 });
   expect(built.enemies[0]).toEqual({ id: "enemy-0", x: 18.5 * TILE, to: { x: 21.5 * TILE } });
   expect(built.lifts.map((l) => [l.node.x, l.node.y, l.to, l.duration])).toEqual([[29 * TILE, -8, { x: 33 * TILE }, 2.2]]);
-  expect([built.goal.x, built.goal.y, built.crate.x, built.crate.y, built.right]).toEqual([56 * TILE, 40, 54.5 * TILE, 56, 60 * TILE]);
+  expect([built.goal.x, built.goal.y, built.crate.body.x, built.crate.body.y, built.right]).toEqual([56 * TILE, 40, 54.5 * TILE, 56, 60 * TILE]);
+  // 第一个坑上面挂着铁链
+  expect(built.swing.joints[0]).toEqual({ id: "swing-j0", a: undefined, b: "swing-0", kind: "revolute", anchorA: [13.5 * TILE, 150] });
+});
+
+test("铁链一节节挂着，3D 箱子跟着看不见的刚体", () => {
+  for (const { built } of LEVELS) {
+    const { sprites, joints } = built.swing;
+    expect(sprites.length).toBe(LINKS + 1);
+    expect(joints.map((j) => [j.a, j.b])).toEqual(sprites.map((s, i) => [i === 0 ? undefined : sprites[i - 1].id, s.id]));
+    // 每个连接点在上一节的底边、这一节的顶边
+    for (const [i, j] of joints.entries()) {
+      const s = sprites[i];
+      expect(j.anchorA![1]).toBe(s.y! + (s.h ?? s.w!) / 2);
+    }
+    expect(sprites.every((s) => s.body !== undefined)).toBe(true);
+    expect(built.crate.model.attach).toBe(built.crate.body.id);
+    expect(built.crate.body.body?.kind ?? "dynamic").toBe("dynamic");
+  }
 });

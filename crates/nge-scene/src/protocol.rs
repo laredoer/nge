@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::anim::AnimNode;
 use crate::audio::AudioNode;
+use crate::joints::JointNode;
 use crate::nodes::{AmbientNode, Camera3dNode, EmitterNode, LightNode, ModelNode, TextNode};
 use crate::physics::{BodyNode, PhysicsNode};
 use crate::tilemap::TilemapNode;
@@ -28,6 +29,8 @@ pub struct Scene {
     pub lights: Vec<LightNode>,
     pub ambient: Option<AmbientNode>,
     pub physics: Option<PhysicsNode>,
+    /// 关节（见 docs/joints.md）。
+    pub joints: Vec<JointNode>,
     pub audio: Option<AudioNode>,
     /// 时间缩放，1 正常、0 暂停。
     #[serde(rename = "timeScale")]
