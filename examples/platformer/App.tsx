@@ -1,8 +1,9 @@
 import { batch, mount, type NativeComponentRef, platform, signal, Text, View } from "nsh";
-import { floatText, gameView, KeyButton, push, saved, sound, tween, type Scene, type SpriteNode } from "../../ts/nge";
+import { floatText, gameView, KeyButton, push, saveSlots, sound, tween, type Scene, type SpriteNode } from "../../ts/nge";
 import { COIN_SHADER, FLASH, FLASH_MS, levelAudio, night, portalOver, SHADERS } from "./effects";
+import { NEW_SAVE, nextSlot, SAVE_MIGRATIONS, SAVE_VERSION, saveDataOf, saveSummary, SLOTS } from "./savefile";
 import { hpBar, outOfHearts, TITLE_HOLD_MS, titleBubble } from "./hud";
-import { finish, flagOn, LEVELS, NEW_PROGRESS, progressOf, ROWS, TILE, TOWER_TRIGGER, towerAt, type Progress } from "./levels";
+import { finish, flagOn, LEVELS, ROWS, TILE, TOWER_TRIGGER, towerAt, type Progress } from "./levels";
 
 /** Rust 发的事件：掉出关卡或被敌人撞到送回起点、按 R 重新开始、踩到敌人。 */
 interface Events {
@@ -47,8 +48,27 @@ function App() {
   const level = () => current().index;
   /** 场景的 `level`：「关卡号-局数」。 */
   const levelId = () => `${level() + 1}-${current().round}`;
-  const stored = saved<Progress>("platformer", NEW_PROGRESS);
-  const progress = () => progressOf(stored());
+  /** 三个存档位（见 docs/saves.md）：以前 `saved("platformer")` 存的进度自动进第一个。 */
+  const slots = saveSlots({
+    key: "platformer",
+    slots: SLOTS,
+    version: SAVE_VERSION,
+    migrations: SAVE_MIGRATIONS,
+    parse: saveDataOf,
+    summary: saveSummary,
+    adopt: { key: "platformer", version: 1 },
+  });
+  /** 当前存档位（从 0 数）和它的进度。 */
+  const slot = signal(0);
+  const progress = signal<Progress>(NEW_SAVE.progress);
+  /** 当前存档位坏了：不覆盖，直到在它上面通关一次。`"newer"` 是更新的游戏版本存的，永远不覆盖。 */
+  const brokenSlot = signal<false | "broken" | "newer">(false);
+  /** 要换到的存档位：连着按 S 时按它往下数，不等读档回来。 */
+  let target = 0;
+  /** 换存档位的次数：读档晚到时只认最后一次。 */
+  let picking = 0;
+  /** 读完存档位以后才存：开局那一关的 levelStart 不能把还没读出来的档覆盖掉。 */
+  let picked = false;
   const taken = signal<string[]>([]);
   const falls = signal(0);
   const won = signal<number | null>(null);
@@ -99,6 +119,33 @@ function App() {
       current.set({ index, round: current().round + 1 });
     });
   };
+
+  /** 存进当前存档位：进度和现在这关。 */
+  const persist = () => {
+    if (!picked || brokenSlot() === "newer") return;
+    slots.save(slot(), { progress: progress(), level: level() }).then(
+      () => brokenSlot.set(false),
+      (e) => console.warn(`存档失败: ${e}`),
+    );
+  };
+  /** 换到第 `index` 个存档位：读它的进度，从它存的那关开始。 */
+  const pick = (index: number) => {
+    target = index;
+    const ticket = ++picking;
+    slots.load(index).then((r) => {
+      if (ticket !== picking) return;
+      picked = true;
+      if (r.status === "broken") console.warn(`存档 ${index + 1} 坏了: ${r.reason}`);
+      const data = r.status === "ok" ? r.data : NEW_SAVE;
+      batch(() => {
+        slot.set(index);
+        brokenSlot.set(r.status !== "broken" ? false : r.newer ? "newer" : "broken");
+        progress.set(data.progress);
+      });
+      play(data.level);
+    });
+  };
+  slots.loaded.then(() => pick(slots.latest() ?? 0));
 
   /** 这一关的那摞 3D 箱子（没有就是 null）：id 带着摞的次数，重新开始时重建。 */
   const tower = () => {
@@ -166,7 +213,7 @@ function App() {
   return (
     <View class="flex-1 bg-black">
       <Text class="text-white p-4">
-        {platform.desktop ? `← → / A D / 手柄 移动 · 空格 / ↑ / A 跳 · R 重来 · 数字键选关（解锁了 ${progress().unlocked} 关）· Q 调试 · P 性能 · ` : ""}第 {level() + 1} 关 {LEVELS[level()].name} · 金币 {taken().length} / {now().coins.length} · 失手 {falls()} 次
+        {platform.desktop ? `← → / A D / 手柄 移动 · 空格 / ↑ / A 跳 · R 重来 · 数字键选关（解锁了 ${progress().unlocked} 关）· S 换存档 · Q 调试 · P 性能 · ` : ""}存档 {slot() + 1}{brokenSlot() === "newer" ? "（新版本存的，不覆盖）" : brokenSlot() ? "（坏了）" : ""} · 第 {level() + 1} 关 {LEVELS[level()].name} · 金币 {taken().length} / {now().coins.length} · 失手 {falls()} 次
         {best() === undefined ? "" : ` · 最好 ${best()} 秒`}
         {won() === null ? "" : ` · 通关！用时 ${won()} 秒`}
       </Text>
@@ -181,6 +228,8 @@ function App() {
           startTweens();
           clearTimeout(titleEnd);
           title.set(LEVELS[level()].name);
+          // 换关时记下打到第几关；坏了的存档位不覆盖
+          if (!brokenSlot()) persist();
         }}
         onCollide={(e) => {
           if (switching || !e.started || (e.a !== "player" && e.b !== "player")) return;
@@ -194,13 +243,15 @@ function App() {
           } else if (other === "goal" && won() === null) {
             const seconds = Math.round((Date.now() - started) / 100) / 10;
             won.set(seconds);
-            stored.set(finish(progress(), level(), seconds));
+            progress.set(finish(progress(), level(), seconds));
+            persist();
             sound(game, { src: WIN_SOUND, volume: 0.6 });
             // 最后一关之后回到第一关
             next = setTimeout(() => play((level() + 1) % LEVELS.length), NEXT_DELAY);
           }
         }}
         onKey={(e) => {
+          if (e.down && !e.repeat && e.code === "KeyS") return pick(nextSlot(target));
           // Digit1 … Digit9：选已经解锁的关
           const n = /^Digit([1-9])$/.exec(e.code)?.[1];
           if (!e.down || e.repeat || n === undefined) return;

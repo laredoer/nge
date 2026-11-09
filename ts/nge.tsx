@@ -729,6 +729,9 @@ export function gameView<P extends object = {}, E extends object = {}>(
   };
 }
 
+// 存档槽见 docs/saves.md
+export { saveSlots, type LoadResult, type SaveSlots, type SaveSlotsOptions, type SaveStore, type SlotInfo } from "./saves";
+
 /**
  * 存在设备上的 signal（nsh 的 `Storage`，键名是 `nge:<key>`）：一开始是 `initial`，读到存档后换成存的值；
  * `set` / `update` 时一起写进存档。读到存档之前就 `set` 过的，以 `set` 的为准（存档整个被换掉，读档只要几毫秒，一般碰不到）。
