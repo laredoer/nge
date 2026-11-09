@@ -6,7 +6,7 @@ use glam::{Quat, UVec2, Vec2, Vec3, Vec4};
 use nge_core::{Ctx, Emit, Gfx, Viewport, wgpu};
 use nge_ecs::prelude::*;
 use nge_render3d::prelude::*;
-use nge_render3d::{AssetPlugin, AssetSource, ImageId, MemorySource};
+use nge_render3d::{AssetPlugin, AssetSource, ImageId, MemorySource, Shadows};
 
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 const SIZE: u32 = 64;
@@ -317,7 +317,7 @@ fn gltf_model_renders_with_texture() {
             world.spawn((Mesh3d { mesh: ground, material: grass }, Transform3d::default()));
             world.spawn((Camera3d::default(), Transform3d::from_xyz(2.5, 2.2, 3.5).looking_at(Vec3::new(0.0, 0.6, 0.0), Vec3::Y)));
             world.spawn(DirectionalLight { direction: Vec3::new(-1.0, -2.0, -1.5), ..Default::default() });
-            world.spawn((PointLight { color: Vec3::new(1.0, 0.8, 0.5), intensity: 6.0, range: 8.0 }, Transform3d::from_xyz(-1.5, 1.5, 1.5)));
+            world.spawn((PointLight { color: Vec3::new(1.0, 0.8, 0.5), intensity: 6.0, range: 8.0, shadows: false }, Transform3d::from_xyz(-1.5, 1.5, 1.5)));
         });
     }) else {
         return eprintln!("没有 GPU，跳过");
@@ -591,9 +591,7 @@ fn pixel_of(point: Vec3) -> (u32, u32) {
 }
 
 fn pixel_in(camera: Camera3d, eye: Transform3d, point: Vec3) -> (u32, u32) {
-    let c = camera.view_proj(&eye, 1.0) * point.extend(1.0);
-    let ndc = c.truncate().truncate() / c.w;
-    (((ndc.x * 0.5 + 0.5) * SIZE as f32) as u32, ((0.5 - ndc.y * 0.5) * SIZE as f32) as u32)
+    pixel_sized(camera, eye, SIZE, point)
 }
 
 #[test]
@@ -838,3 +836,361 @@ fn ribbons_draw_a_band_facing_the_camera() {
     assert!(close(img.at(SIZE / 2 - 10, SIZE / 2), [255, 255, 0, 255]), "沿 x 方向");
     assert!(close(img.at(SIZE / 2, SIZE / 2 - 10), [0, 0, 0, 255]), "竖直方向只有带子那么宽");
 }
+
+/// 半透明材质的物体。
+fn glass(world: &mut World, color: Vec4, mesh: Mesh, transform: Transform3d) {
+    let mut assets = world.resource_mut::<Assets3d>();
+    let mesh = assets.add_mesh(mesh).unwrap();
+    let material = assets.add_material(Material { base_color: color, blend: true, ..Default::default() });
+    world.spawn((Mesh3d { mesh, material }, transform));
+}
+
+fn at_z(z: f32) -> Transform3d {
+    Transform3d { translation: Vec3::new(0.0, 0.0, z), ..facing_camera() }
+}
+
+#[test]
+fn blended_objects_show_what_is_behind() {
+    for glass_first in [true, false] {
+        let Some(img) = render(SIZE, move |app| {
+            unlit(app);
+            app.add_systems(Startup, move |world: &mut World| {
+                let red = |w: &mut World| glass(w, Vec4::new(1.0, 0.0, 0.0, 0.5), Mesh::plane(1.0), at_z(1.0));
+                let blue = |w: &mut World| solid(w, Vec4::new(0.0, 0.0, 1.0, 1.0), Mesh::plane(4.0), facing_camera());
+                if glass_first {
+                    red(world);
+                    blue(world);
+                } else {
+                    blue(world);
+                    red(world);
+                }
+            });
+        }) else {
+            return eprintln!("没有 GPU，跳过");
+        };
+        let c = img.center();
+        // 线性空间里红蓝各一半，写进 sRGB 是 188 左右
+        assert!(c[0].abs_diff(188) <= 4 && c[2].abs_diff(188) <= 4 && c[1] == 0, "glass_first={glass_first}: {c:?}");
+        assert!(close(img.at(SIZE / 2, 20), [0, 0, 255, 255]), "半透明方片外面是蓝色 {:?}", img.at(SIZE / 2, 20));
+    }
+}
+
+#[test]
+fn opaque_objects_hide_blended_ones_behind_them() {
+    let Some(img) = render(SIZE, |app| {
+        unlit(app);
+        app.add_systems(Startup, |world: &mut World| {
+            glass(world, Vec4::new(1.0, 0.0, 0.0, 0.5), Mesh::plane(4.0), facing_camera());
+            solid(world, Vec4::new(0.0, 1.0, 0.0, 1.0), Mesh::cube(1.0), Transform3d::from_xyz(0.0, 0.0, 1.0));
+        });
+    }) else {
+        return eprintln!("没有 GPU，跳过");
+    };
+    assert!(close(img.center(), [0, 255, 0, 255]), "前面的不透明方块挡住半透明的 {:?}", img.center());
+}
+
+#[test]
+fn blended_objects_mix_far_to_near_in_any_spawn_order() {
+    let mut results = Vec::new();
+    for red_first in [true, false] {
+        let Some(img) = render(SIZE, move |app| {
+            unlit(app);
+            app.add_systems(Startup, move |world: &mut World| {
+                let red = |w: &mut World| glass(w, Vec4::new(1.0, 0.0, 0.0, 0.5), Mesh::plane(2.0), at_z(0.0));
+                let green = |w: &mut World| glass(w, Vec4::new(0.0, 1.0, 0.0, 0.5), Mesh::plane(2.0), at_z(1.0));
+                if red_first {
+                    red(world);
+                    green(world);
+                } else {
+                    green(world);
+                    red(world);
+                }
+            });
+        }) else {
+            return eprintln!("没有 GPU，跳过");
+        };
+        results.push(img.center());
+    }
+    assert!(close(results[0], results[1]), "{:?} vs {:?}", results[0], results[1]);
+    // 先画远的红再画近的绿：红 0.25、绿 0.5（线性），sRGB 是 137、188 左右
+    let c = results[0];
+    assert!(c[0].abs_diff(137) <= 4 && c[1].abs_diff(188) <= 4 && c[2] == 0, "{c:?}");
+}
+
+#[test]
+fn blended_objects_cast_no_shadow() {
+    let Some(img) = render(SIZE, |app| {
+        app.add_plugins(Render3dPlugin).insert_resource(AmbientLight { color: Vec3::ONE, brightness: 0.1 });
+        app.insert_resource(ClearColor(wgpu::Color::BLACK));
+        app.add_systems(Startup, |world: &mut World| {
+            let (camera, eye) = shadow_camera();
+            world.spawn((camera, eye));
+            solid(world, Vec4::ONE, Mesh::plane(6.0), Transform3d::default());
+            glass(world, Vec4::new(1.0, 1.0, 1.0, 0.5), Mesh::cube(0.5), Transform3d::from_xyz(0.0, 1.0, 0.0));
+            world.spawn(DirectionalLight { direction: Vec3::new(1.0, -1.0, 0.0), shadows: true, ..Default::default() });
+        });
+    }) else {
+        return eprintln!("没有 GPU，跳过");
+    };
+    let (sx, sy) = pixel_of(Vec3::new(1.0, 0.0, 0.0));
+    let (lx, ly) = pixel_of(Vec3::new(-1.5, 0.0, 0.0));
+    assert!(img.at(lx, ly)[0] > 120, "{:?}", img.at(lx, ly));
+    assert!(close(img.at(sx, sy), img.at(lx, ly)), "半透明方块后面没有影子 {:?} vs {:?}", img.at(sx, sy), img.at(lx, ly));
+}
+
+/// 世界上的点在边长 `size` 的图上画在哪个像素。
+fn pixel_sized(camera: Camera3d, eye: Transform3d, size: u32, point: Vec3) -> (u32, u32) {
+    let c = camera.view_proj(&eye, 1.0) * point.extend(1.0);
+    let ndc = c.truncate().truncate() / c.w;
+    (((ndc.x * 0.5 + 0.5) * size as f32) as u32, ((0.5 - ndc.y * 0.5) * size as f32) as u32)
+}
+
+/// 朝下照的聚光灯。
+fn spot_down(outer: f32, shadows: bool) -> (SpotLight, Transform3d) {
+    let light = SpotLight { intensity: 20.0, range: 10.0, inner_angle: outer * 0.8, outer_angle: outer, shadows, ..Default::default() };
+    (light, Transform3d { translation: Vec3::new(0.0, 3.0, 0.0), rotation: Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2), ..Default::default() })
+}
+
+#[test]
+fn spot_light_lights_its_cone_only() {
+    let Some(img) = render(SIZE, |app| {
+        app.add_plugins(Render3dPlugin).insert_resource(AmbientLight { color: Vec3::ONE, brightness: 0.0 });
+        app.add_systems(Startup, |world: &mut World| {
+            solid(world, Vec4::ONE, Mesh::plane(4.0), facing_camera());
+            // 在 (0, 0, 3) 朝 -Z 照向平面：外锥 10° 在平面上半径约 0.53
+            let spot = SpotLight { intensity: 10.0, range: 10.0, inner_angle: 5f32.to_radians(), outer_angle: 10f32.to_radians(), ..Default::default() };
+            world.spawn((spot, Transform3d::from_xyz(0.0, 0.0, 3.0)));
+        });
+    }) else {
+        return eprintln!("没有 GPU，跳过");
+    };
+    let c = SIZE / 2;
+    let (center, inner, outside) = (img.center(), img.at(c + 2, c), img.at(c + 13, c));
+    assert!(center[0] > 100, "锥里亮 {center:?}");
+    assert!(close(center, inner), "内锥里一样亮 {center:?} vs {inner:?}");
+    assert!(outside[0] < 5, "锥外暗 {outside:?}");
+    let (top, left) = (img.at(c, c - 13), img.at(c - 13, c));
+    assert!(top[0] < 5 && left[0] < 5, "四周都是暗的 {top:?} {left:?}");
+}
+
+/// 地面上方一个方块，聚光灯从正上方照下来：影子落在方块正下方。
+fn spot_scene(app: &mut App, shadows: bool) {
+    app.add_plugins(Render3dPlugin).insert_resource(AmbientLight { color: Vec3::ONE, brightness: 0.1 });
+    app.insert_resource(ClearColor(wgpu::Color::BLACK));
+    app.add_systems(Startup, move |world: &mut World| {
+        let (camera, eye) = shadow_camera();
+        world.spawn((camera, eye));
+        solid(world, Vec4::ONE, Mesh::plane(6.0), Transform3d::default());
+        solid(world, Vec4::ONE, Mesh::cube(0.5), Transform3d::from_xyz(0.0, 1.0, 0.0));
+        world.spawn(spot_down(40f32.to_radians(), shadows));
+    });
+}
+
+#[test]
+fn spot_light_shadow_falls_behind_the_caster() {
+    let (sx, sy) = pixel_of(Vec3::ZERO);
+    let (lx, ly) = pixel_of(Vec3::new(-1.2, 0.0, 0.0));
+    let Some(img) = render(SIZE, |app| spot_scene(app, true)) else {
+        return eprintln!("没有 GPU，跳过");
+    };
+    let (shadow, lit) = (img.at(sx, sy), img.at(lx, ly));
+    assert!(lit[0] > 120, "锥里没挡住的地方亮 {lit:?}");
+    assert!(close(shadow, [89, 89, 89, 255]), "方块正下方只有环境光 {shadow:?}，外面 {lit:?}");
+    let (tx, ty) = pixel_of(Vec3::new(0.0, 1.25, 0.0));
+    assert!(img.at(tx, ty)[0] > 120, "方块顶面没有阴影痘 {:?}", img.at(tx, ty));
+
+    let Some(img) = render(SIZE, |app| spot_scene(app, false)) else { return };
+    assert!(img.at(sx, sy)[0] > 120, "不开阴影时方块下面也亮 {:?}", img.at(sx, sy));
+}
+
+#[test]
+fn spot_shadow_pass_skips_what_is_outside_the_cone() {
+    let counts = std::sync::Arc::new(std::sync::Mutex::new((0, 0)));
+    let probe = counts.clone();
+    if render(SIZE, move |app| {
+        app.add_plugins(Render3dPlugin);
+        app.add_systems(Startup, |world: &mut World| {
+            solid(world, Vec4::ONE, Mesh::plane(6.0), Transform3d::default());
+            // 外锥 20°：方块在锥外
+            solid(world, Vec4::ONE, Mesh::cube(0.5), Transform3d::from_xyz(2.5, 1.0, 0.0));
+            world.spawn(spot_down(20f32.to_radians(), true));
+        });
+        app.add_renderer(CountProbe(probe.clone()));
+    })
+    .is_none()
+    {
+        return;
+    }
+    assert_eq!(*counts.lock().unwrap(), (3, 2), "主 pass 2 次，阴影 pass 只画地面");
+}
+
+#[test]
+fn point_light_casts_shadows_all_around() {
+    let camera = Camera3d::default();
+    let eye = Transform3d::from_xyz(0.0, 7.0, 0.0).looking_at(Vec3::ZERO, Vec3::NEG_Z);
+    let scene = move |shadows: bool| {
+        render(SIZE, move |app| {
+            app.add_plugins(Render3dPlugin).insert_resource(AmbientLight { color: Vec3::ONE, brightness: 0.1 });
+            app.insert_resource(ClearColor(wgpu::Color::BLACK));
+            app.add_systems(Startup, move |world: &mut World| {
+                world.spawn((camera, eye));
+                solid(world, Vec4::ONE, Mesh::plane(10.0), Transform3d::default());
+                // 灯在 (0, 1.5, 0)：四周各一块，影子落在 2 远的地上；正下方一块，影子比它大一圈
+                for p in [Vec3::X, Vec3::NEG_X, Vec3::Z, Vec3::NEG_Z, Vec3::ZERO] {
+                    solid(world, Vec4::ONE, Mesh::cube(0.5), Transform3d { translation: p + Vec3::Y * 0.75, ..Default::default() });
+                }
+                world.spawn((PointLight { intensity: 20.0, range: 10.0, shadows, ..Default::default() }, Transform3d::from_xyz(0.0, 1.5, 0.0)));
+            });
+        })
+    };
+    let Some(img) = scene(true) else {
+        return eprintln!("没有 GPU，跳过");
+    };
+    let at = |img: &Pixels, p: Vec3| {
+        let (x, y) = pixel_sized(camera, eye, SIZE, p);
+        img.at(x, y)
+    };
+    let lit = at(&img, Vec3::new(1.6, 0.0, 1.4));
+    assert!(lit[0] > 120, "斜对角没挡住 {lit:?}");
+    let shadows = [Vec3::new(2.0, 0.0, 0.0), Vec3::new(-2.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 2.0), Vec3::new(0.0, 0.0, -2.0), Vec3::new(0.4, 0.0, 0.0)];
+    for p in shadows {
+        let c = at(&img, p);
+        assert!(c[0] <= 95, "{p} 在影子里 {c:?}，外面 {lit:?}");
+    }
+    let Some(img) = scene(false) else { return };
+    for p in shadows {
+        assert!(at(&img, p)[0] > 120, "不开阴影时 {p} 是亮的 {:?}", at(&img, p));
+    }
+}
+
+/// 点光源在高 3 处，挡板挡住朝 +X 斜 45° 往下的那一片地。地上离灯水平 2.86–3 的一圈，往外推之前离灯最远的轴是 y、
+/// 推之后是 x：得按推出去之后的点挑面，不然拿 -Y 面去采一个在它视野外的点，算成照亮（对角线接缝漏光）。
+#[test]
+fn point_shadow_has_no_gap_on_the_diagonal_between_faces() {
+    const SIZE: u32 = 128;
+    let camera = Camera3d::default();
+    let eye = Transform3d::from_xyz(0.0, 8.0, 0.0).looking_at(Vec3::ZERO, Vec3::NEG_Z);
+    let Some(img) = render(SIZE, move |app| {
+        app.add_plugins(Render3dPlugin).insert_resource(AmbientLight { color: Vec3::ONE, brightness: 0.1 });
+        // 阴影图小一点，推出去的量大，接缝那一圈有好几个像素宽
+        app.insert_resource(ClearColor(wgpu::Color::BLACK)).insert_resource(Shadows { local_size: 64, ..Default::default() });
+        app.add_systems(Startup, move |world: &mut World| {
+            world.spawn((camera, eye));
+            solid(world, Vec4::ONE, Mesh::plane(12.0), Transform3d::default());
+            solid(world, Vec4::ONE, Mesh::cube(0.8), Transform3d::from_xyz(1.465, 1.5, 0.0));
+            world.spawn((PointLight { intensity: 20.0, range: 10.0, shadows: true, ..Default::default() }, Transform3d::from_xyz(0.0, 3.0, 0.0)));
+        });
+    }) else {
+        return eprintln!("没有 GPU，跳过");
+    };
+    let at = |p: Vec3| {
+        let (x, y) = pixel_sized(camera, eye, SIZE, p);
+        img.at(x, y)
+    };
+    let lit = at(Vec3::new(-2.93, 0.0, 0.0));
+    assert!(lit[0] > 120, "对面没挡住 {lit:?}");
+    for x in [2.5, 2.93, 3.5] {
+        let c = at(Vec3::new(x, 0.0, 0.0));
+        assert!(c[0] <= 95, "x = {x} 在挡板的影子里 {c:?}，外面 {lit:?}");
+    }
+}
+
+/// 第一帧画完后把阴影图换个尺寸、挪一下投影物：主 pass 得换用新的阴影图，影子跟着挪。
+fn resized_shadows(spot: bool) -> Option<Pixels> {
+    render_frames(SIZE, 2, move |app| {
+        app.add_plugins(Render3dPlugin).insert_resource(AmbientLight { color: Vec3::ONE, brightness: 0.1 });
+        app.insert_resource(ClearColor(wgpu::Color::BLACK)).insert_resource(Shadows { size: 1024, local_size: 512, ..Default::default() });
+        app.add_systems(Startup, move |world: &mut World| {
+            world.spawn(shadow_camera());
+            solid(world, Vec4::ONE, Mesh::plane(6.0), Transform3d::default());
+            solid(world, Vec4::ONE, Mesh::cube(0.5), Transform3d::from_xyz(0.0, 1.0, 0.0));
+            if spot {
+                world.spawn(spot_down(40f32.to_radians(), true));
+            } else {
+                world.spawn(DirectionalLight { direction: Vec3::new(1.0, -1.0, 0.0), shadows: true, ..Default::default() });
+            }
+        });
+        app.add_systems(Update, |mut frame: Local<u32>, mut shadows: ResMut<Shadows>, mut q: Query<&mut Transform3d, With<Mesh3d>>| {
+            *frame += 1;
+            if *frame == 2 {
+                (shadows.size, shadows.local_size) = (2048, 256);
+                q.iter_mut().filter(|t| t.translation.y == 1.0).for_each(|mut t| t.translation.z = -1.2);
+            }
+        });
+    })
+}
+
+#[test]
+fn changing_shadow_map_sizes_at_runtime_keeps_shadows_right() {
+    let Some(img) = resized_shadows(false) else {
+        return eprintln!("没有 GPU，跳过");
+    };
+    // 方块挪到 z = -1.2：方向光的影子从 (1, 0, 0) 挪到 (1, 0, -1.2)
+    let at = |img: &Pixels, p: Vec3| {
+        let (x, y) = pixel_of(p);
+        img.at(x, y)
+    };
+    let (now, before) = (at(&img, Vec3::new(1.0, 0.0, -1.2)), at(&img, Vec3::X));
+    assert!(now[0] <= 95 && before[0] > 120, "方向光：影子在新位置 {now:?}，旧位置亮 {before:?}");
+
+    // 聚光灯在正上方 3 处：影子按透视放大 1.5 倍，落在 (0, 0, -1.8)
+    let img = resized_shadows(true).unwrap();
+    let (now, before) = (at(&img, Vec3::new(0.0, 0.0, -1.8)), at(&img, Vec3::ZERO));
+    assert!(now[0] <= 95 && before[0] > 120, "聚光灯：影子在新位置 {now:?}，旧位置亮 {before:?}");
+}
+
+/// 相机沿地面往远处看，近、中、远三个大方块；光从左上斜着照，影子落在各自右边。
+fn cascade_scene(app: &mut App, shadows: Shadows) {
+    app.add_plugins(Render3dPlugin).insert_resource(AmbientLight { color: Vec3::ONE, brightness: 0.1 });
+    app.insert_resource(ClearColor(wgpu::Color::BLACK)).insert_resource(shadows);
+    app.add_systems(Startup, move |world: &mut World| {
+        world.spawn(cascade_camera());
+        solid(world, Vec4::ONE, Mesh::plane(200.0), Transform3d::default());
+        for z in CASCADE_CUBES {
+            solid(world, Vec4::ONE, Mesh::cube(2.0), Transform3d::from_xyz(0.0, 1.0, z));
+        }
+        world.spawn(DirectionalLight { direction: Vec3::new(1.0, -1.0, 0.0), shadows: true, ..Default::default() });
+    });
+}
+
+const CASCADE_CUBES: [f32; 3] = [0.0, -15.0, -45.0];
+const CASCADE_SIZE: u32 = 256;
+
+fn cascade_camera() -> (Camera3d, Transform3d) {
+    (Camera3d::default(), Transform3d::from_xyz(0.0, 4.0, 8.0).looking_at(Vec3::new(0.0, 0.0, -20.0), Vec3::Y))
+}
+
+/// 每个方块（影子里的点, 旁边亮处的点）的颜色。
+fn cascade_pixels(shadows: Shadows) -> Option<Vec<([u8; 4], [u8; 4])>> {
+    let img = render(CASCADE_SIZE, move |app| cascade_scene(app, shadows))?;
+    let (camera, eye) = cascade_camera();
+    let at = |p: Vec3| {
+        let (x, y) = pixel_sized(camera, eye, CASCADE_SIZE, p);
+        img.at(x, y)
+    };
+    Some(CASCADE_CUBES.iter().map(|&z| (at(Vec3::new(2.0, 0.0, z)), at(Vec3::new(-2.5, 0.0, z)))).collect())
+}
+
+#[test]
+fn cascades_shadow_near_and_far_casters_but_not_past_the_distance() {
+    let cascades = Shadows { cascades: 3, distance: 30.0, ..Default::default() };
+    let Some(px) = cascade_pixels(cascades) else {
+        return eprintln!("没有 GPU，跳过");
+    };
+    // 近的在相机前约 8，中间的约 22，远的约 51
+    for (i, (shadow, lit)) in px[..2].iter().enumerate() {
+        assert!(lit[0] > 120, "第 {i} 个旁边亮 {lit:?}");
+        assert!(shadow[0] <= 95, "第 {i} 个有影子 {shadow:?}");
+    }
+    let (shadow, lit) = px[2];
+    assert!(close(shadow, lit), "distance 外的没有影子 {shadow:?} vs {lit:?}");
+
+    // 不分段时远处的也有影子：上面没影子是 distance 截掉的
+    let Some(px) = cascade_pixels(Shadows::default()) else { return };
+    for (i, (shadow, lit)) in px.iter().enumerate() {
+        assert!(lit[0] > 120 && shadow[0] <= 95, "一段时第 {i} 个有影子 {shadow:?} / {lit:?}");
+    }
+}
+
+#[path = "offscreen/morph.rs"]
+mod morph;

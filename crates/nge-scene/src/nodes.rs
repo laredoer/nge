@@ -159,6 +159,9 @@ pub struct ModelAnimation {
     pub speed: f32,
     #[serde(default = "yes", rename = "loop")]
     pub looping: bool,
+    /// 换 `clip` 时从旧动画淡过去的秒数；0 是硬切。
+    #[serde(default)]
+    pub fade: f32,
 }
 
 fn yes() -> bool {
@@ -170,7 +173,7 @@ fn one() -> f32 {
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(default)]
+#[serde(default, rename_all = "camelCase")]
 pub struct Camera3dNode {
     pub x: f32,
     pub y: f32,
@@ -185,11 +188,15 @@ pub struct Camera3dNode {
     pub match2d: bool,
     /// 模型和精灵按深度混排（见 docs/3d-more.md）。
     pub interleave: bool,
+    /// 方向光阴影分几段；不填按 `Shadows` 的默认。
+    pub shadow_cascades: Option<u32>,
+    /// 分段阴影覆盖到相机前方多远；不填按 `Shadows` 的默认。
+    pub shadow_distance: Option<f32>,
 }
 
 impl Default for Camera3dNode {
     fn default() -> Self {
-        Self { x: 0.0, y: 2.0, z: None, target: [0.0; 3], fov: 60.0, ortho: None, match2d: false, interleave: false }
+        Self { x: 0.0, y: 2.0, z: None, target: [0.0; 3], fov: 60.0, ortho: None, match2d: false, interleave: false, shadow_cascades: None, shadow_distance: None }
     }
 }
 
@@ -198,16 +205,17 @@ impl Default for Camera3dNode {
 pub enum LightKind {
     Directional,
     Point,
+    Spot,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct LightNode {
     pub id: String,
     pub kind: LightKind,
-    /// 方向光照射的方向。
+    /// 方向光、聚光灯照射的方向。
     #[serde(default = "down")]
     pub direction: [f32; 3],
-    /// 点光源的位置。
+    /// 点光源、聚光灯的位置。
     #[serde(default)]
     pub x: f32,
     #[serde(default)]
@@ -215,10 +223,15 @@ pub struct LightNode {
     #[serde(default)]
     pub z: f32,
     pub color: Option<Color>,
-    /// 方向光的照度 / 点光源的强度；不填用引擎默认值。
+    /// 方向光的照度 / 点光源、聚光灯的强度；不填用引擎默认值。
     pub intensity: Option<f32>,
     pub range: Option<f32>,
-    /// 方向光投影子（见 docs/3d-more.md）。
+    /// 聚光灯外锥的半角（度）；不填用引擎默认值。
+    pub angle: Option<f32>,
+    /// 聚光灯内锥的半角（度）；不填是外锥的 80%。
+    #[serde(rename = "innerAngle")]
+    pub inner_angle: Option<f32>,
+    /// 投影子（见 docs/3d-more.md、docs/render3d-more.md）。
     #[serde(default)]
     pub shadows: bool,
 }
@@ -301,7 +314,13 @@ mod tests {
         assert_eq!((m.scale, m.rotation, m.tap), (1.0, [0.0, 90.0, 0.0], false));
         let l: LightNode = serde_json::from_value(json!({ "id": "sun", "kind": "directional" })).unwrap();
         assert_eq!((l.kind, l.direction), (LightKind::Directional, [0.0, -1.0, 0.0]));
-        assert!(serde_json::from_value::<LightNode>(json!({ "id": "x", "kind": "spot" })).is_err());
+        let s: LightNode = serde_json::from_value(json!({ "id": "x", "kind": "spot", "angle": 40, "innerAngle": 10 })).unwrap();
+        assert_eq!((s.kind, s.angle, s.inner_angle), (LightKind::Spot, Some(40.0), Some(10.0)));
+        assert!(serde_json::from_value::<LightNode>(json!({ "id": "x", "kind": "area" })).is_err());
+        let c: Camera3dNode = serde_json::from_value(json!({ "shadowCascades": 3, "shadowDistance": 80 })).unwrap();
+        assert_eq!((c.shadow_cascades, c.shadow_distance), (Some(3), Some(80.0)));
+        let a: ModelAnimation = serde_json::from_value(json!({ "clip": "idle" })).unwrap();
+        assert_eq!(a.fade, 0.0);
         let b = BURST.decode(&json!({ "x": 3, "speed": [0, 0] })).unwrap();
         assert_eq!((b.count, b.particles.x, b.particles.speed), (100, 3.0, [0.0, 0.0]));
         let f = FLOAT_TEXT.decode(&json!({ "text": "+10" })).unwrap();

@@ -1,11 +1,8 @@
 //! 模型的节点树、蒙皮和动画（glTF 的 skins / animations），以及按时间算姿势（见 docs/3d-more.md）。
 
-use bevy_ecs::prelude::*;
 use glam::{Mat4, Quat, Vec3, Vec4};
-use nge_ecs::Time;
 
-use crate::assets::Assets3d;
-use crate::renderer::Model3d;
+use crate::mesh::MAX_MORPH_TARGETS;
 
 /// 平移、旋转、缩放。
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -54,6 +51,8 @@ pub enum Property {
     Translation,
     Rotation,
     Scale,
+    /// 变形权重的第几段：每段 4 个（`values` 的 xyzw 是第 4 × 段 起的 4 个权重）。
+    Weights(u8),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,7 +63,7 @@ pub enum Interpolation {
     CubicSpline,
 }
 
-/// 一条动画通道：某个节点的某个属性随时间变化。`values` 里平移、缩放用 xyz，旋转是四元数 xyzw。
+/// 一条动画通道：某个节点的某个属性随时间变化。`values` 里平移、缩放用 xyz，旋转是四元数 xyzw，变形权重是一段 4 个。
 #[derive(Debug, Clone, PartialEq)]
 pub struct Channel {
     pub node: u32,
@@ -91,11 +90,15 @@ pub(crate) fn rotation(v: Vec4) -> Quat {
 }
 
 impl Channel {
-    /// 这条通道哪里不对：目标节点不存在、关键帧数和值的个数对不上、时间不是不递减的有限数。
+    /// 这条通道哪里不对：目标节点不存在、变形权重段超出、关键帧数和值的个数对不上、时间不是不递减的有限数。
     pub(crate) fn problem(&self, nodes: usize) -> Option<String> {
         let per_key = if self.interpolation == Interpolation::CubicSpline { 3 } else { 1 };
         if self.node as usize >= nodes {
             Some("目标节点不存在".to_owned())
+        } else if let Property::Weights(segment) = self.property
+            && usize::from(segment) * 4 >= MAX_MORPH_TARGETS
+        {
+            Some(format!("变形权重段 {segment} 超出（最多 {MAX_MORPH_TARGETS} 个权重）"))
         } else if self.times.is_empty() || self.values.len() != self.times.len() * per_key {
             Some(format!("{} 个关键帧配了 {} 个值", self.times.len(), self.values.len()))
         } else if self.times.iter().any(|t| !t.is_finite()) || self.times.windows(2).any(|w| w[1] < w[0]) {
@@ -190,77 +193,6 @@ impl Skeleton {
     }
 }
 
-/// 播模型里的哪段动画。`time` 按 `speed`（1 是原速）往前走，`looping` 时绕回开头，不然停在最后一帧。
-/// 找不到这个名字时停在不播动画的姿势，warn 一次。
-#[derive(Component, Debug, Clone, PartialEq)]
-#[require(Pose)]
-pub struct Animator {
-    pub clip: String,
-    pub speed: f32,
-    pub looping: bool,
-    pub time: f32,
-}
-
-impl Animator {
-    pub fn new(clip: impl Into<String>) -> Self {
-        Self { clip: clip.into(), speed: 1.0, looping: true, time: 0.0 }
-    }
-}
-
-/// 这一帧的姿势：每个节点相对模型原点的矩阵。由动画系统写，渲染器读（只在还有 [`Animator`] 时）；没有它的模型按不播动画的样子画。
-#[derive(Component, Debug, Clone, Default, PartialEq)]
-pub struct Pose {
-    pub nodes: Vec<Mat4>,
-    /// 提示过找不到的动画名，免得每帧报。
-    missing: Option<String>,
-    locals: Vec<Trs>,
-}
-
-/// 推进动画、算姿势（`PostUpdate`）。时间按 [`Time`] 的（缩放过的）帧间隔走。
-pub(crate) fn animate(time: Res<Time>, assets: Res<Assets3d>, mut models: Query<(&Model3d, &mut Animator, &mut Pose)>) {
-    for (model, mut animator, mut pose) in &mut models {
-        let Some(model) = assets.model(model.0) else { continue };
-        let skeleton = &model.skeleton;
-        let pose = &mut *pose;
-        pose.locals.clear();
-        pose.locals.extend(skeleton.nodes.iter().map(|n| n.rest));
-        match model.animations.iter().find(|a| a.name == animator.clip) {
-            Some(clip) => {
-                pose.missing = None;
-                let speed = if animator.speed.is_finite() { animator.speed } else { 0.0 };
-                let mut t = animator.time + time.delta * speed;
-                t = if clip.duration <= 0.0 {
-                    0.0
-                } else if animator.looping {
-                    t.rem_euclid(clip.duration)
-                } else {
-                    t.clamp(0.0, clip.duration)
-                };
-                if animator.time != t {
-                    animator.time = t;
-                }
-                for channel in &clip.channels {
-                    let Some(local) = pose.locals.get_mut(channel.node as usize) else { continue };
-                    let v = channel.sample(t);
-                    match channel.property {
-                        Property::Translation => local.translation = v.truncate(),
-                        Property::Rotation => local.rotation = rotation(v),
-                        Property::Scale => local.scale = v.truncate(),
-                    }
-                }
-            }
-            None if pose.missing.as_deref() != Some(&animator.clip) => {
-                let names: Vec<&str> = model.animations.iter().map(|a| a.name.as_str()).collect();
-                log::warn!("模型里没有叫 {:?} 的动画（有 {names:?}），停在不播动画的姿势", animator.clip);
-                pose.missing = Some(animator.clip.clone());
-            }
-            None => {}
-        }
-        let Pose { nodes, locals, .. } = pose;
-        skeleton.globals(locals, nodes);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::f32::consts::FRAC_PI_2;
@@ -333,57 +265,8 @@ mod tests {
         assert!(ok.validate(&clip(Channel { times: vec![1.0, 0.0], ..good.clone() })).is_err());
         assert!(ok.validate(&clip(Channel { times: vec![0.0, f32::NAN], ..good.clone() })).is_err());
         assert!(ok.validate(&clip(Channel { interpolation: Interpolation::CubicSpline, ..good.clone() })).is_err(), "三次样条每帧三个值");
-    }
-
-    /// 一个节点，动画 slide 在 1 秒里把它从 x = 0 线性移到 x = 10。
-    fn sliding_app(animator: Animator) -> (nge_ecs::App, Entity) {
-        use crate::{Model, Render3dPlugin, Transform3d};
-
-        let mut app = nge_ecs::App::new();
-        app.add_plugins(Render3dPlugin);
-        let slide = channel(Property::Translation, Interpolation::Linear, vec![0.0, 1.0], vec![Vec4::ZERO, Vec4::new(10.0, 0.0, 0.0, 0.0)]);
-        let model = Model {
-            skeleton: Skeleton { nodes: vec![Node { parent: None, rest: Trs { translation: Vec3::Y, ..Default::default() } }], skins: vec![] },
-            animations: vec![Animation { name: "slide".into(), duration: 1.0, channels: vec![slide] }],
-            ..Default::default()
-        };
-        let model = app.world_mut().resource_mut::<Assets3d>().add_model(model).unwrap();
-        let entity = app.world_mut().spawn((Model3d(model), Transform3d::default(), animator)).id();
-        (app, entity)
-    }
-
-    /// 推进 `dt` 秒，返回节点的 x 和动画时间。
-    fn step(app: &mut nge_ecs::App, entity: Entity, dt: f32) -> (f32, f32) {
-        app.tick(nge_core::Viewport { size: [10.0, 10.0], pixels: [10, 10] }, dt);
-        let world = app.world();
-        (world.get::<Pose>(entity).unwrap().nodes[0].w_axis.x, world.get::<Animator>(entity).unwrap().time)
-    }
-
-    #[test]
-    fn animator_advances_loops_and_clamps() {
-        let (mut app, e) = sliding_app(Animator::new("slide"));
-        assert_eq!(step(&mut app, e, 0.25), (2.5, 0.25));
-        assert_eq!(step(&mut app, e, 1.0), (2.5, 0.25), "循环：1.25 绕回 0.25");
-
-        let (mut app, e) = sliding_app(Animator { speed: 2.0, looping: false, ..Animator::new("slide") });
-        assert_eq!(step(&mut app, e, 0.25), (5.0, 0.5), "两倍速");
-        assert_eq!(step(&mut app, e, 1.0), (10.0, 1.0), "不循环：停在最后一帧");
-
-        let (mut app, e) = sliding_app(Animator { speed: -1.0, ..Animator::new("slide") });
-        assert_eq!(step(&mut app, e, 0.25), (7.5, 0.75), "倒着播");
-        let (mut app, e) = sliding_app(Animator { speed: -1.0, looping: false, ..Animator::new("slide") });
-        assert_eq!(step(&mut app, e, 0.25), (0.0, 0.0), "倒着播不循环：停在开头");
-    }
-
-    #[test]
-    fn unknown_clip_holds_the_rest_pose() {
-        let (mut app, e) = sliding_app(Animator::new("nope"));
-        let (x, _) = step(&mut app, e, 0.25);
-        assert_eq!(x, 0.0);
-        assert_eq!(app.world().get::<Pose>(e).unwrap().nodes[0].w_axis.y, 1.0, "不播动画的姿势");
-        // 改成存在的名字后接着播
-        app.world_mut().get_mut::<Animator>(e).unwrap().clip = "slide".into();
-        assert_eq!(step(&mut app, e, 0.5).0, 5.0);
+        assert!(ok.validate(&clip(Channel { property: Property::Weights(1), ..good.clone() })).is_ok());
+        assert!(ok.validate(&clip(Channel { property: Property::Weights(2), ..good.clone() })).is_err(), "最多 8 个权重，两段");
     }
 
     /// 两节的棍子：关节 1 挂在关节 0 上方 1 处，绕 z 转 90° 后，绑定时在 (0, 2) 的点到了 (-1, 1)。

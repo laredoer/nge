@@ -377,6 +377,8 @@ export interface ModelAnimation {
   speed?: number;
   /** 循环，默认 true；false 时停在最后一帧。 */
   loop?: boolean;
+  /** 换 `clip` 时从旧动画淡过去的秒数（骨骼和变形权重一起混），默认 0 硬切；见 docs/render3d-more.md。 */
+  fade?: number;
 }
 
 /**
@@ -427,23 +429,31 @@ export interface Camera3dNode {
   match2d?: boolean;
   /** 模型和精灵按深度混排：模型后面的精灵被挡住、前面的露出来（精灵的 z 当作 3D 的 z），见 docs/3d-more.md。默认关：z < 0 的精灵画在模型下面，其余画在上面。 */
   interleave?: boolean;
+  /** 方向光的影子分几段（1–4，近处的段更清楚），默认 1；见 docs/render3d-more.md。 */
+  shadowCascades?: number;
+  /** 分段的影子覆盖到相机前方多远（3D 单位，不超过相机的远平面），默认 50。 */
+  shadowDistance?: number;
 }
 
 export interface LightNode {
   id: string;
-  kind: "directional" | "point";
-  /** 方向光照射的方向，默认朝下。 */
+  kind: "directional" | "point" | "spot";
+  /** 方向光、聚光灯照射的方向，默认朝下。 */
   direction?: [number, number, number];
-  /** 点光源的位置。 */
+  /** 点光源、聚光灯的位置。 */
   x?: number;
   y?: number;
   z?: number;
   color?: string;
-  /** 方向光的照度 / 点光源的强度。 */
+  /** 方向光的照度 / 点光源、聚光灯的强度。 */
   intensity?: number;
-  /** 点光源的照射范围。 */
+  /** 点光源、聚光灯的照射范围。 */
   range?: number;
-  /** 方向光投影子（只算第一盏开着的），见 docs/3d-more.md。 */
+  /** 聚光灯外锥的半角（度），默认 30；外面是黑的。 */
+  angle?: number;
+  /** 聚光灯内锥的半角（度），默认外锥的 80%；里面全亮，和外锥之间平滑过渡。 */
+  innerAngle?: number;
+  /** 投影子：方向光、聚光灯、点光源各只算第一盏开着的，见 docs/3d-more.md、docs/render3d-more.md。 */
   shadows?: boolean;
 }
 

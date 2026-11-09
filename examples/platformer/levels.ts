@@ -1,5 +1,5 @@
 // 平台跳跃的关卡数据，以及按数据生成地图、金币、移动平台、敌人。
-import type { Emitter3dNode, JointNode, ModelNode, SpriteNode, TilemapNode, TrailNode, Tween } from "../../ts/nge";
+import type { Emitter3dNode, JointNode, LightNode, ModelNode, SpriteNode, TilemapNode, TrailNode, Tween } from "../../ts/nge";
 import { tiled, type TiledMap } from "../../ts/tiled";
 import level3 from "./maps/level3.json";
 
@@ -33,6 +33,8 @@ export interface Level {
   ghosts?: number[][];
   /** 一摞 3D 箱子摆在第几列。 */
   tower?: number;
+  /** 幽灵果冻蹲在第几列的地面上。 */
+  jelly?: number;
   /** 斜坡：两头的 [x, y]（顶面），角色控制器能走上去（见 docs/character.md）。 */
   ramps?: number[][][];
 }
@@ -61,6 +63,8 @@ const DESCRIBED: Level[] = [
     ghosts: [[29, 240]],
     // 第一个坑后面的地面上：一摞 3D 箱子，角色跑过去撞散
     tower: 23,
+    // 第三块平台右边、第二个坑前面的地面上
+    jelly: 38,
   },
   {
     name: "石阶",
@@ -94,6 +98,8 @@ export interface Built {
   ramps: SpriteNode[];
   /** 一摞 3D 箱子摆在哪（x），没有是 null；见 `towerAt`。 */
   tower: number | null;
+  /** 幽灵果冻在哪（x），没有是 null；见 `jellyAt`。 */
+  jelly: number | null;
   /** 3D 箱子：模型跟着一个看不见的 2D 刚体走（`attach`），角色能推着它走、跳上去。 */
   crate: { body: SpriteNode; model: ModelNode };
   /** 吊着的铁链：几节链子和一个铁球，用转动关节一节节连起来，挂在世界上的支点。 */
@@ -144,7 +150,8 @@ export function build(level: Level): Built {
   const ghosts = (level.ghosts ?? []).map(([c, y], i) => ({ id: `enemy-ghost-${i}`, x: (c + 0.5) * TILE, y }));
   const ramps = (level.ramps ?? []).map(([a, b], i) => rampOf(`ramp-${i}`, a, b));
   const tower = level.tower === undefined ? null : (level.tower + 0.5) * TILE;
-  return { tilemaps: [tilemap], coins, lifts, enemies, ghosts, ramps, tower, crate: crateAt(level.crate * TILE, 56), swing, goal: goalAt((cols - 4) * TILE, 40), right: cols * TILE };
+  const jelly = level.jelly === undefined ? null : (level.jelly + 0.5) * TILE;
+  return { tilemaps: [tilemap], coins, lifts, enemies, ghosts, ramps, tower, jelly, crate: crateAt(level.crate * TILE, 56), swing, goal: goalAt((cols - 4) * TILE, 40), right: cols * TILE };
 }
 
 /** 厚 16 的斜坡，顶面从 `a` 到 `b`。 */
@@ -236,6 +243,35 @@ export function towerAt(x: number, round: number): { trigger: SpriteNode; models
   };
 }
 
+/** 照着箱子堆的聚光灯：在左前上方，暖色，开影子（箱子在彼此身上投影）。亮度按距离平方衰减，所以按距离配强度。 */
+export function towerSpot(x: number): LightNode {
+  const from = [x - 4 * TILE, 7 * TILE, 140];
+  const to = [x, TOWER_BOX * 1.5, TOWER_Z];
+  const direction: [number, number, number] = [to[0] - from[0], to[1] - from[1], to[2] - from[2]];
+  const d = Math.hypot(...direction);
+  return { id: "tower-spot", kind: "spot", x: from[0], y: from[1], z: from[2], direction, angle: 18, color: "#ffd9a8", intensity: 2.5 * d * d, range: 2 * d, shadows: true };
+}
+
+/** 果冻感应区的 id：角色进去时果冻压一压，出来时停。 */
+export const JELLY_ZONE = "jelly-zone";
+/** 果冻在 idle 和 squish 之间淡多久（秒）。 */
+export const JELLY_FADE = 0.25;
+
+/** 果冻离关卡平面多远：在角色（z = 5）和其他 z ≥ 0 的精灵后面。 */
+export const JELLY_Z = 0;
+
+/**
+ * 地面上 x 处的幽灵果冻：半透明圆顶（宽 48、高约 29），在角色后面（`JELLY_Z`），透出后面的背景。
+ * 半透明网格不写深度，混排时 z ≥ 0 的精灵在它后面画、会整只盖上去，所以放在这些精灵后面，盖上去也是对的。
+ * `near` 时播 squish，不然 idle，换的时候按 `JELLY_FADE` 淡过去。左右各 2 格的看不见的 2D sensor 管「靠近」。
+ */
+export function jellyAt(x: number, near: boolean): { zone: SpriteNode; model: ModelNode } {
+  return {
+    zone: { id: JELLY_ZONE, x, y: 32, w: 4 * TILE, h: 64, color: "#00000000", body: { kind: "fixed", sensor: true } },
+    model: { id: "jelly", model: "asset:/@platformer/jelly.glb", x, y: 0, z: JELLY_Z, scale: 48, animation: { clip: near ? "squish" : "idle", fade: JELLY_FADE } },
+  };
+}
+
 /** 链子几节、每节多长。 */
 export const LINKS = 4;
 const LINK = 18;
@@ -300,6 +336,7 @@ export function fromTiled(map: TiledMap): Built {
     ghosts: of("ghost").map((o, i) => ({ id: `enemy-ghost-${i}`, x: o.x, y: o.y })),
     ramps: [],
     tower: null,
+    jelly: null,
     crate: crateAt(crate.x, crate.y),
     swing: swing === undefined ? NO_SWING : swingAt(swing.x, swing.y),
     goal: goalAt(goal.x, goal.y),

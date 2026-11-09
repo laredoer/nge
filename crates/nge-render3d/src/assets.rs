@@ -5,7 +5,7 @@ use glam::{Mat4, Vec3, Vec4};
 use nge_assets::ImageId;
 
 use crate::animation::{Animation, Skeleton};
-use crate::mesh::Mesh;
+use crate::mesh::{MAX_MORPH_TARGETS, Mesh};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct MeshId(pub(crate) u32);
@@ -36,6 +36,8 @@ pub struct Material {
     pub alpha_cutoff: Option<f32>,
     /// 关掉背面剔除。
     pub double_sided: bool,
+    /// 半透明（glTF 的 BLEND）：按 alpha 和后面的混合，不写深度、不投影子。
+    pub blend: bool,
 }
 
 impl Default for Material {
@@ -48,12 +50,13 @@ impl Default for Material {
             emissive: Vec3::ZERO,
             alpha_cutoff: None,
             double_sided: false,
+            blend: false,
         }
     }
 }
 
 /// 模型里的一个部件：`local` 是不播动画时相对模型原点的矩阵（已乘上节点层级）。
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Part {
     pub mesh: MeshId,
     pub material: MaterialId,
@@ -62,11 +65,13 @@ pub struct Part {
     pub node: Option<u32>,
     /// 用哪套蒙皮：网格带关节权重时按关节变形，`local` 和 `node` 不再起作用（glTF 的规定）。
     pub skin: Option<u32>,
+    /// 变形目标的默认权重（glTF 节点或网格的 `weights`），没在播动画时用；少的按 0 算。
+    pub weights: Vec<f32>,
 }
 
 impl Part {
     pub fn new(mesh: MeshId, material: MaterialId, local: Mat4) -> Self {
-        Self { mesh, material, local, node: None, skin: None }
+        Self { mesh, material, local, node: None, skin: None, weights: Vec::new() }
     }
 }
 
@@ -96,10 +101,20 @@ impl Default for Assets3d {
 }
 
 impl Assets3d {
-    /// 空网格、索引不是三的倍数或越界时返回错误。
-    pub fn add_mesh(&mut self, mesh: Mesh) -> Result<MeshId, String> {
+    /// 空网格、索引不是三的倍数或越界、变形目标的长度和顶点数对不上时返回错误。变形目标超过 [`MAX_MORPH_TARGETS`] 个的丢掉多的（warn）。
+    pub fn add_mesh(&mut self, mut mesh: Mesh) -> Result<MeshId, String> {
         if !mesh.skin.is_empty() && mesh.skin.len() != mesh.vertices.len() {
             return Err(format!("网格有 {} 个顶点，关节权重却有 {} 份", mesh.vertices.len(), mesh.skin.len()));
+        }
+        let n = mesh.vertices.len();
+        for (i, t) in mesh.targets.iter().enumerate() {
+            if t.positions.len() != n || !(t.normals.is_empty() || t.normals.len() == n) {
+                return Err(format!("网格有 {n} 个顶点，变形目标 {i} 却有 {} 个位置差、{} 个法线差", t.positions.len(), t.normals.len()));
+            }
+        }
+        if mesh.targets.len() > MAX_MORPH_TARGETS {
+            log::warn!("网格有 {} 个变形目标，只用前 {MAX_MORPH_TARGETS} 个", mesh.targets.len());
+            mesh.targets.truncate(MAX_MORPH_TARGETS);
         }
         if mesh.indices.is_empty() || mesh.indices.len() % 3 != 0 {
             return Err(format!("网格有 {} 个索引，要是三的倍数且不为空", mesh.indices.len()));
@@ -192,8 +207,8 @@ mod tests {
 
         let mesh = assets.add_mesh(triangle()).unwrap();
         let part = Part::new(mesh, red, Mat4::IDENTITY);
-        let model = assets.add_model(Model { parts: vec![part], ..Default::default() }).unwrap();
-        assert_eq!(assets.model(model).unwrap().parts, [part]);
+        let model = assets.add_model(Model { parts: vec![part.clone()], ..Default::default() }).unwrap();
+        assert_eq!(assets.model(model).unwrap().parts, [part.clone()]);
         assert!(assets.add_model(Model { parts: vec![Part { mesh: MeshId(42), ..part }], ..Default::default() }).is_err());
     }
 
@@ -212,12 +227,26 @@ mod tests {
         };
         let part = Part { node: Some(1), skin: Some(0), ..Part::new(mesh, MaterialId::DEFAULT, Mat4::IDENTITY) };
         let model = |part: Part, skeleton: &Skeleton| Model { parts: vec![part], skeleton: skeleton.clone(), animations: vec![] };
-        assert!(assets.add_model(model(part, &skeleton)).is_ok());
-        assert!(assets.add_model(model(Part { node: Some(2), ..part }, &skeleton)).is_err(), "节点不存在");
-        assert!(assets.add_model(model(Part { skin: Some(1), ..part }, &skeleton)).is_err(), "蒙皮不存在");
+        assert!(assets.add_model(model(part.clone(), &skeleton)).is_ok());
+        assert!(assets.add_model(model(Part { node: Some(2), ..part.clone() }, &skeleton)).is_err(), "节点不存在");
+        assert!(assets.add_model(model(Part { skin: Some(1), ..part.clone() }, &skeleton)).is_err(), "蒙皮不存在");
         let one_joint = Skeleton { skins: vec![Skin { joints: vec![0], inverse_bind: vec![Mat4::IDENTITY] }], ..skeleton.clone() };
         assert!(assets.add_model(model(part, &one_joint)).unwrap_err().contains("关节编号"));
         let bad_tree = Skeleton { nodes: vec![Node { parent: Some(0), rest: Trs::default() }], skins: vec![] };
         assert!(assets.add_model(model(Part::new(mesh, MaterialId::DEFAULT, Mat4::IDENTITY), &bad_tree)).is_err(), "节点树也要校验");
+    }
+
+    #[test]
+    fn morph_targets_are_validated_and_capped() {
+        use crate::mesh::MorphTarget;
+
+        let mut assets = Assets3d::default();
+        let target = |positions: usize, normals: usize| MorphTarget { positions: vec![Vec3::Y; positions], normals: vec![Vec3::X; normals] };
+        assert!(assets.add_mesh(Mesh { targets: vec![target(3, 0)], ..triangle() }).is_ok(), "法线差可以为空");
+        assert!(assets.add_mesh(Mesh { targets: vec![target(3, 3)], ..triangle() }).is_ok());
+        assert!(assets.add_mesh(Mesh { targets: vec![target(3, 0), target(2, 0)], ..triangle() }).unwrap_err().contains("变形目标 1"));
+        assert!(assets.add_mesh(Mesh { targets: vec![target(3, 1)], ..triangle() }).is_err(), "法线差要么空要么和顶点一样多");
+        let many = assets.add_mesh(Mesh { targets: vec![target(3, 0); MAX_MORPH_TARGETS + 1], ..triangle() }).unwrap();
+        assert_eq!(assets.mesh(many).unwrap().targets.len(), MAX_MORPH_TARGETS, "多的丢掉");
     }
 }

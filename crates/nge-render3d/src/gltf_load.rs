@@ -13,7 +13,7 @@ use nge_assets::{Asset, Assets, Handle, Image, ImageId, LoadContext};
 
 use crate::animation::{Animation, Channel, Interpolation, Node, Property, Skeleton, Skin, Trs};
 use crate::assets::{Assets3d, Material, MaterialId, MeshId, Model, ModelId, Part};
-use crate::mesh::{Influence, Mesh, Vertex};
+use crate::mesh::{Influence, Mesh, MorphTarget, Vertex};
 
 /// 节点树的最大深度，防止病态文件把栈撑爆。
 const MAX_DEPTH: usize = 256;
@@ -203,6 +203,8 @@ impl Loader<'_> {
             self.skins.push(s);
         }
         if let Some(mesh) = node.mesh() {
+            // 默认变形权重：节点写了用节点的，不然用网格的
+            let weights = node.weights().or(mesh.weights()).unwrap_or_default().to_vec();
             for prim in mesh.primitives() {
                 if prim.mode() != Mode::Triangles {
                     log::warn!("glTF 网格 {} 的图元模式 {:?} 不支持，跳过", mesh.index(), prim.mode());
@@ -224,7 +226,7 @@ impl Loader<'_> {
                     }),
                 };
                 let skinned = skin.filter(|_| self.assets.mesh(mesh_id).is_some_and(|m| !m.skin.is_empty()));
-                self.parts.push(Part { node: Some(index), skin: skinned.map(|s| s as u32), ..Part::new(mesh_id, material, world) });
+                self.parts.push(Part { node: Some(index), skin: skinned.map(|s| s as u32), weights: weights.clone(), ..Part::new(mesh_id, material, world) });
             }
         }
         for child in node.children() {
@@ -242,7 +244,7 @@ impl Loader<'_> {
             Some(i) => i.into_u32().collect(),
             None => (0..positions.len() as u32).collect(),
         };
-        let vertices = positions
+        let vertices: Vec<Vertex> = positions
             .iter()
             .enumerate()
             .map(|(i, &p)| {
@@ -266,7 +268,16 @@ impl Loader<'_> {
         if !skin.is_empty() && skin.len() != positions.len() {
             return Err(format!("图元有 {} 个顶点、{} 份关节权重", positions.len(), skin.len()));
         }
-        let mut mesh = Mesh { vertices, indices, skin };
+        // 变形目标：没写 POSITION 的位置不变；切线差不支持
+        let n = vertices.len();
+        let targets = reader
+            .read_morph_targets()
+            .map(|(positions, normals, _)| MorphTarget {
+                positions: positions.map_or_else(|| vec![Vec3::ZERO; n], |p| p.map(Vec3::from).collect()),
+                normals: normals.map(|n| n.map(Vec3::from).collect()).unwrap_or_default(),
+            })
+            .collect();
+        let mut mesh = Mesh { vertices, indices, skin, targets };
         if normals.is_none() {
             mesh.compute_normals();
         }
@@ -299,7 +310,7 @@ impl Loader<'_> {
             .collect()
     }
 
-    /// 没名字的动画按编号叫（"0"、"1"…）。目标不在默认场景里的通道和变形权重通道跳过。
+    /// 没名字的动画按编号叫（"0"、"1"…）。目标不在默认场景里的通道跳过；变形权重通道按每 4 个目标拆成几条。
     fn animation(&self, animation: &gltf::Animation) -> Animation {
         let name = animation.name().map_or_else(|| animation.index().to_string(), str::to_owned);
         let mut channels = Vec::new();
@@ -311,25 +322,35 @@ impl Loader<'_> {
                 log::warn!("glTF 动画 {name:?} 的通道 {i} 读不出数据，跳过");
                 continue;
             };
-            let (property, values): (Property, Vec<Vec4>) = match outputs {
-                ReadOutputs::Translations(v) => (Property::Translation, v.map(|v| Vec3::from(v).extend(0.0)).collect()),
-                ReadOutputs::Rotations(v) => (Property::Rotation, v.into_f32().map(Vec4::from).collect()),
-                ReadOutputs::Scales(v) => (Property::Scale, v.map(|v| Vec3::from(v).extend(0.0)).collect()),
-                ReadOutputs::MorphTargetWeights(_) => {
-                    log::warn!("glTF 动画 {name:?} 的变形权重通道不支持，跳过");
-                    continue;
-                }
-            };
             let interpolation = match channel.sampler().interpolation() {
                 gltf::animation::Interpolation::Step => Interpolation::Step,
                 gltf::animation::Interpolation::Linear => Interpolation::Linear,
                 gltf::animation::Interpolation::CubicSpline => Interpolation::CubicSpline,
             };
-            let channel = Channel { node, property, interpolation, times: times.collect(), values };
-            // 坏通道只丢这一条，不让整个模型加载失败
-            match channel.problem(self.nodes.len()) {
-                Some(bad) => log::warn!("glTF 动画 {name:?} 的通道 {i}：{bad}，跳过"),
-                None => channels.push(channel),
+            let times: Vec<f32> = times.collect();
+            let tracks: Vec<(Property, Vec<Vec4>)> = match outputs {
+                ReadOutputs::Translations(v) => vec![(Property::Translation, v.map(|v| Vec3::from(v).extend(0.0)).collect())],
+                ReadOutputs::Rotations(v) => vec![(Property::Rotation, v.into_f32().map(Vec4::from).collect())],
+                ReadOutputs::Scales(v) => vec![(Property::Scale, v.map(|v| Vec3::from(v).extend(0.0)).collect())],
+                ReadOutputs::MorphTargetWeights(v) => {
+                    let per_key = if interpolation == Interpolation::CubicSpline { 3 } else { 1 };
+                    let flat: Vec<f32> = v.into_f32().collect();
+                    match crate::gltf_morph::split_weights(&flat, times.len(), per_key) {
+                        Ok(segments) => segments.into_iter().map(|(s, values)| (Property::Weights(s), values)).collect(),
+                        Err(bad) => {
+                            log::warn!("glTF 动画 {name:?} 的变形权重通道 {i}：{bad}，跳过");
+                            continue;
+                        }
+                    }
+                }
+            };
+            for (property, values) in tracks {
+                let channel = Channel { node, property, interpolation, times: times.clone(), values };
+                // 坏通道只丢这一条，不让整个模型加载失败
+                match channel.problem(self.nodes.len()) {
+                    Some(bad) => log::warn!("glTF 动画 {name:?} 的通道 {i}：{bad}，跳过"),
+                    None => channels.push(channel),
+                }
             }
         }
         let duration = channels.iter().filter_map(|c| c.times.last().copied()).fold(0.0, f32::max);
@@ -348,12 +369,8 @@ impl Loader<'_> {
             self.texture(info.texture().source().index())
         });
         let alpha_cutoff = match m.alpha_mode() {
-            AlphaMode::Opaque => None,
+            AlphaMode::Opaque | AlphaMode::Blend => None,
             AlphaMode::Mask => Some(m.alpha_cutoff().unwrap_or(0.5)),
-            AlphaMode::Blend => {
-                log::warn!("glTF 材质 {index} 是 BLEND 模式，暂按不透明处理");
-                None
-            }
         };
         let id = self.assets.add_material(Material {
             base_color: Vec4::from(pbr.base_color_factor()),
@@ -363,6 +380,7 @@ impl Loader<'_> {
             emissive: Vec3::from(m.emissive_factor()),
             alpha_cutoff,
             double_sided: m.double_sided(),
+            blend: matches!(m.alpha_mode(), AlphaMode::Blend),
         });
         self.materials.insert(index, id);
         id
@@ -516,9 +534,20 @@ mod tests {
         const NO_MATERIAL: &str = r#"{"asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],"nodes":[{"mesh":0}],"meshes":[{"primitives":[{"attributes":{"POSITION":0}}]}],"buffers":[{"byteLength":36,"uri":"data:application/octet-stream;base64,AAAAAAAAAAAAAAAAAACAPwAAAAAAAAAAAAAAAAAAgD8AAAAA"}],"bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":36}],"accessors":[{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[0,0,0],"max":[1,1,0]}]}"#;
         let (mut assets, mut images) = (Assets3d::default(), Assets::<Image>::with_white());
         let model = assets.load_gltf(&mut images, NO_MATERIAL.as_bytes()).unwrap();
-        let part = assets.model(model).unwrap().parts[0];
+        let part = assets.model(model).unwrap().parts[0].clone();
         let m = *assets.material(part.material);
         assert_eq!((m.base_color, m.metallic, m.roughness), (Vec4::ONE, 1.0, 1.0), "glTF 规范的默认材质");
+    }
+
+    #[test]
+    fn blend_alpha_mode_reads_as_blend() {
+        let gltf = |mode: &str| format!(r#"{{"asset":{{"version":"2.0"}},"scene":0,"scenes":[{{"nodes":[0]}}],"nodes":[{{"mesh":0}}],"meshes":[{{"primitives":[{{"attributes":{{"POSITION":0}},"material":0}}]}}],"materials":[{{"alphaMode":"{mode}"}}],"buffers":[{{"byteLength":36,"uri":"data:application/octet-stream;base64,AAAAAAAAAAAAAAAAAACAPwAAAAAAAAAAAAAAAAAAgD8AAAAA"}}],"bufferViews":[{{"buffer":0,"byteOffset":0,"byteLength":36}}],"accessors":[{{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[0,0,0],"max":[1,1,0]}}]}}"#);
+        for (mode, blend, cutoff) in [("BLEND", true, None), ("OPAQUE", false, None), ("MASK", false, Some(0.5))] {
+            let (mut assets, mut images) = (Assets3d::default(), Assets::<Image>::with_white());
+            let model = assets.load_gltf(&mut images, gltf(mode).as_bytes()).unwrap();
+            let m = *assets.material(assets.model(model).unwrap().parts[0].material);
+            assert_eq!((m.blend, m.alpha_cutoff), (blend, cutoff), "{mode}");
+        }
     }
 
     #[test]
@@ -556,7 +585,7 @@ mod tests {
         assert_eq!(*asked.borrow(), ["mesh a.bin", "../tex/brick 1.png"], "百分号编码要先解开");
         let (mut assets, mut images) = (Assets3d::default(), Assets::<Image>::with_white());
         let model = assets.add_gltf(&mut images, &gltf).unwrap();
-        let part = assets.model(model).unwrap().parts[0];
+        let part = assets.model(model).unwrap().parts[0].clone();
         assert_eq!(assets.mesh(part.mesh).unwrap().vertices.len(), 3);
         let texture = assets.material(part.material).base_color_texture.unwrap();
         assert_eq!(images.get(texture).unwrap().rgba, [9, 8, 7, 255, 1, 2, 3, 255]);
@@ -569,7 +598,7 @@ mod tests {
         let gltf = super::Gltf::parse(EXTERNAL.as_bytes(), |uri| if uri.ends_with(".bin") { Ok(TRIANGLE_BIN.to_vec()) } else { Err("没有".into()) }).unwrap();
         let (mut assets, mut images) = (Assets3d::default(), Assets::<Image>::with_white());
         let model = assets.add_gltf(&mut images, &gltf).unwrap();
-        let part = assets.model(model).unwrap().parts[0];
+        let part = assets.model(model).unwrap().parts[0].clone();
         assert_eq!(assets.material(part.material).base_color_texture, None);
         assert_eq!(images.len(), 1, "没有新贴图");
     }

@@ -1,4 +1,4 @@
-//! 网格：交错顶点（position / normal / uv）加 u32 索引，逆时针为正面；蒙皮的网格另带每个顶点的关节和权重。
+//! 网格：交错顶点（position / normal / uv）加 u32 索引，逆时针为正面；蒙皮的网格另带每个顶点的关节和权重，变形的另带每个目标的位置差、法线差。
 
 use bytemuck::{Pod, Zeroable};
 use glam::{Vec2, Vec3};
@@ -25,12 +25,26 @@ pub struct Influence {
     pub weights: [f32; 4],
 }
 
+/// 一个网格最多几个变形目标，多的丢掉。
+pub const MAX_MORPH_TARGETS: usize = 8;
+
+/// 一个变形目标（glTF 的 morph target）：每个顶点的位置差、法线差，按权重加到顶点上。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct MorphTarget {
+    /// 和网格的顶点一样多。
+    pub positions: Vec<Vec3>,
+    /// 空表示法线不变；不空时和顶点一样多。
+    pub normals: Vec<Vec3>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Mesh {
     pub vertices: Vec<Vertex>,
     pub indices: Vec<u32>,
     /// 空表示不蒙皮；不空时和 `vertices` 一样长。
     pub skin: Vec<Influence>,
+    /// 变形目标，最多 [`MAX_MORPH_TARGETS`] 个。
+    pub targets: Vec<MorphTarget>,
 }
 
 impl Mesh {

@@ -4,7 +4,7 @@ import { COIN_SHADER, FLASH, FLASH_MS, levelAudio, night, portalOver, POST, SHAD
 import { levelKey, otherLocale, strings } from "./strings";
 import { NEW_SAVE, nextSlot, SAVE_MIGRATIONS, SAVE_VERSION, saveDataOf, saveSummary, SLOTS } from "./savefile";
 import { hpBar, outOfHearts, TITLE_HOLD_MS, titleBubble } from "./hud";
-import { campfireAt, finish, flagOn, LEVELS, ROWS, TILE, TOWER_TRIGGER, towerAt, type Progress } from "./levels";
+import { campfireAt, finish, flagOn, JELLY_ZONE, jellyAt, LEVELS, ROWS, TILE, TOWER_TRIGGER, towerAt, towerSpot, type Progress } from "./levels";
 
 /** Rust 发的事件：掉出关卡或被敌人撞到送回起点、按 R 重新开始、踩到敌人。 */
 interface Events {
@@ -82,6 +82,8 @@ function App() {
   const stomped = signal<string[]>([]);
   /** 幽灵上一次发现角色时响声的时间。 */
   const spotted = new Map<string, number>();
+  /** 角色在果冻的感应区里：果冻压一压。 */
+  const nearJelly = signal(false);
   /** 这一局的 3D 箱子已经撞散了。 */
   let toppled = false;
   /** 箱子摞了第几次：按 R 重来（关卡不重建）时也换 id，让箱子重新摞起来。 */
@@ -108,6 +110,7 @@ function App() {
     stomped.set([]);
     falls.set(0);
     won.set(null);
+    nearJelly.set(false);
     toppled = false;
     towerRound.set(towerRound() + 1);
     started = Date.now();
@@ -159,6 +162,11 @@ function App() {
     const x = now().tower;
     return x === null ? null : towerAt(x, towerRound());
   };
+  /** 这一关的幽灵果冻（没有就是 null）。 */
+  const jelly = () => {
+    const x = now().jelly;
+    return x === null ? null : jellyAt(x, nearJelly());
+  };
   /** 角色撞上去：箱子朝右飞散，前后错开一点，上面的飞得高。 */
   const topple = () => {
     const t = tower();
@@ -178,12 +186,12 @@ function App() {
     physics: { gravity: [0, -1800] },
     camera: { follow: "player", y: 60, smooth: 0.15, bounds: { left: 0, right: now().right, bottom: -160, top: (ROWS - 1) * TILE } },
     camera3d: { match2d: true, interleave: true },
-    // 箱子顶上的小箱子在大箱子顶面投下影子
-    lights: [{ id: "sun", kind: "directional", direction: [-1, -2, -1.5], shadows: true }],
+    // 箱子顶上的小箱子在大箱子顶面投下影子；有箱子堆的关再加一盏照着它的聚光灯
+    lights: [{ id: "sun", kind: "directional", direction: [-1, -2, -1.5], shadows: true }, ...(now().tower === null ? [] : [towerSpot(now().tower!)])],
     ambient: { brightness: 0.35 },
     // 3D 箱子摞起来的地面和关卡的地面一样高
     physics3d: { gravity: [0, -1800, 0] },
-    models: [now().crate.model, flagOn(now().goal), ...(tower()?.models ?? [])],
+    models: [now().crate.model, flagOn(now().goal), ...(tower()?.models ?? []), ...(jelly() === null ? [] : [jelly()!.model])],
     emitters3d: now().tower === null ? [] : [campfireAt(now().tower!)],
     bars: [hpBar(falls())],
     bubbles: title() === null ? [] : [titleBubble(t(levelKey(title()!)))],
@@ -212,6 +220,7 @@ function App() {
       ),
       ...now().ramps,
       ...(tower() === null ? [] : [tower()!.trigger]),
+      ...(jelly() === null ? [] : [jelly()!.zone]),
       now().crate.body,
       ...now().swing.sprites,
       now().goal,
@@ -251,8 +260,11 @@ function App() {
           if (!brokenSlot()) persist();
         }}
         onCollide={(e) => {
-          if (switching || !e.started || (e.a !== "player" && e.b !== "player")) return;
+          if (switching || (e.a !== "player" && e.b !== "player")) return;
           const other = e.a === "player" ? e.b : e.a;
+          // 果冻的感应区进出都算
+          if (other === JELLY_ZONE) return nearJelly.set(e.started);
+          if (!e.started) return;
           if (other === TOWER_TRIGGER) return topple();
           const coin = now().coins.find((c) => c.id === other);
           if (coin && !taken().includes(coin.id)) {

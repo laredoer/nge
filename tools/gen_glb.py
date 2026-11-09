@@ -2,7 +2,7 @@
 """生成 nge 用的 glTF 测试 / 示例模型（.glb，贴图内嵌），只用标准库。
 
 用法：python3 tools/gen_glb.py
-输出：crates/nge-render3d/tests/data/test.glb、examples/{model,platformer}/assets/crate.glb、examples/platformer/assets/flag.glb
+输出：crates/nge-render3d/tests/data/{test,morph}.glb、examples/{model,platformer}/assets/crate.glb、examples/platformer/assets/{flag,jelly}.glb
 """
 import json
 import math
@@ -218,7 +218,80 @@ def flag_model():
     b.write(ROOT / "examples/platformer/assets/flag.glb")
 
 
+def morph_model():
+    """变形测试模型：宽 1、高 1 的竖直方块（朝 +Z），目标 0 把顶边抬高 1，目标 1 整体右移 0.5。
+    网格默认权重 [0.25, 0]；节点 0 自己写了 [0.5, 0]（节点优先），节点 1 用网格的；动画 squish 线性地 0 → (1, 0.5) → 0。"""
+    b = Builder()
+    pos = [(-0.5, 0, 0), (0.5, 0, 0), (0.5, 1, 0), (-0.5, 1, 0)]
+    lift = [(0, 0, 0), (0, 0, 0), (0, 1, 0), (0, 1, 0)]
+    prim = {
+        "attributes": {"POSITION": b.accessor(pos, "VEC3"), "NORMAL": b.accessor([(0, 0, 1)] * 4, "VEC3")},
+        "indices": b.accessor([0, 1, 2, 0, 2, 3], "SCALAR", 5125),
+        "targets": [
+            {"POSITION": b.accessor(lift, "VEC3"), "NORMAL": b.accessor([(0, 0.5, 0)] * 4, "VEC3")},
+            {"POSITION": b.accessor([(0.5, 0, 0)] * 4, "VEC3")},
+        ],
+    }
+    b.gltf["meshes"] = [{"name": "bump", "primitives": [prim], "weights": [0.25, 0.0]}]
+    b.gltf["nodes"] = [{"name": "squish", "mesh": 0, "weights": [0.5, 0.0]}, {"name": "plain", "mesh": 0, "translation": [2, 0, 0]}]
+    times = b.accessor([0.0, 0.5, 1.0], "SCALAR", vertex=False)
+    weights = b.accessor([0.0, 0.0, 1.0, 0.5, 0.0, 0.0], "SCALAR", vertex=False)
+    b.gltf["animations"] = [{"name": "squish", "channels": [{"sampler": 0, "target": {"node": 0, "path": "weights"}}], "samplers": [{"input": times, "output": weights}]}]
+    b.gltf["scenes"] = [{"nodes": [0, 1]}]
+    b.gltf["scene"] = 0
+    b.write(ROOT / "crates/nge-render3d/tests/data/morph.glb")
+
+
+def jelly_model():
+    """平台跳跃的幽灵果冻：底面半径 0.5、高 0.6 的半透明圆顶（BLEND），底在 y = 0。
+    一个变形目标把它压扁摊开；动画 idle 权重一直是 0，squish 0 → 1 → 0 压一下弹回来。"""
+    b = Builder()
+    rings, segments, radius, height = 6, 24, 0.5, 0.6
+    pos, nor, idx = [], [], []
+    for i in range(rings + 1):
+        phi = math.pi / 2 * i / rings
+        r, y = radius * math.cos(phi), height * math.sin(phi)
+        for j in range(segments + 1):
+            theta = 2 * math.pi * j / segments
+            x, z = r * math.cos(theta), -r * math.sin(theta)
+            # 椭球的梯度当法线；顶点处退化成朝上
+            n = (x / radius ** 2, y / height ** 2, z / radius ** 2)
+            length = math.sqrt(sum(c * c for c in n)) or 1.0
+            pos.append((x, y, z))
+            nor.append(tuple(c / length for c in n) if i < rings else (0.0, 1.0, 0.0))
+    for i in range(rings):
+        for j in range(segments):
+            a, c = i * (segments + 1) + j, (i + 1) * (segments + 1) + j
+            idx += [a, a + 1, c + 1, a, c + 1, c]
+    squish = [(0.35 * x, -0.5 * y, 0.35 * z) for x, y, z in pos]
+    prim = {
+        "attributes": {"POSITION": b.accessor(pos, "VEC3"), "NORMAL": b.accessor(nor, "VEC3")},
+        "indices": b.accessor(idx, "SCALAR", 5125),
+        "material": 0,
+        "targets": [{"POSITION": b.accessor(squish, "VEC3")}],
+    }
+    b.gltf["meshes"] = [{"name": "jelly", "primitives": [prim], "weights": [0.0]}]
+    b.gltf["materials"] = [{
+        "name": "jelly",
+        "pbrMetallicRoughness": {"baseColorFactor": [0.55, 0.85, 1.0, 0.55], "metallicFactor": 0.0, "roughnessFactor": 0.25},
+        "emissiveFactor": [0.08, 0.16, 0.24],
+        "alphaMode": "BLEND",
+    }]
+    b.gltf["nodes"] = [{"name": "jelly", "mesh": 0}]
+
+    def weights(name, times, values):
+        sampler = {"input": b.accessor(times, "SCALAR", vertex=False), "output": b.accessor(values, "SCALAR", vertex=False)}
+        return {"name": name, "channels": [{"sampler": 0, "target": {"node": 0, "path": "weights"}}], "samplers": [sampler]}
+
+    b.gltf["animations"] = [weights("idle", [0.0, 1.0], [0.0, 0.0]), weights("squish", [0.0, 0.3, 0.6], [0.0, 1.0, 0.0])]
+    b.gltf["scenes"] = [{"nodes": [0]}]
+    b.gltf["scene"] = 0
+    b.write(ROOT / "examples/platformer/assets/jelly.glb")
+
+
 if __name__ == "__main__":
     test_model()
+    morph_model()
     crate_model()
     flag_model()
+    jelly_model()

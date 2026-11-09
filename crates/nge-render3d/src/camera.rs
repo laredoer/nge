@@ -76,7 +76,7 @@ impl Camera3d {
         }
     }
 
-    fn ortho_height(&self) -> Option<f32> {
+    pub(crate) fn ortho_height(&self) -> Option<f32> {
         self.ortho.filter(|h| h.is_finite() && *h > 0.0)
     }
 }

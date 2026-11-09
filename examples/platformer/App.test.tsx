@@ -1,7 +1,7 @@
 // `nsh test`：无头 runner 里没有游戏视图，测按钮的显示和按住的手指怎么换成按键。
 import { expect, open, test } from "nsh/test";
 import { heldKey } from "../../ts/nge";
-import { campfireAt, finish, LEVELS, NEW_PROGRESS, progressOf, rampOf, TOWER_BOX, TOWER_TRIGGER, towerAt } from "./levels";
+import { campfireAt, finish, JELLY_FADE, JELLY_Z, JELLY_ZONE, jellyAt, LEVELS, NEW_PROGRESS, progressOf, rampOf, ROWS, TOWER_BOX, TOWER_TRIGGER, towerAt, towerSpot } from "./levels";
 
 const BUTTONS = ["id:key-ArrowLeft", "id:key-ArrowRight", "id:key-Space", "id:key-KeyR"];
 
@@ -169,4 +169,52 @@ test("塔边一堆 3D 篝火：叠加混合往上飘，在箱子同一个深度�
     expect(b.trail?.minDistance ?? 0).toBeGreaterThan(0);
     expect(b.trail!.width![0]).toBeLessThan(TOWER_BOX);
   }
+});
+
+test("聚光灯从左前上方照着箱子堆，开影子，箱子在内锥里、射程够", () => {
+  const x = LEVELS[0].built.tower!;
+  const spot = towerSpot(x);
+  const [floor, ...boxes] = towerAt(x, 0).models;
+  expect(spot.kind).toBe("spot");
+  expect(spot.shadows).toBe(true);
+  expect(spot.x!).toBeLessThan(x);
+  expect(spot.z!).toBeGreaterThan(floor.z!);
+  const inner = ((spot.innerAngle ?? spot.angle! * 0.8) * Math.PI) / 180;
+  const [dx, dy, dz] = spot.direction!;
+  const len = Math.hypot(dx, dy, dz);
+  for (const b of boxes) {
+    const to = [b.x! - spot.x!, b.y! - spot.y!, b.z! - spot.z!];
+    const d = Math.hypot(to[0], to[1], to[2]);
+    const cos = (to[0] * dx + to[1] * dy + to[2] * dz) / (d * len);
+    expect(Math.acos(Math.min(1, cos))).toBeLessThan(inner);
+    expect(spot.range!).toBeGreaterThan(d);
+  }
+});
+
+test("幽灵果冻在第一关的地面上，半透明模型；靠近时从 idle 淡到 squish，离开淡回去", () => {
+  const x = LEVELS[0].built.jelly!;
+  expect(x).not.toBe(null);
+  expect(LEVELS[1].built.jelly).toBe(null);
+  const far = jellyAt(x, false);
+  const near = jellyAt(x, true);
+  expect(far.model.model).toBe("asset:/@platformer/jelly.glb");
+  expect(far.model.animation).toEqual({ clip: "idle", fade: JELLY_FADE });
+  expect(near.model.animation).toEqual({ clip: "squish", fade: JELLY_FADE });
+  expect(JELLY_FADE).toBeGreaterThan(0);
+  // 只有动画不同：同一个 id、同一个位置，引擎接着这只淡过去
+  expect({ ...near.model, animation: undefined }).toEqual({ ...far.model, animation: undefined });
+  expect(far.model.y).toBe(0);
+  // 半透明不写深度：放在角色（z = 5）后面、不小于 0（z < 0 的精灵画在 3D 下面）
+  expect(far.model.z).toBe(JELLY_Z);
+  expect(JELLY_Z).toBeGreaterThanOrEqual(0);
+  expect(JELLY_Z).toBeLessThan(5);
+  // 底下是地面，不是坑
+  const map = LEVELS[0].built.tilemaps[0];
+  expect(map.data[(ROWS - 1) * map.cols + Math.floor(x / map.tile)]).not.toBe(-1);
+  // 感应区是看不见的 2D sensor，罩着果冻
+  expect(far.zone.id).toBe(JELLY_ZONE);
+  expect(far.zone.body?.sensor).toBe(true);
+  expect(Math.abs(far.zone.x! - x)).toBeLessThan(far.zone.w! / 2);
+  expect(far.zone.w!).toBeGreaterThan(far.model.scale!);
+  expect(near.zone).toEqual(far.zone);
 });

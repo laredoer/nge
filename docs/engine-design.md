@@ -95,6 +95,7 @@
 | **压缩纹理** | 贴图可以是 KTX2：ASTC、BC1 / BC3 / BC7、ETC2，带 mipmap；设备支持就直接上传压缩数据，不支持在 CPU 上解成 RGBA8；`ktx2` 读写、PNG 转 KTX2（BC3）的小工具；见 [compressed-textures.md](compressed-textures.md) | 平台跳跃的远山换成 BC3 的 KTX2 |
 | **3D 粒子和拖尾** | `ParticleEmitter3d`：方向锥里发射、朝着相机的方片，透明（从远往近）或叠加；`Trail3d`：跟着实体的带子，越老越细越淡；`Billboards` 在网格之后画，被模型挡住、不写深度；场景的 `emitters3d` 和模型的 `trail`；见 [particles3d.md](particles3d.md) | 平台跳跃第一关箱子旁的篝火，被撞飞的箱子拖尾巴 |
 | **2D 渲染补齐** | `NormalMap`：法线图让受光的精灵按表面朝向明暗（灯有 `height`）；`Occluder2d`：精灵的矩形或多边形挡住开了 `shadows` 的灯，硬阴影；后处理里的 `bloom` 是内置的多遍效果；`PostEffect.layer` 可以只给 z < 0 的背景层；见 [render2d-more.md](render2d-more.md) | 平台跳跃每关有 bloom 和远景模糊，夜里的石碑有凹凸、挡住角色的灯 |
+| **3D 渲染补齐** | 材质 `blend` 的半透明网格按到相机的距离由远到近画；`SpotLight` 聚光灯；聚光灯、点光源（六面）能投影子，方向光可以分 2–4 段级联；`Animator::play(clip, fade)` 淡入淡出；glTF 的变形（morph target）和 `weights` 动画；见 [render3d-more.md](render3d-more.md) | 平台跳跃第一关有照着箱子堆、投影子的聚光灯，一只半透明的果冻靠近时从 idle 淡到 squish |
 | **M6 Android** | SurfaceView 和 Vulkan，JNI 胶水层 | 示例游戏在 Android 真机上能跑 |
 
 ## 待定

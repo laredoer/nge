@@ -5,7 +5,7 @@ use glam::{EulerRot, Quat, Vec2, Vec3, Vec4};
 use nge_particles::ParticleEmitter;
 use nge_render2d::Transform2d;
 use nge_ecs::Interleave;
-use nge_render3d::{AmbientLight, Animator, Camera3d, DirectionalLight, GltfModel, Model3d, PointLight, Pose, Transform3d};
+use nge_render3d::{AmbientLight, Animator, Camera3d, DirectionalLight, GltfModel, Model3d, PointLight, Pose, Shadows, SpotLight, Transform3d};
 use nge_text::{ScreenText, Text2d};
 
 use crate::attach::Attach;
@@ -116,9 +116,10 @@ pub(crate) fn sync_models(
                 entity.remove::<(Animator, Pose)>();
             }
             Some(a) => {
-                // 同一个模型、同一段动画：只改速度和循环，接着播
-                match animators.get_mut(entity.id()).ok().filter(|old| same_model && old.clip == a.clip) {
+                // 同一个模型：换动画按 fade 淡过去，只改速度和循环时接着播
+                match animators.get_mut(entity.id()).ok().filter(|_| same_model) {
                     Some(mut old) => {
+                        old.play(a.clip.clone(), a.fade);
                         old.speed = a.speed;
                         old.looping = a.looping;
                     }
@@ -150,7 +151,7 @@ pub(crate) fn sync_models(
 pub(crate) fn sync_lights(mut commands: Commands, scene: Res<Scene>, nodes: Query<(Entity, &Declared<LightNode>)>) {
     sync_list(&mut commands, &scene.lights, &nodes, |commands, entity, _, node| {
         let mut entity = commands.entity(entity);
-        entity.remove::<(DirectionalLight, PointLight, Transform3d)>();
+        entity.remove::<(DirectionalLight, PointLight, SpotLight, Transform3d)>();
         match node.kind {
             LightKind::Directional => {
                 let d = DirectionalLight::default();
@@ -164,9 +165,25 @@ pub(crate) fn sync_lights(mut commands: Commands, scene: Res<Scene>, nodes: Quer
             LightKind::Point => {
                 let d = PointLight::default();
                 entity.insert((
-                    PointLight { color: rgb(node.color).unwrap_or(d.color), intensity: node.intensity.unwrap_or(d.intensity), range: node.range.unwrap_or(d.range) },
+                    PointLight { color: rgb(node.color).unwrap_or(d.color), intensity: node.intensity.unwrap_or(d.intensity), range: node.range.unwrap_or(d.range), shadows: node.shadows },
                     Transform3d::from_xyz(node.x, node.y, node.z),
                 ));
+            }
+            LightKind::Spot => {
+                let d = SpotLight::default();
+                let outer = node.angle.map_or(d.outer_angle, f32::to_radians);
+                let spot = SpotLight {
+                    color: rgb(node.color).unwrap_or(d.color),
+                    intensity: node.intensity.unwrap_or(d.intensity),
+                    range: node.range.unwrap_or(d.range),
+                    inner_angle: node.inner_angle.map_or(outer * 0.8, f32::to_radians),
+                    outer_angle: outer,
+                    shadows: node.shadows,
+                };
+                // 引擎里聚光灯照向 rotation × -Z
+                let aim = Vec3::from(node.direction).try_normalize().unwrap_or(Vec3::NEG_Y);
+                let transform = Transform3d { rotation: Quat::from_rotation_arc(Vec3::NEG_Z, aim), ..Transform3d::from_xyz(node.x, node.y, node.z) };
+                entity.insert((spot, transform));
             }
         }
     });
@@ -179,12 +196,26 @@ pub(crate) fn sync_camera3d(
     mut camera: Query<(Entity, &mut Camera3d, &mut Transform3d, Has<Match2d>), With<SceneCamera>>,
     mut ambient: ResMut<AmbientLight>,
     mut interleave: ResMut<Interleave>,
+    mut shadows: ResMut<Shadows>,
     mut last_camera: Local<Option<Option<Camera3dNode>>>,
     mut last_ambient: Local<Option<Option<AmbientNode>>>,
 ) {
     if last_camera.as_ref() != Some(&scene.camera3d) {
         let cam = scene.camera3d.clone().unwrap_or_default();
         interleave.0 = cam.interleave;
+        // 声明了的写进去；上次声明了、这次去掉的回到默认；其余留着 Rust 设的
+        let before = last_camera.clone().flatten().unwrap_or_default();
+        let d = Shadows::default();
+        match (cam.shadow_cascades, before.shadow_cascades) {
+            (Some(n), _) => shadows.cascades = n,
+            (None, Some(_)) => shadows.cascades = d.cascades,
+            (None, None) => {}
+        }
+        match (cam.shadow_distance, before.shadow_distance) {
+            (Some(v), _) => shadows.distance = v,
+            (None, Some(_)) => shadows.distance = d.distance,
+            (None, None) => {}
+        }
         let (eye, target) = (Vec3::new(cam.x, cam.y, cam.z.unwrap_or(6.0)), Vec3::from(cam.target));
         // 正上方 / 正下方看时 y 不能当 up，改用 -z（画面上方朝 -z）
         let up = if (target - eye).normalize_or_zero().cross(Vec3::Y).length_squared() < 1e-8 { Vec3::NEG_Z } else { Vec3::Y };
@@ -216,6 +247,7 @@ mod tests {
     use nge_assets::{Assets, Image};
     use nge_render2d::{Atlases, Sprite, SpriteImage};
     use nge_text::Font;
+    use nge_render3d::Fade;
     use serde_json::json;
 
     use super::*;
@@ -334,6 +366,28 @@ mod tests {
     }
 
     #[test]
+    fn model_animation_fades_into_a_new_clip() {
+        let mut app = app();
+        let declare = |app: &mut nge_ecs::App, animation: serde_json::Value| {
+            frame(app, Some(json!({ "models": [{ "id": "jelly", "model": "asset:/@t/a.glb", "animation": animation }] })));
+        };
+        declare(&mut app, json!({ "clip": "idle", "fade": 0.3 }));
+        let world = app.world_mut();
+        let entity = world.query_filtered::<Entity, With<Declared<ModelNode>>>().single(world).unwrap();
+        assert_eq!(app.world().get::<Animator>(entity).unwrap().fade, None, "第一次播没东西可淡");
+        app.world_mut().get_mut::<Animator>(entity).unwrap().time = 0.5;
+
+        declare(&mut app, json!({ "clip": "squish", "fade": 0.3, "speed": 2 }));
+        let a = app.world().get::<Animator>(entity).cloned().unwrap();
+        assert_eq!((a.clip.as_str(), a.time, a.speed), ("squish", 0.0, 2.0));
+        assert_eq!(a.fade, Some(Fade { clip: "idle".into(), time: 0.5, speed: 1.0, looping: true, elapsed: 0.0, duration: 0.3 }), "旧动画按原来的速度淡出");
+
+        app.world_mut().get_mut::<Animator>(entity).unwrap().fade = None;
+        declare(&mut app, json!({ "clip": "squish", "fade": 0.5, "speed": 2 }));
+        assert_eq!(app.world().get::<Animator>(entity).unwrap().fade, None, "只改 fade 不重新淡");
+    }
+
+    #[test]
     fn lights_camera3d_and_ambient() {
         let mut app = app();
         frame(&mut app, Some(json!({
@@ -365,6 +419,58 @@ mod tests {
         let t = *world.query_filtered::<&Transform3d, With<Camera3d>>().single(world).unwrap();
         assert_eq!(t.translation, Vec3::new(0.0, 2.0, 6.0), "不声明时回到默认相机");
         assert!(!world.resource::<nge_ecs::Interleave>().0, "不声明时关掉混排");
+    }
+
+    #[test]
+    fn spot_lights_aim_along_direction_and_cast_shadows() {
+        let mut app = app();
+        frame(&mut app, Some(json!({ "lights": [{ "id": "spot", "kind": "spot", "x": 1, "y": 2, "z": 3, "direction": [1, 0, 0], "angle": 40, "shadows": true, "range": 50 }] })));
+        let world = app.world_mut();
+        let (spot, t) = world.query::<(&SpotLight, &Transform3d)>().single(world).map(|(l, t)| (*l, *t)).unwrap();
+        assert!((spot.outer_angle - 40f32.to_radians()).abs() < 1e-6 && (spot.inner_angle - 32f32.to_radians()).abs() < 1e-6, "内锥默认外锥的 80%：{spot:?}");
+        assert!(spot.shadows && spot.range == 50.0);
+        assert_eq!(t.translation, Vec3::new(1.0, 2.0, 3.0));
+        assert!((t.rotation * Vec3::NEG_Z - Vec3::X).length() < 1e-5, "照向 direction：{:?}", t.rotation * Vec3::NEG_Z);
+
+        frame(&mut app, Some(json!({ "lights": [{ "id": "spot", "kind": "spot", "direction": [0, 1, 0], "innerAngle": 10 }] })));
+        let world = app.world_mut();
+        let (spot, t) = world.query::<(&SpotLight, &Transform3d)>().single(world).map(|(l, t)| (*l, *t)).unwrap();
+        let d = SpotLight::default();
+        assert!((spot.outer_angle - d.outer_angle).abs() < 1e-6 && (spot.inner_angle - 10f32.to_radians()).abs() < 1e-6 && !spot.shadows);
+        assert!((t.rotation * Vec3::NEG_Z - Vec3::Y).length() < 1e-5, "朝上：{:?}", t.rotation * Vec3::NEG_Z);
+
+        frame(&mut app, Some(json!({ "lights": [{ "id": "spot", "kind": "spot", "direction": [0, 0, 1] }] })));
+        let world = app.world_mut();
+        let t = *world.query_filtered::<&Transform3d, With<SpotLight>>().single(world).unwrap();
+        assert!((t.rotation * Vec3::NEG_Z - Vec3::Z).length() < 1e-5, "正对 +Z 的反方向也能转过去：{:?}", t.rotation * Vec3::NEG_Z);
+
+        frame(&mut app, Some(json!({ "lights": [{ "id": "spot", "kind": "point", "shadows": true }] })));
+        let world = app.world_mut();
+        assert_eq!(world.query::<&SpotLight>().iter(world).count(), 0, "换类型时去掉旧的灯");
+        let (point, t) = world.query::<(&PointLight, &Transform3d)>().single(world).map(|(l, t)| (*l, *t)).unwrap();
+        assert!(point.shadows, "点光源的影子跟着节点");
+        assert_eq!(t.rotation, Quat::IDENTITY, "不带聚光灯的朝向");
+
+        frame(&mut app, Some(json!({ "lights": [{ "id": "spot", "kind": "directional" }] })));
+        let world = app.world_mut();
+        assert_eq!(world.query::<(&SpotLight, &PointLight)>().iter(world).count(), 0);
+        assert_eq!(world.query_filtered::<&Transform3d, With<Declared<LightNode>>>().iter(world).count(), 0, "方向光不带位置");
+    }
+
+    #[test]
+    fn camera3d_sets_shadow_cascades_and_keeps_other_shadow_fields() {
+        let mut app = app();
+        app.world_mut().resource_mut::<Shadows>().size = 1024;
+        frame(&mut app, Some(json!({ "camera3d": { "match2d": true, "shadowCascades": 3, "shadowDistance": 80 } })));
+        let s = *app.world().resource::<Shadows>();
+        assert_eq!((s.cascades, s.distance, s.size), (3, 80.0, 1024));
+        app.world_mut().resource_mut::<Shadows>().local_size = 256;
+        frame(&mut app, Some(json!({ "camera3d": { "match2d": true, "shadowCascades": 2 } })));
+        let s = *app.world().resource::<Shadows>();
+        assert_eq!((s.cascades, s.distance, s.size, s.local_size), (2, Shadows::default().distance, 1024, 256), "去掉的字段回到默认，别的留着");
+        app.world_mut().resource_mut::<Shadows>().cascades = 4;
+        frame(&mut app, Some(json!({ "camera3d": { "match2d": true, "shadowCascades": 2 }, "ambient": { "brightness": 0.3 } })));
+        assert_eq!(app.world().resource::<Shadows>().cascades, 4, "相机声明没变时不覆盖 Rust 设的");
     }
 
     #[test]

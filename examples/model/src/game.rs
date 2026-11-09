@@ -62,7 +62,7 @@ fn setup(mut commands: Commands, mut assets: ResMut<Assets3d>, mut images: ResMu
     commands.spawn((Mesh3d { mesh: ground, material: grass }, Transform3d::default()));
     commands.spawn((Camera3d::default(), Orbit::default().eye()));
     commands.spawn(DirectionalLight { direction: Vec3::new(-1.0, -2.0, -1.5), ..Default::default() });
-    commands.spawn((PointLight { color: Vec3::new(1.0, 0.8, 0.5), intensity: 6.0, range: 8.0 }, Transform3d::from_xyz(-1.5, 1.5, 1.5)));
+    commands.spawn((PointLight { color: Vec3::new(1.0, 0.8, 0.5), intensity: 6.0, range: 8.0, shadows: false }, Transform3d::from_xyz(-1.5, 1.5, 1.5)));
 }
 
 /// 一根手指拖动：左右转 yaw，上下转 pitch。

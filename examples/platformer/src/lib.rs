@@ -874,4 +874,40 @@ mod tests {
         let (lo, hi) = tip.iter().fold((f32::MAX, f32::MIN), |(lo, hi), &z| (lo.min(z), hi.max(z)));
         assert!(hi - lo > 0.1, "{tip:?}");
     }
+
+    /// 幽灵果冻：半透明材质、一个变形目标；idle 不动，从 idle 淡到 squish 时权重慢慢起来。
+    #[test]
+    fn jelly_is_translucent_and_fades_into_a_squish() {
+        use nge_render3d::{Animator, Assets3d, Image, Model3d, Pose, Transform3d};
+
+        let uris: Vec<_> = assets!().iter().map(|f| f.uri).collect();
+        let ts = [include_str!("../App.tsx"), include_str!("../levels.ts")].concat();
+        assert!(uris.contains(&"asset:/@platformer/jelly.glb") && ts.contains("asset:/@platformer/jelly.glb"));
+        let mut app = App::new();
+        app.add_plugins(Render3dPlugin);
+        let model = app
+            .world_mut()
+            .resource_scope(|world, mut assets: Mut<Assets3d>| assets.load_gltf(&mut world.resource_mut::<Assets<Image>>(), include_bytes!("../assets/jelly.glb")))
+            .unwrap();
+        let assets = app.world().resource::<Assets3d>();
+        let loaded = assets.model(model).unwrap();
+        let names: Vec<&str> = loaded.animations.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(names, ["idle", "squish"]);
+        let part = &loaded.parts[0];
+        assert!(assets.material(part.material).blend && assets.material(part.material).base_color.w < 1.0, "半透明");
+        assert_eq!(assets.mesh(part.mesh).unwrap().targets.len(), 1);
+
+        let jelly = app.world_mut().spawn((Model3d(model), Transform3d::default(), Animator::new("idle"))).id();
+        let weight = |app: &mut App| {
+            app.tick(VIEWPORT, 0.05);
+            app.world().get::<Pose>(jelly).unwrap().weights[0][0]
+        };
+        assert_eq!((weight(&mut app), weight(&mut app)), (0.0, 0.0), "idle 不动");
+        app.world_mut().get_mut::<Animator>(jelly).unwrap().play("squish", 0.25);
+        let fading: Vec<f32> = (0..4).map(|_| weight(&mut app)).collect();
+        let full: Vec<f32> = (0..3).map(|_| weight(&mut app)).collect();
+        // 淡入时只占一部分，淡完以后按 squish 本身的曲线（0.3 秒压到底）
+        assert!(fading.iter().all(|&w| w < 0.6) && fading[3] > 0.0, "{fading:?}");
+        assert!(full.iter().any(|&w| w > 0.8), "{full:?}");
+    }
 }
