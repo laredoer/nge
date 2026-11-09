@@ -738,3 +738,29 @@ fn animated_nodes_move_their_parts() {
     let moved = sliding_cube(true).unwrap();
     assert!(moved.center()[0] < 10 && moved.at(lx, ly)[0] > 200, "{:?}", moved.at(lx, ly));
 }
+
+/// 排在 3D 渲染器后面，记下这一帧到它为止的（draw 次数，实例数）。
+struct CountProbe(std::sync::Arc<std::sync::Mutex<(u32, u32)>>);
+
+impl nge_ecs::Renderer for CountProbe {
+    fn render(&mut self, world: &mut World, _: &Gfx, _: &mut wgpu::CommandEncoder, _: &wgpu::TextureView) {
+        *self.0.lock().unwrap() = world.resource::<nge_ecs::RenderFrame>().counts();
+    }
+}
+
+#[test]
+fn models_count_their_draws_and_the_shadow_pass_counts_again() {
+    for (shadows, expected) in [(false, (2, 2)), (true, (4, 2))] {
+        let counts = std::sync::Arc::new(std::sync::Mutex::new((0, 0)));
+        let probe = counts.clone();
+        if render(SIZE, move |app| {
+            shadow_scene(app, shadows);
+            app.add_renderer(CountProbe(probe.clone()));
+        })
+        .is_none()
+        {
+            return;
+        }
+        assert_eq!(*counts.lock().unwrap(), expected, "阴影 {shadows}");
+    }
+}

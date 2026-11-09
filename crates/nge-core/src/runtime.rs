@@ -16,8 +16,8 @@ use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 use serde_json::Value as JsonValue;
 
 use crate::bridge::{ENGINE_ERROR, EngineError, FRAME_STATS};
-use crate::game::{Ctx, Emit, Game, GameFactory, Gfx, Viewport};
-use crate::stats::FrameStats;
+use crate::game::{Ctx, Emit, FrameTiming, Game, GameFactory, Gfx, Viewport};
+use crate::stats::{FrameClock, FrameStats};
 
 /// 单帧 dt 上限，避免卡顿后物理一步跨太远。
 const MAX_DT: f32 = 0.05;
@@ -262,12 +262,15 @@ impl Loop<'_> {
     fn frames(&mut self) -> Result<(), String> {
         let mut last = Instant::now();
         let mut stats = FrameStats::new(last);
+        let mut clock = FrameClock::default();
         loop {
+            // 处理 NSH 发来的消息（场景 JSON 解析等）也算在更新里
+            let start = Instant::now();
             // 逐条取：暂停期间 paused() 直接从 rx 收后续消息，不能先攒到本地
             loop {
                 match self.rx.try_recv() {
                     Ok(msg) => {
-                        if !self.handle(msg, &mut last, &mut stats) {
+                        if !self.handle(msg, &mut last, &mut stats, &mut clock) {
                             return Ok(());
                         }
                     }
@@ -280,17 +283,24 @@ impl Loop<'_> {
             let dt = (now - last).as_secs_f32().min(MAX_DT);
             last = now;
             self.game.update(&mut Ctx::new(self.gfx.viewport, self.emit), dt);
+            let update = start.elapsed().as_secs_f32();
 
-            if self.draw() {
-                if let Some(report) = stats.frame(Instant::now()) {
+            if let Some((render, wait)) = self.draw() {
+                let done = Instant::now();
+                // 开头、暂停后、拿不到画面后的第一帧没有上一帧可比，不报
+                if let Some(frame) = clock.drawn(done) {
+                    self.game.timing(FrameTiming { frame: frame.as_secs_f32(), update, render, wait });
+                }
+                if let Some(report) = stats.frame(done) {
                     (self.emit)(FRAME_STATS.name(), FRAME_STATS.encode(&report));
                 }
                 continue;
             }
+            clock.reset();
             // 拿不到画面时不空转；同时还能及时响应消息
             match self.rx.recv_timeout(IDLE_BACKOFF) {
                 Ok(msg) => {
-                    if !self.handle(msg, &mut last, &mut stats) {
+                    if !self.handle(msg, &mut last, &mut stats, &mut clock) {
                         return Ok(());
                     }
                 }
@@ -301,7 +311,7 @@ impl Loop<'_> {
     }
 
     /// 处理一条消息；返回 false 表示该退出了。
-    fn handle(&mut self, msg: Msg, last: &mut Instant, stats: &mut FrameStats) -> bool {
+    fn handle(&mut self, msg: Msg, last: &mut Instant, stats: &mut FrameStats, clock: &mut FrameClock) -> bool {
         match self.apply(msg) {
             Flow::Continue => true,
             Flow::Quit => false,
@@ -312,6 +322,7 @@ impl Loop<'_> {
                 // 暂停期间的时间不计入 dt，也不计入帧统计
                 *last = Instant::now();
                 *stats = FrameStats::new(*last);
+                clock.reset();
                 true
             }
         }
@@ -352,32 +363,36 @@ impl Loop<'_> {
         Flow::Continue
     }
 
-    /// 绘制一帧；返回 false 表示这一帧没拿到画面。
-    fn draw(&mut self) -> bool {
+    /// 绘制一帧，返回（录制和提交，拿画面和呈现）各花了多少秒；`None` 表示这一帧没拿到画面。
+    fn draw(&mut self) -> Option<(f32, f32)> {
         if self.surface.lost {
-            return false;
+            return None;
         }
+        let start = Instant::now();
         let frame = match self.surface.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
             wgpu::CurrentSurfaceTexture::Outdated => {
                 self.surface.surface.configure(&self.gfx.device, &self.surface.config);
-                return false;
+                return None;
             }
             wgpu::CurrentSurfaceTexture::Lost => {
                 // surface 需要重建，这一版先停止渲染并上报
                 self.surface.lost = true;
                 log::error!("surface 丢失，停止渲染");
                 (self.emit)(ENGINE_ERROR.name(), ENGINE_ERROR.encode(&EngineError { message: "surface lost".into() }));
-                return false;
+                return None;
             }
-            _ => return false,
+            _ => return None,
         };
+        let acquired = Instant::now();
         let target = frame.texture.create_view(&Default::default());
         let mut encoder = self.gfx.device.create_command_encoder(&Default::default());
         self.game.render(&self.gfx, &mut encoder, &target);
         self.gfx.queue.submit([encoder.finish()]);
+        let submitted = Instant::now();
         self.gfx.queue.present(frame);
-        true
+        let render = (submitted - acquired).as_secs_f32();
+        Some((render, (acquired - start).as_secs_f32() + submitted.elapsed().as_secs_f32()))
     }
 }
 

@@ -129,7 +129,10 @@ impl Renderer for TextRenderer {
         }
 
         let clear = *world.resource::<ClearColor>();
-        let load = world.resource_mut::<RenderFrame>().color_load(clear);
+        let mut frame = world.resource_mut::<RenderFrame>();
+        // glyphon 把所有文字合成一次 draw
+        frame.count(u32::from(!placed.is_empty()), placed.len() as u32);
+        let load = frame.color_load(clear);
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("text"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {

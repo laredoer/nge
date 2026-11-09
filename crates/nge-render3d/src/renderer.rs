@@ -138,6 +138,8 @@ impl Renderer for MeshRenderer {
         if shadowed {
             gpu.draw_shadow(encoder, &self.draws);
         }
+        let n = self.draws.len() as u32;
+        world.resource_mut::<RenderFrame>().count(if shadowed { 2 * n } else { n }, n);
         let depth = gpu.depth_view(gfx, target.texture().size());
         // 混排时深度留给后面的精灵
         let interleave = world.resource::<Interleave>().0;

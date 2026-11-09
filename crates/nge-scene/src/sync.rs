@@ -6,6 +6,7 @@ use bevy_ecs::prelude::*;
 use glam::{Vec2, Vec4};
 use nge_ecs::Time;
 use nge_render2d::{Parallax, Repeat, Sprite, SpriteImage, Transform2d};
+use nge_text::PerfOverlay;
 
 use crate::anim::FrameAnimation;
 use crate::behave::{Spin, Tappable};
@@ -143,6 +144,15 @@ pub(crate) fn sync_time_scale(scene: Res<Scene>, mut time: ResMut<Time>, mut las
     time.scale = scale;
     time.delta = time.real_delta * scale;
     time.elapsed += f64::from(time.delta) - f64::from(old);
+}
+
+/// `scene.perf`：声明变了才写 [`PerfOverlay`]，Rust 自己开关的不会被每帧覆盖；声明去掉时关掉。
+pub(crate) fn sync_perf(scene: Res<Scene>, mut overlay: ResMut<PerfOverlay>, mut last: Local<Option<bool>>) {
+    if *last == scene.perf {
+        return;
+    }
+    *last = scene.perf;
+    overlay.0 = scene.perf.unwrap_or(false);
 }
 
 #[cfg(test)]
@@ -287,6 +297,25 @@ mod tests {
         let time = *app.world().resource::<Time>();
         assert_eq!((time.scale, time.delta), (1.0, 0.5), "去掉 timeScale 回到 1");
         assert!((time.elapsed - 0.75).abs() < 1e-6, "elapsed 按改过的 delta 算 {}", time.elapsed);
+    }
+
+    #[test]
+    fn perf_panel_follows_the_scene_only_when_the_declaration_changes() {
+        let mut app = app();
+        let on = |app: &nge_ecs::App| app.world().resource::<PerfOverlay>().0;
+        frame(&mut app, Some(json!({ "sprites": [] })));
+        assert!(!on(&app));
+        frame(&mut app, Some(json!({ "perf": true })));
+        assert!(on(&app));
+        // Rust 关掉后，场景没改就不再打开
+        app.world_mut().resource_mut::<PerfOverlay>().0 = false;
+        frame(&mut app, Some(json!({ "perf": true })));
+        assert!(!on(&app));
+        frame(&mut app, Some(json!({ "perf": false })));
+        frame(&mut app, Some(json!({ "perf": true })));
+        assert!(on(&app));
+        frame(&mut app, Some(json!({ "sprites": [] })));
+        assert!(!on(&app), "去掉声明就关");
     }
 
     #[test]

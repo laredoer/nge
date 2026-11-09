@@ -67,6 +67,7 @@ impl PostProcess for PostRenderer {
             gpu.identity = Some(build(&gfx.device, &gpu.pipeline_layout, gfx.format, "post identity", &post_source(IDENTITY)));
         }
 
+        let count = passes.len() as u32;
         let size = target.texture().size();
         let ping = gpu.ping_views(gfx, size);
         let time = world.resource::<Time>().elapsed as f32;
@@ -113,6 +114,7 @@ impl PostProcess for PostRenderer {
             drop(pass);
             input = output;
         }
+        world.resource_mut::<nge_ecs::RenderFrame>().count(count, 0);
     }
 }
 

@@ -23,6 +23,27 @@ impl Viewport {
     }
 }
 
+/// 一帧各段花的时间（秒），引擎每帧画完后交给游戏（见 docs/perf-overlay.md）。
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct FrameTiming {
+    /// 和上一帧画完时隔了多久。
+    pub frame: f32,
+    /// [`Game::update`]。
+    pub update: f32,
+    /// [`Game::render`] 加提交。
+    pub render: f32,
+    /// 拿画面和交给系统显示（通常是在等垂直同步）。
+    pub wait: f32,
+}
+
+impl FrameTiming {
+    /// 不是有限数、是负数的当 0。
+    pub fn sanitized(self) -> Self {
+        let ok = |t: f32| if t.is_finite() && t > 0.0 { t } else { 0.0 };
+        Self { frame: ok(self.frame), update: ok(self.update), render: ok(self.render), wait: ok(self.wait) }
+    }
+}
+
 /// 渲染线程上的 GPU 资源，游戏用它建管线、写缓冲。
 pub struct Gfx {
     pub device: wgpu::Device,
@@ -62,6 +83,11 @@ pub trait Game {
 
     /// 往 `target` 录制本帧的绘制。
     fn render(&mut self, gfx: &Gfx, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView);
+
+    /// 这一帧画完了，各段花了多久（拿不到画面的帧不报）。
+    fn timing(&mut self, timing: FrameTiming) {
+        let _ = timing;
+    }
 }
 
 /// 在渲染线程上、GPU 就绪后创建游戏。

@@ -9,10 +9,11 @@ use bevy_ecs::schedule::{IntoScheduleConfigs, ScheduleLabel};
 use bevy_ecs::system::ScheduleSystem;
 use glam::Vec2;
 use nge_core::bridge::{GAMEPAD, KEY, TOUCH};
-use nge_core::{Ctx, Game, GameFactory, Gfx, Viewport, wgpu};
+use nge_core::{Ctx, FrameTiming, Game, GameFactory, Gfx, Viewport, wgpu};
 use serde_json::Value as JsonValue;
 
 use crate::input::Input;
+use crate::perf::Perf;
 use crate::render::{ClearColor, Interleave, RenderFrame};
 use crate::resources::{NshCommand, Outbox, Props, Screen, Time};
 
@@ -88,6 +89,7 @@ impl App {
         world.init_resource::<ClearColor>();
         world.init_resource::<RenderFrame>();
         world.init_resource::<Interleave>();
+        world.init_resource::<Perf>();
         for schedule in [Schedule::new(Startup), Schedule::new(PreUpdate), Schedule::new(Update), Schedule::new(PostUpdate), Schedule::new(Last)] {
             world.add_schedule(schedule);
         }
@@ -260,6 +262,15 @@ impl Game for EcsGame {
         }
     }
 
+    fn timing(&mut self, timing: FrameTiming) {
+        let world = &mut self.0.world;
+        let (draws, instances) = world.resource::<RenderFrame>().counts();
+        world.resource_scope(|world, mut perf: Mut<Perf>| {
+            // 资源在 bevy 里也是实体，不算
+            perf.record(timing, draws, instances, || world.query_filtered::<(), Without<bevy_ecs::resource::IsResource>>().iter(world).count() as u32);
+        });
+    }
+
     fn render(&mut self, gfx: &Gfx, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView) {
         let App { world, renderers, post, offscreen, .. } = &mut self.0;
         world.resource_mut::<RenderFrame>().reset();
@@ -321,6 +332,20 @@ mod tests {
 
     #[derive(Resource, Default)]
     struct Log(Vec<String>);
+
+    #[test]
+    fn timing_goes_into_perf_with_this_frames_draws_and_entities() {
+        let mut game = EcsGame(App::new());
+        #[derive(Component)]
+        struct Thing;
+        game.0.world.spawn_batch((0..5).map(|_| Thing));
+        game.0.world.spawn_empty();
+        game.0.world.resource_mut::<RenderFrame>().count(4, 120);
+        game.timing(FrameTiming { frame: 0.6, update: 0.001, render: 0.002, wait: 0.5 });
+        let report = *game.0.world.resource::<Perf>().report().expect("一帧就满了半秒");
+        assert_eq!((report.draws, report.instances, report.entities), (4, 120, 6), "资源不算");
+        assert!((report.wait_ms - 500.0).abs() < 1e-3, "{report:?}");
+    }
 
     #[test]
     fn remembers_added_plugins() {

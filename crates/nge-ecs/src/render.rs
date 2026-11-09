@@ -34,6 +34,8 @@ pub const SCENE_DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth24
 pub struct RenderFrame {
     cleared: bool,
     depth: Option<SceneDepth>,
+    draws: u32,
+    instances: u32,
 }
 
 impl RenderFrame {
@@ -52,9 +54,19 @@ impl RenderFrame {
         self.depth.as_ref()
     }
 
+    /// 渲染器记下这一帧发了几次 draw、一共画了多少个实例（性能面板用）。
+    pub fn count(&mut self, draws: u32, instances: u32) {
+        self.draws += draws;
+        self.instances += instances;
+    }
+
+    /// 这一帧到目前为止的（draw 次数，实例数）。
+    pub fn counts(&self) -> (u32, u32) {
+        (self.draws, self.instances)
+    }
+
     pub(crate) fn reset(&mut self) {
-        self.cleared = false;
-        self.depth = None;
+        *self = Self::default();
     }
 }
 
@@ -70,5 +82,15 @@ mod tests {
         assert_eq!(frame.color_load(clear), wgpu::LoadOp::Load);
         frame.reset();
         assert_eq!(frame.color_load(clear), wgpu::LoadOp::Clear(wgpu::Color::RED));
+    }
+
+    #[test]
+    fn renderers_add_up_their_draws_until_the_next_frame() {
+        let mut frame = RenderFrame::default();
+        frame.count(3, 100);
+        frame.count(2, 5);
+        assert_eq!(frame.counts(), (5, 105));
+        frame.reset();
+        assert_eq!(frame.counts(), (0, 0));
     }
 }

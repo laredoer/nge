@@ -231,7 +231,9 @@ impl Renderer for SpriteRenderer {
         };
 
         let clear = *world.resource::<ClearColor>();
-        let load = world.resource_mut::<RenderFrame>().color_load(clear);
+        let mut frame = world.resource_mut::<RenderFrame>();
+        frame.count(self.batches.len() as u32, self.instances.len() as u32);
+        let load = frame.color_load(clear);
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("sprites"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {

@@ -65,6 +65,8 @@ fn render_frames(gfx: &Gfx, frames: usize, build: impl Fn(&mut App) + Send + Syn
         let mut encoder = gfx.device.create_command_encoder(&Default::default());
         game.render(gfx, &mut encoder, &view);
         gfx.queue.submit([encoder.finish()]);
+        // 每帧都满一个统计窗口，下一帧的系统能读到这一帧的汇总
+        game.timing(nge_core::FrameTiming { frame: 0.6, ..Default::default() });
     }
     game.update(&mut Ctx::new(gfx.viewport, &emit), 0.016);
     let mut encoder = gfx.device.create_command_encoder(&Default::default());
@@ -337,4 +339,56 @@ fn post_process_is_warmed_every_frame_even_when_inactive() {
         app.set_post_process(Counting(counter.clone()));
     });
     assert_eq!(warmed.load(Ordering::SeqCst), 3);
+}
+
+/// 排在精灵渲染器后面，记下这一帧到它为止的（draw 次数，实例数）。
+struct CountProbe(std::sync::Arc<std::sync::Mutex<(u32, u32)>>);
+
+impl nge_ecs::Renderer for CountProbe {
+    fn render(&mut self, world: &mut World, _: &Gfx, _: &mut wgpu::CommandEncoder, _: &wgpu::TextureView) {
+        *self.0.lock().unwrap() = world.resource::<nge_ecs::RenderFrame>().counts();
+    }
+}
+
+#[test]
+fn sprites_count_one_draw_per_batch_and_every_instance() {
+    let Some(gfx) = gfx() else { return };
+    let counts = std::sync::Arc::new(std::sync::Mutex::new((0, 0)));
+    let probe = counts.clone();
+    render_app(&gfx, move |app| {
+        app.add_renderer(CountProbe(probe.clone()));
+        app.add_systems(Startup, |world: &mut World| {
+            // 两个同样的合一批；带着色器的另一批；z < 0 的在背景层
+            square(world, -16.0, 0.0, 8.0, RED);
+            square(world, 0.0, 0.0, 8.0, RED);
+            let e = square(world, 16.0, 0.0, 8.0, RED);
+            world.entity_mut(e).insert(SpriteShader { name: "flash".into(), params: Vec4::ONE });
+            let back = square(world, 0.0, 16.0, 8.0, RED);
+            world.entity_mut(back).insert(Transform2d { z: -1.0, ..Transform2d::from_xy(0.0, 16.0) });
+        });
+    });
+    assert_eq!(*counts.lock().unwrap(), (3, 4));
+}
+
+#[test]
+fn post_passes_count_as_draws() {
+    let Some(gfx) = gfx() else { return };
+    let draws = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let seen = draws.clone();
+    render_frames(&gfx, 2, move |app| {
+        let seen = seen.clone();
+        app.add_systems(Startup, |world: &mut World| {
+            square(world, 0.0, 0.0, 8.0, RED);
+            world.insert_resource(PostEffects(vec![
+                PostEffect { shader: "grayscale".into(), params: Vec4::ONE },
+                PostEffect { shader: "vignette".into(), params: Vec4::ONE },
+            ]));
+        });
+        app.add_systems(Update, move |perf: Res<nge_ecs::Perf>| {
+            if let Some(r) = perf.report() {
+                *seen.lock().unwrap() = Some(r.draws);
+            }
+        });
+    });
+    assert_eq!(*draws.lock().unwrap(), Some(3), "一个精灵加两遍后处理");
 }

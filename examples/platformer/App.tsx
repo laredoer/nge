@@ -121,7 +121,7 @@ function App() {
   return (
     <View class="flex-1 bg-black">
       <Text class="text-white p-4">
-        {platform.desktop ? `← → / A D / 手柄 移动 · 空格 / ↑ / A 跳 · R 重来 · 数字键选关（解锁了 ${progress().unlocked} 关）· Q 调试 · ` : ""}第 {level() + 1} 关 {LEVELS[level()].name} · 金币 {taken().length} / {now().coins.length} · 失手 {falls()} 次
+        {platform.desktop ? `← → / A D / 手柄 移动 · 空格 / ↑ / A 跳 · R 重来 · 数字键选关（解锁了 ${progress().unlocked} 关）· Q 调试 · P 性能 · ` : ""}第 {level() + 1} 关 {LEVELS[level()].name} · 金币 {taken().length} / {now().coins.length} · 失手 {falls()} 次
         {best() === undefined ? "" : ` · 最好 ${best()} 秒`}
         {won() === null ? "" : ` · 通关！用时 ${won()} 秒`}
       </Text>

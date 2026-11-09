@@ -50,9 +50,36 @@ impl FrameStats {
     }
 }
 
+/// 两帧画完之间隔了多久。开头、暂停后、拿不到画面后的第一帧没有可比的上一帧。
+#[derive(Debug, Default)]
+pub struct FrameClock(Option<Instant>);
+
+impl FrameClock {
+    /// 这一帧在 `now` 画完：返回和上一帧的间隔。
+    pub fn drawn(&mut self, now: Instant) -> Option<Duration> {
+        self.0.replace(now).map(|previous| now - previous)
+    }
+
+    /// 中间断开了（暂停、拿不到画面），下一帧不和之前的比。
+    pub fn reset(&mut self) {
+        self.0 = None;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn frame_clock_skips_the_first_frame_and_any_after_a_break() {
+        let t0 = Instant::now();
+        let mut clock = FrameClock::default();
+        assert_eq!(clock.drawn(t0), None);
+        assert_eq!(clock.drawn(t0 + ms(16)), Some(ms(16)));
+        clock.reset();
+        assert_eq!(clock.drawn(t0 + ms(500)), None, "断开期间的时间不算");
+        assert_eq!(clock.drawn(t0 + ms(517)), Some(ms(17)));
+    }
 
     fn ms(n: u64) -> Duration {
         Duration::from_millis(n)

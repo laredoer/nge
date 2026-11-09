@@ -324,6 +324,8 @@ export interface Scene {
   audio?: AudioNode;
   /** 时间缩放，默认 1；0 暂停（物理、补间、动画、粒子、相机平滑都停），0.5 慢一半。声音不受影响。 */
   timeScale?: number;
+  /** 左上角的性能面板：帧率、更新 / 渲染 / 等待各花多少毫秒、draw call、实例数、实体数，每半秒更新。见 docs/perf-overlay.md。 */
+  perf?: boolean;
   /** 关卡：换了值（字符串或数字）就把场景整个重建，同 id 的节点也不留上一关的状态；Rust 收到 `LevelStart`。见 docs/levels.md。 */
   level?: string | number;
 }

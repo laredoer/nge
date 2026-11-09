@@ -5,12 +5,15 @@
 
 mod floating;
 mod layout;
+mod perf;
 mod renderer;
 
 use bevy_ecs::prelude::*;
 use glam::Vec4;
 use nge_assets::{Asset, AssetApp, Handle, LoadContext};
-use nge_ecs::{App, Plugin, Update};
+use nge_ecs::{App, Plugin, PostUpdate, Update};
+
+pub use perf::{PerfOverlay, PerfText, perf_lines};
 
 pub use floating::FloatingText;
 pub use layout::Anchor;
@@ -81,12 +84,15 @@ pub struct TextPlugin;
 impl Plugin for TextPlugin {
     fn build(&self, app: &mut App) {
         nge_assets::ensure_plugin(app);
-        app.init_asset::<Font>().add_systems(Update, floating::float).add_renderer(renderer::TextRenderer::default());
+        app.init_asset::<Font>()
+            .init_resource::<PerfOverlay>()
+            .add_systems(Update, floating::float)
+            .add_systems(PostUpdate, perf::perf_overlay).add_renderer(renderer::TextRenderer::default());
     }
 }
 
 pub mod prelude {
-    pub use crate::{Anchor, FloatingText, Font, FontId, ScreenText, Text2d, TextPlugin};
+    pub use crate::{Anchor, FloatingText, Font, FontId, PerfOverlay, ScreenText, Text2d, TextPlugin};
 }
 
 #[cfg(test)]

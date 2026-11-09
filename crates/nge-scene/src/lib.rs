@@ -118,6 +118,7 @@ impl Plugin for ScenePlugin {
         let synced = (
             sync::sync_sprites,
             sync::sync_time_scale,
+            sync::sync_perf,
             tilemap::sync_tilemaps,
             camera::sync_camera,
             sync_nodes::sync_texts,

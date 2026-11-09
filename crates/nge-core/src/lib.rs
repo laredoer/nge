@@ -6,7 +6,7 @@ pub mod runtime;
 pub mod stats;
 
 pub use bridge::{CommandKey, EventKey, GAME_COMPONENT, PropKey, StateKey};
-pub use game::{Ctx, Emit, Game, GameFactory, Gfx, Viewport};
+pub use game::{Ctx, Emit, FrameTiming, Game, GameFactory, Gfx, Viewport};
 pub use runtime::{Engine, Msg, create_surface};
 pub use stats::FrameReport;
 pub use wgpu;

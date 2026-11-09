@@ -66,6 +66,7 @@ const RIGHT: [&str; 4] = ["ArrowRight", "KeyD", "GamepadRight", "GamepadLeftStic
 const JUMP_KEYS: [&str; 4] = ["Space", "ArrowUp", "KeyW", "GamepadA"];
 /// 手柄的菜单键（Xbox ≡ / PS Options / Switch +）也能重来。
 const RESTART_KEYS: [&str; 2] = ["KeyR", "GamepadMenu"];
+const PERF_KEY: &str = "KeyP";
 const JUMP_SOUND: &str = "asset:/@platformer/jump.wav";
 const FALL_SOUND: &str = "asset:/@platformer/fall.wav";
 const STOMP_SOUND: &str = "asset:/@platformer/stomp.wav";
@@ -226,7 +227,7 @@ fn build(audio: AudioPlugin) -> App {
         .init_resource::<Sfx>()
         .add_systems(Startup, load_sfx)
         .init_resource::<debug::DebugView>()
-        .add_systems(Update, (reset_on_level_start, control, debug::debug_view).chain());
+        .add_systems(Update, (reset_on_level_start, control, debug::debug_view, toggle_perf).chain());
     app
 }
 
@@ -251,6 +252,13 @@ fn components(components: &nsh_platform_macos::Components) {
 #[nsh_core::prelude::native_components(ios)]
 fn components(components: &nsh_platform_ios::Components) {
     components.register(nge_core::GAME_COMPONENT, nge_platform::ios::component(factory()));
+}
+
+/// 按 P 开关左上角的性能面板（见 docs/perf-overlay.md）。
+fn toggle_perf(input: Res<Input>, mut overlay: ResMut<nge_text::PerfOverlay>) {
+    if input.key_pressed(PERF_KEY) {
+        overlay.0 = !overlay.0;
+    }
 }
 
 #[cfg(test)]
@@ -626,6 +634,23 @@ mod tests {
     fn overlays(app: &mut App) -> Vec<(Vec2, Vec2)> {
         let instances = app.world().resource::<nge_render2d::SpriteInstances>();
         instances.iter().filter(|(_, i)| i.z == nge_render2d::GIZMO_Z).map(|(_, i)| (i.position, i.size)).collect()
+    }
+
+    #[test]
+    fn p_toggles_the_perf_panel() {
+        let mut app = app();
+        app.prop("scene", Some(&level(None)));
+        run(&mut app, 2);
+        let on = |app: &App| app.world().resource::<nge_text::PerfOverlay>().0;
+        assert!(!on(&app));
+        key(&mut app, "KeyP", true);
+        run(&mut app, 1);
+        key(&mut app, "KeyP", false);
+        run(&mut app, 3);
+        assert!(on(&app), "按一次打开，场景每帧同步也不会关掉");
+        key(&mut app, "KeyP", true);
+        run(&mut app, 1);
+        assert!(!on(&app), "再按一次关掉");
     }
 
     #[test]

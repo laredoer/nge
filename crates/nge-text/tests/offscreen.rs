@@ -194,3 +194,30 @@ fn zoom_scales_world_text() {
     let big = zoomed.frame_until_drawn().len();
     assert!(big as f32 > small as f32 * 3.0, "放大两倍，亮像素约四倍：{small} → {big}");
 }
+
+/// 排在文字渲染器后面，记下这一帧到它为止的（draw 次数，实例数）。
+struct CountProbe(Arc<Mutex<(u32, u32)>>);
+
+impl nge_ecs::Renderer for CountProbe {
+    fn render(&mut self, world: &mut World, _: &Gfx, _: &mut wgpu::CommandEncoder, _: &wgpu::TextureView) {
+        *self.0.lock().unwrap() = world.resource::<nge_ecs::RenderFrame>().counts();
+    }
+}
+
+#[test]
+fn all_text_is_one_draw() {
+    let counts = Arc::new(Mutex::new((0, 0)));
+    let probe = counts.clone();
+    let build = scene(memory(), |world, font| {
+        world.spawn((label(font), Transform2d::default()));
+        world.spawn((label(font), Transform2d::from_xy(0.0, 30.0)));
+    });
+    let Some(mut offscreen) = Offscreen::new(move |app| {
+        build(app);
+        app.add_renderer(CountProbe(probe.clone()));
+    }) else {
+        return;
+    };
+    offscreen.frame_until_drawn();
+    assert_eq!(*counts.lock().unwrap(), (1, 2), "两段字一次 draw");
+}

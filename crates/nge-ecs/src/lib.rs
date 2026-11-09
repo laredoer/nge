@@ -9,11 +9,13 @@
 mod app;
 mod bridge;
 mod input;
+mod perf;
 mod render;
 mod resources;
 
 pub use app::{App, Plugin, PostProcess, PostUpdate, PreUpdate, Renderer, Startup, Update, factory};
 pub use input::{Input, Pointer, Stick};
+pub use perf::{FrameTiming, PERF_WINDOW, Perf, PerfReport};
 pub use render::{ClearColor, Interleave, RenderFrame, SCENE_DEPTH_FORMAT, SceneDepth};
 pub use resources::{NshCommand, Outbox, Props, Screen, Time};
 
