@@ -119,6 +119,14 @@ impl Shaders {
         Self::builtin(name).map_or(Vec4::ZERO, |b| Vec4::from(b.2))
     }
 
+    /// 库里所有的（名字，代码），游戏的覆盖内置的，按名字排好。
+    pub(crate) fn library(&self) -> Vec<(String, String)> {
+        let builtin = Self::BUILTIN.iter().filter(|b| !self.user.contains_key(b.0)).map(|b| (b.0.to_owned(), b.3.to_owned()));
+        let mut all: Vec<_> = builtin.chain(self.user.iter().map(|(n, c)| (n.clone(), c.clone()))).collect();
+        all.sort();
+        all
+    }
+
     fn builtin(name: &str) -> Option<&'static (&'static str, bool, [f32; 4], &'static str)> {
         Self::BUILTIN.iter().find(|b| b.0 == name)
     }

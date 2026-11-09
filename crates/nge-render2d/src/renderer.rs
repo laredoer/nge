@@ -1,6 +1,8 @@
 //! 精灵渲染器：每帧从 World 提取精灵 → 合批 → 一个实例缓冲 + 每批一次 draw。
 
+use std::cell::{OnceCell, RefCell};
 use std::collections::HashSet;
+use std::rc::Rc;
 
 use bevy_ecs::prelude::*;
 use glam::{Vec2, Vec4};
@@ -34,9 +36,9 @@ impl Plugin for Render2dPlugin {
             .init_resource::<Lighting2d>()
             .init_resource::<PostEffects>()
             .add_systems(PreUpdate, (pointer_world.in_set(PointerWorld), clear_sprite_instances))
-            .prepend_renderer(SpriteRenderer::new(Layer::Back))
-            .add_renderer(SpriteRenderer::new(Layer::Front))
             .set_post_process(PostRenderer::default());
+        let (back, front) = sprite_layers();
+        app.prepend_renderer(back).add_renderer(front);
     }
 }
 
@@ -54,8 +56,18 @@ fn clear_sprite_instances(mut instances: ResMut<SpriteInstances>) {
     instances.clear();
 }
 
+/// 背景层和前景层的渲染器：共用一份管线，只预热一次。
+fn sprite_layers() -> (SpriteRenderer, SpriteRenderer) {
+    let pipes = SharedPipes::default();
+    (SpriteRenderer::new(Layer::Back, pipes.clone()), SpriteRenderer::new(Layer::Front, pipes))
+}
+
+/// 两层精灵渲染器共用的管线，第一次画时建。
+type SharedPipes = Rc<OnceCell<RefCell<Pipes>>>;
+
 struct Gpu {
-    pipes: Pipes,
+    pipes: SharedPipes,
+    texture_layout: wgpu::BindGroupLayout,
     /// 遮罩用的模板缓冲，跟着渲染目标的大小走。
     stencil: Option<(wgpu::TextureView, wgpu::Extent3d)>,
     globals: wgpu::Buffer,
@@ -86,6 +98,7 @@ impl Layer {
 
 struct SpriteRenderer {
     layer: Layer,
+    pipes: SharedPipes,
     gpu: Option<Gpu>,
     items: Vec<Item>,
     instances: Vec<Instance>,
@@ -99,8 +112,8 @@ struct SpriteRenderer {
 }
 
 impl SpriteRenderer {
-    fn new(layer: Layer) -> Self {
-        Self { layer, gpu: None, items: Vec::new(), instances: Vec::new(), batches: Vec::new(), copies: Vec::new(), warned: HashSet::new(), warned_unmasked: false }
+    fn new(layer: Layer, pipes: SharedPipes) -> Self {
+        Self { layer, pipes, gpu: None, items: Vec::new(), instances: Vec::new(), batches: Vec::new(), copies: Vec::new(), warned: HashSet::new(), warned_unmasked: false }
     }
 }
 
@@ -112,7 +125,9 @@ fn rotated_half(size: Vec2, rotation: f32) -> Vec2 {
 
 impl Renderer for SpriteRenderer {
     fn render(&mut self, world: &mut World, gfx: &Gfx, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView) {
-        let gpu = self.gpu.get_or_insert_with(|| Gpu::new(gfx));
+        let gpu = self.gpu.get_or_insert_with(|| Gpu::new(gfx, &self.pipes));
+        let shared = gpu.pipes.clone();
+        let mut pipes = shared.get().expect("Gpu::new 建好了").borrow_mut();
         let mut sprites = world.query::<(Entity, &Sprite, &Transform2d, Option<&DrawAt>, Option<&Parallax>, Option<&Repeat>, Option<&SpriteShader>, Option<&Masking>, Has<Unlit>)>();
         let camera = world.query::<&Camera2d>().iter(world).next().copied().unwrap_or_default();
         world.resource_scope(|world, mut images: Mut<GpuImages>| images.sync(gfx, world.resource::<Assets<Image>>()));
@@ -123,7 +138,7 @@ impl Renderer for SpriteRenderer {
         let scene_depth = world.resource::<RenderFrame>().depth().cloned();
         let depth = scene_depth.is_some();
         let shaders = world.resource::<Shaders>();
-        gpu.pipes.sync(shaders);
+        pipes.sync(gfx, shaders, depth);
 
         self.items.clear();
         let view = camera.visible(Vec2::from(gfx.viewport.size));
@@ -145,7 +160,7 @@ impl Renderer for SpriteRenderer {
                 _ => self.copies.push(pos),
             }
             let mode = Mode::of(masking);
-            let module = shader.map_or(0, |s| gpu.pipes.module(gfx, shaders, &s.name));
+            let module = shader.map_or(0, |s| pipes.module(gfx, shaders, &s.name));
             let params = shader.map_or([0.0; 4], |s| s.params.into());
             for &pos in &self.copies {
                 self.items.push(Item {
@@ -201,7 +216,7 @@ impl Renderer for SpriteRenderer {
             gpu.cache_texture(gfx, gpu_images, id);
         }
         for b in &self.batches {
-            gpu.pipes.prepare(gfx, b.pipe);
+            pipes.prepare(gfx, b.pipe);
         }
 
         let view_proj = camera.view_proj(Vec2::from(gfx.viewport.size));
@@ -241,7 +256,7 @@ impl Renderer for SpriteRenderer {
         let mut current = None;
         for b in &self.batches {
             if current != Some(b.pipe) {
-                pass.set_pipeline(gpu.pipes.get(b.pipe));
+                pass.set_pipeline(pipes.get(b.pipe));
                 current = Some(b.pipe);
             }
             pass.set_bind_group(1, gpu.texture(b.texture), &[]);
@@ -255,9 +270,9 @@ fn to_rgba8(color: Vec4) -> [u8; 4] {
 }
 
 impl Gpu {
-    fn new(gfx: &Gfx) -> Self {
+    fn new(gfx: &Gfx, shared: &SharedPipes) -> Self {
         let device = &gfx.device;
-        let pipes = Pipes::new(gfx, size_of::<Globals>() as u64);
+        let pipes = shared.get_or_init(|| RefCell::new(Pipes::new(gfx, size_of::<Globals>() as u64))).borrow();
         let globals = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("sprite globals"),
             size: size_of::<Globals>() as u64,
@@ -276,7 +291,9 @@ impl Gpu {
             ..Default::default()
         });
         let instances = instance_buffer(device, INITIAL_CAPACITY);
-        Self { pipes, stencil: None, globals, globals_group, sampler, textures: Vec::new(), instances, capacity: INITIAL_CAPACITY }
+        let texture_layout = pipes.texture_layout.clone();
+        drop(pipes);
+        Self { pipes: shared.clone(), texture_layout, stencil: None, globals, globals_group, sampler, textures: Vec::new(), instances, capacity: INITIAL_CAPACITY }
     }
 
     /// 模板缓冲跟着渲染目标的大小走（返回的 view 是克隆，便宜）。
@@ -310,7 +327,7 @@ impl Gpu {
         }
         self.textures[index] = Some(gfx.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("sprite texture"),
-            layout: &self.pipes.texture_layout,
+            layout: &self.texture_layout,
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(view) },
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
@@ -349,7 +366,14 @@ fn instance_buffer(device: &wgpu::Device, capacity: u64) -> wgpu::Buffer {
 mod tests {
     use glam::Vec2;
 
-    use super::rotated_half;
+    use super::{Layer, rotated_half, sprite_layers};
+
+    #[test]
+    fn both_sprite_layers_share_one_set_of_pipelines() {
+        let (back, front) = sprite_layers();
+        assert!(back.layer == Layer::Back && front.layer == Layer::Front);
+        assert!(std::rc::Rc::ptr_eq(&back.pipes, &front.pipes));
+    }
 
     #[test]
     fn rotated_half_is_half_the_box_around_the_turned_sprite() {

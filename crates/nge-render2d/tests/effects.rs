@@ -311,3 +311,30 @@ fn changed_shaders_take_effect_next_frame() {
     });
     assert_eq!(at(&pixels, 32, 32), [0, 0, 255, 255]);
 }
+
+#[test]
+fn post_process_is_warmed_every_frame_even_when_inactive() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct Counting(Arc<AtomicUsize>);
+    impl nge_ecs::PostProcess for Counting {
+        fn active(&self, _: &World) -> bool {
+            false
+        }
+        fn warm(&mut self, _: &World, _: &Gfx) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+        fn process(&mut self, _: &mut World, _: &Gfx, _: &mut wgpu::CommandEncoder, _: &wgpu::TextureView, _: &wgpu::TextureView) {
+            unreachable!("没开后处理");
+        }
+    }
+
+    let Some(gfx) = gfx() else { return };
+    let warmed = Arc::new(AtomicUsize::new(0));
+    let counter = warmed.clone();
+    render_frames(&gfx, 3, move |app| {
+        app.set_post_process(Counting(counter.clone()));
+    });
+    assert_eq!(warmed.load(Ordering::SeqCst), 3);
+}

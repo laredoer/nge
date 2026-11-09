@@ -49,6 +49,8 @@ pub trait Renderer: 'static {
 pub trait PostProcess: 'static {
     /// 这一帧要不要后处理。
     fn active(&self, world: &World) -> bool;
+    /// 每帧都调（不做后处理的帧也调）：好在用到之前把管线编好。
+    fn warm(&mut self, _world: &World, _gfx: &Gfx) {}
     /// 把 `source`（这一帧画好的）处理后画到 `target`。
     fn process(&mut self, world: &mut World, gfx: &Gfx, encoder: &mut wgpu::CommandEncoder, source: &wgpu::TextureView, target: &wgpu::TextureView);
 }
@@ -261,6 +263,9 @@ impl Game for EcsGame {
     fn render(&mut self, gfx: &Gfx, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView) {
         let App { world, renderers, post, offscreen, .. } = &mut self.0;
         world.resource_mut::<RenderFrame>().reset();
+        if let Some(post) = post.as_mut() {
+            post.warm(world, gfx);
+        }
         let Some(post) = post.as_mut().filter(|p| p.active(world)) else {
             // 不做后处理时放掉离屏纹理
             *offscreen = None;

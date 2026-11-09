@@ -12,6 +12,17 @@ mod post;
 mod renderer;
 mod repeat;
 mod sprite;
+mod warm;
+
+/// 单元测试用的 GPU；没有时是 `None`（测试跳过）。
+#[cfg(test)]
+pub(crate) fn test_gfx(format: nge_core::wgpu::TextureFormat) -> Option<nge_core::Gfx> {
+    use nge_core::wgpu;
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+    let adapter = pollster::block_on(instance.request_adapter(&Default::default())).ok()?;
+    let (device, queue) = pollster::block_on(adapter.request_device(&Default::default())).ok()?;
+    Some(nge_core::Gfx { device, queue, format, viewport: nge_core::Viewport { size: [64.0; 2], pixels: [64; 2] } })
+}
 
 pub use assets::{AtlasId, Atlases, Grid, TextureId};
 pub use nge_assets::{AssetPlugin, AssetServer, Assets, Image, ImageId, MAX_TEXTURE_SIDE};
