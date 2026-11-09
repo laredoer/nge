@@ -2320,6 +2320,7 @@ dependencies = [
  "nge-render2d",
  "nge-render3d",
  "nge-text",
+ "pollster 1.0.1",
  "serde",
  "serde_json",
 ]

@@ -18,3 +18,58 @@ nsh-testing = { git = "https://github.com/longbridge/nsh", tag = "v0.4.0" }
 # nsh 0.4 要求 iOS 15；不设时按 10.0 链接，QuickJS 的 ___chkstk_darwin 找不到（nsh package --target ios）。
 [env]
 IPHONEOS_DEPLOYMENT_TARGET = "15.0"
+
+# 开发时（nsh run、cargo test）依赖全开优化、自己的代码轻度优化：帧时间接近发布版，热更新和调试照常（见 docs/fast-dev.md）。
+# 写在这里而不是 Cargo.toml：nsh run 编的是它在 examples/*/.nsh/rust 生成的工作区，那里的 Cargo.toml 每次重写。
+# cargo 从当前目录往上找这份配置：nsh run / cargo 要在仓库目录里运行才用得上。
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+# 自己的 crate 在 nsh 生成的工作区里不是成员，也会匹配上面的 "*"：单独压回 1，改引擎后重编才快（3 时要一分多钟）。
+# 加了新 crate 要补一行（nge-core 的测试 dependencies_are_optimized_and_own_crates_stay_light 会提醒）。
+# 按包名匹配，不看来源：依赖里要是混进同名的包（比如叫 model、physics），它也会被压成 1。
+[profile.dev.package.nge-assets]
+opt-level = 1
+[profile.dev.package.nge-audio]
+opt-level = 1
+[profile.dev.package.nge-core]
+opt-level = 1
+[profile.dev.package.nge-ecs]
+opt-level = 1
+[profile.dev.package.nge-nsh]
+opt-level = 1
+[profile.dev.package.nge-particles]
+opt-level = 1
+[profile.dev.package.nge-physics2d]
+opt-level = 1
+[profile.dev.package.nge-platform]
+opt-level = 1
+[profile.dev.package.nge-render2d]
+opt-level = 1
+[profile.dev.package.nge-render3d]
+opt-level = 1
+[profile.dev.package.nge-scene]
+opt-level = 1
+[profile.dev.package.nge-text]
+opt-level = 1
+[profile.dev.package.bounce]
+opt-level = 1
+[profile.dev.package.dodge]
+opt-level = 1
+[profile.dev.package.effects]
+opt-level = 1
+[profile.dev.package.model]
+opt-level = 1
+[profile.dev.package.physics]
+opt-level = 1
+[profile.dev.package.platformer]
+opt-level = 1
+[profile.dev.package.scene]
+opt-level = 1
+[profile.dev.package.scene3d]
+opt-level = 1
+[profile.dev.package.sprites]
+opt-level = 1

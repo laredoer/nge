@@ -84,6 +84,7 @@
 | **3D 补齐** | 方向光阴影（`shadows`，阴影图 + 3×3 PCF）；glTF 蒙皮和骨骼 / 节点动画（`Animator`，GPU 蒙皮，模型节点的 `animation`）；`camera3d.interleave` 让模型和精灵按深度混排；见 [3d-more.md](3d-more.md) | 平台跳跃终点挂着挥动的 3D 旗子，角色从布后面跳过；箱子顶上的小箱子投下影子 |
 | **管线预热** | 着色器库到位后后台线程先编好所有 2D 精灵管线和后处理管线，渲染线程拿现成的，没编好的照常当场编；见 [pipeline-warmup.md](pipeline-warmup.md) | 平台跳跃第一次闪白、进传送门、第三关开暗角时不再卡一下 |
 | **性能面板** | 引擎记下每帧更新、渲染、等待各花多少毫秒，以及 draw call、实例数、实体数（`Perf`，`Game::timing`），左上角的面板每半秒更新（`PerfOverlay`，TSX 的 `scene.perf`）；见 [perf-overlay.md](perf-overlay.md) | 平台跳跃按 P 开关性能面板 |
+| **开发版也开优化** | `.cargo/config.toml` 让 `nsh run` 和 `cargo test` 的依赖全开优化、自己的 crate 轻度优化；帧时间基准 `frame_bench`；见 [fast-dev.md](fast-dev.md) | 基准场景一帧的更新从 6.6 ms 降到 0.19 ms，改一行引擎代码重编约 3 秒 |
 | **M6 Android** | SurfaceView 和 Vulkan，JNI 胶水层 | 示例游戏在 Android 真机上能跑 |
 
 ## 待定
