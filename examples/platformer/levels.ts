@@ -29,6 +29,8 @@ export interface Level {
   crate: number;
   /** 吊着的铁链：支点的列和 y。 */
   swing?: number[];
+  /** 幽灵：在空中的列和 y，看见角色就绕开平台追过来。 */
+  ghosts?: number[][];
 }
 
 /** 用代码描述的关卡。 */
@@ -49,6 +51,8 @@ const DESCRIBED: Level[] = [
     enemies: [14, 31, 69],
     crate: 73.5,
     swing: [7.5, 150],
+    // 第二组平台上方：从平台缝里看见地面上的角色
+    ghosts: [[29, 240]],
   },
   {
     name: "石阶",
@@ -67,6 +71,7 @@ const DESCRIBED: Level[] = [
     crate: 66.5,
     // 第一个坑上面
     swing: [11.5, 150],
+    ghosts: [[19, 230], [45, 250]],
   },
 ];
 
@@ -75,6 +80,8 @@ export interface Built {
   coins: { id: string; x: number; y: number }[];
   lifts: { node: SpriteNode; to: Tween["to"]; duration: number }[];
   enemies: { id: string; x: number; to: { x: number } }[];
+  /** 幽灵：id 以 enemy- 开头（踩它、碰它和别的敌人一样），会飞，追角色。 */
+  ghosts: { id: string; x: number; y: number }[];
   /** 3D 箱子：模型跟着一个看不见的 2D 刚体走（`attach`），角色能推着它走、跳上去。 */
   crate: { body: SpriteNode; model: ModelNode };
   /** 吊着的铁链：几节链子和一个铁球，用转动关节一节节连起来，挂在世界上的支点。 */
@@ -122,7 +129,8 @@ export function build(level: Level): Built {
   const enemies = level.enemies.map((c, i) => ({ id: `enemy-${i}`, x: (c + 0.5) * TILE, to: { x: (c + 3.5) * TILE } }));
   // 终点前转着的 3D 箱子（2.5D）：3D 相机跟着 2D 相机（`match2d`），模型的 (x, y) 就是关卡里的位置
   const swing = level.swing === undefined ? NO_SWING : swingAt(level.swing[0] * TILE, level.swing[1]);
-  return { tilemaps: [tilemap], coins, lifts, enemies, crate: crateAt(level.crate * TILE, 56), swing, goal: goalAt((cols - 4) * TILE, 40), right: cols * TILE };
+  const ghosts = (level.ghosts ?? []).map(([c, y], i) => ({ id: `enemy-ghost-${i}`, x: (c + 0.5) * TILE, y }));
+  return { tilemaps: [tilemap], coins, lifts, enemies, ghosts, crate: crateAt(level.crate * TILE, 56), swing, goal: goalAt((cols - 4) * TILE, 40), right: cols * TILE };
 }
 
 const lift = (id: string, x: number, y: number, to: Tween["to"], duration: number) => ({ node: { id, x, y, w: 64, h: 16 } as SpriteNode, to, duration });
@@ -166,7 +174,7 @@ export const flagOn = (goal: SpriteNode): ModelNode => ({
 
 /**
  * 用 Tiled 画的关卡（见 docs/tiled.md）。图块集 `tiles` 和 tiles.png 一样；对象层里的对象按类型生成：
- * `coin`、`enemy`（属性 `patrol`：往右巡逻几格）、`lift`（属性 `dx` / `dy`：往哪走，像素，Tiled 里 y 朝下；`duration`）、`crate`、`swing`（铁链的支点）、`goal`。
+ * `coin`、`enemy`（属性 `patrol`：往右巡逻几格）、`ghost`（会飞、追角色的幽灵）、`lift`（属性 `dx` / `dy`：往哪走，像素，Tiled 里 y 朝下；`duration`）、`crate`、`swing`（铁链的支点）、`goal`。
  */
 export function fromTiled(map: TiledMap): Built {
   // 地图底行的顶边在 y = 0，和代码描述的关卡一样
@@ -193,6 +201,7 @@ export function fromTiled(map: TiledMap): Built {
       return lift(`lift-${i}`, o.x, o.y, dy === 0 ? { x: o.x + dx } : { y: o.y - dy }, num(o, "duration", 2));
     }),
     enemies: of("enemy").map((o, i) => ({ id: `enemy-${i}`, x: o.x, to: { x: o.x + num(o, "patrol", 3) * TILE } })),
+    ghosts: of("ghost").map((o, i) => ({ id: `enemy-ghost-${i}`, x: o.x, y: o.y })),
     crate: crateAt(crate.x, crate.y),
     swing: swing === undefined ? NO_SWING : swingAt(swing.x, swing.y),
     goal: goalAt(goal.x, goal.y),

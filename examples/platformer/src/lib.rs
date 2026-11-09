@@ -568,6 +568,26 @@ mod tests {
         scene
     }
 
+    /// 右上方的幽灵：角色走近了才追，飞过来撞到角色，角色回到起点。
+    #[test]
+    fn a_ghost_chases_once_you_come_close_and_knocks_you_back() {
+        let mut app = app();
+        let mut scene = level(None);
+        let ghost = json!({ "id": format!("{ENEMY}ghost-0"), "x": 400, "y": 60, "w": 22, "h": 22, "body": { "kind": "kinematic", "friction": 0 },
+            "chase": { "target": PLAYER, "speed": 150, "sight": 250 } });
+        scene["sprites"].as_array_mut().unwrap().push(ghost);
+        app.prop("scene", Some(&scene));
+        assert!(named(&run(&mut app, 30), "chase").is_empty(), "离得远，看不见");
+        key(&mut app, "ArrowRight", true);
+        let seen = (0..120).find_map(|_| named(&run(&mut app, 1), "chase").first().map(|e| (*e).clone())).expect("走近了");
+        assert_eq!((seen["id"].as_str(), seen["state"].as_str()), (Some("enemy-ghost-0"), Some("chase")));
+        key(&mut app, "ArrowRight", false);
+        let x = player(&mut app).0.x;
+        assert!(x > 100.0, "走了一段才看见 {x}");
+        let respawn = (0..180).find(|_| !named(&run(&mut app, 1), "respawn").is_empty());
+        assert!(respawn.is_some(), "幽灵飞过来撞到了角色");
+    }
+
     fn named<'a>(events: &'a [(String, Value)], name: &str) -> Vec<&'a Value> {
         events.iter().filter(|(n, _)| n == name).map(|(_, d)| d).collect()
     }

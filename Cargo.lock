@@ -2166,6 +2166,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
 
 [[package]]
+name = "nge-ai"
+version = "0.1.0"
+dependencies = [
+ "bevy_ecs",
+ "glam 0.34.2",
+ "nge-core",
+ "nge-ecs",
+ "nge-render2d",
+]
+
+[[package]]
 name = "nge-assets"
 version = "0.1.0"
 dependencies = [
@@ -2311,6 +2322,7 @@ dependencies = [
  "glam 0.34.2",
  "image",
  "log",
+ "nge-ai",
  "nge-assets",
  "nge-audio",
  "nge-core",

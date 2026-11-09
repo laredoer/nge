@@ -100,7 +100,7 @@ pub(crate) fn merge(solid: &[bool], cols: usize) -> Vec<Run> {
 
 pub(crate) fn sync_tilemaps(mut commands: Commands, scene: Res<Scene>, mut assets: SceneAssets, nodes: Query<(Entity, &Declared<TilemapNode>)>) {
     sync_list(&mut commands, &scene.tilemaps, &nodes, |commands, map, _, node| {
-        commands.entity(map).despawn_related::<Children>();
+        commands.entity(map).despawn_related::<Children>().remove::<nge_ai::NavGrid>();
         if node.cols == 0 || !(node.tile > 0.0 && node.tile.is_finite()) {
             log::warn!("瓦片地图 {:?} 的 cols 是 0 或 tile 不是正数，不画", node.id);
             return;
@@ -136,6 +136,10 @@ pub(crate) fn sync_tilemaps(mut commands: Commands, scene: Res<Scene>, mut asset
         let solid: Vec<bool> = data.iter().map(|v| *v >= 0 && node.solid.contains(v)).collect();
         if parallax.is_some_and(|p| p.0 != Vec2::ONE) && solid.contains(&true) {
             log::warn!("瓦片地图 {:?} 设了视差又有实心格子：碰撞体在声明的位置，和画面对不上", node.id);
+        }
+        // 导航网格只给有实心格子、不带视差的地图：纯装饰的层不该让追击的角色以为一路畅通
+        if solid.contains(&true) && parallax.is_none_or(|p| p.0 == Vec2::ONE) {
+            commands.entity(map).insert(nge_ai::NavGrid { grid: nge_ai::Grid::new(cols, solid.clone()), origin, tile });
         }
         for run in merge(&solid, cols) {
             let size = Vec2::new(run.w as f32, run.h as f32) * tile;

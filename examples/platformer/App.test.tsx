@@ -86,3 +86,19 @@ test("存档补齐：缺的按新存档，越界的收回来", () => {
   expect(progressOf({ unlocked: 99, best: { "1": 20, "2": "快" } })).toEqual({ unlocked: LEVELS.length, best: { "1": 20 } });
   expect(progressOf({ unlocked: 0.5, best: null })).toEqual(NEW_PROGRESS);
 });
+
+test("幽灵都在空格子里、id 以 enemy- 开头，前两关各有", () => {
+  for (const { built } of LEVELS) {
+    // 有实心格子、不带视差的那张（幽灵在它的导航网格里找路）
+    const map = built.tilemaps.find((m) => (m.solid ?? []).length > 0 && m.parallax === undefined)!;
+    for (const g of built.ghosts) {
+      const col = Math.floor((g.x - (map.x ?? 0)) / map.tile);
+      const row = Math.floor(((map.y ?? 0) - g.y) / map.tile);
+      expect(col >= 0 && col < map.cols && row >= 0).toBe(true);
+      expect(map.data[row * map.cols + col]).toBe(-1);
+      expect(g.id.startsWith("enemy-")).toBe(true);
+    }
+  }
+  expect(LEVELS[0].built.ghosts.length).toBeGreaterThan(0);
+  expect(LEVELS[1].built.ghosts.length).toBeGreaterThan(0);
+});

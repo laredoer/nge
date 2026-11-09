@@ -17,6 +17,8 @@ const WIN_SOUND = "asset:/@platformer/win.wav";
 
 /** 通关后多久进下一关（毫秒）。 */
 const NEXT_DELAY = 1500;
+/** 幽灵比角色慢一截，看得见 7 格，离家 14 格就回去。 */
+const GHOST_CHASE = { target: "player", speed: 110, sight: 224, leash: 448 };
 
 /** 视差背景：远山（一张能无缝接上的山丘贴图，横向重复铺满）跟着相机挪 0.2、树挪 0.5，竖直方向跟着关卡（立在地上）。z < 0，画在 3D 箱子后面。树按相机在 x = 0 时摆，所以铺得宽。 */
 const BACKDROP: SpriteNode[] = [
@@ -109,6 +111,12 @@ function App() {
           ? { id, x, y: 12, w: 24, h: 24, z: 4, color: "#00000000" }
           : { id, x, y: 12, w: 24, h: 24, z: 4, color: "#9b59b6", body: { kind: "kinematic", friction: 0 } },
       ),
+      // 幽灵：看见角色就绕开平台追过来，追远了飘回去（见 docs/ai.md）；踩到的和敌人一样变透明
+      ...now().ghosts.map(({ id, x, y }): SpriteNode =>
+        stomped().includes(id)
+          ? { id, x, y, w: 22, h: 22, z: 4, color: "#00000000" }
+          : { id, x, y, w: 22, h: 22, z: 4, color: "#c8d2ffd0", unlit: true, body: { kind: "kinematic", friction: 0 }, chase: GHOST_CHASE },
+      ),
       now().crate.body,
       ...now().swing.sprites,
       now().goal,
@@ -165,6 +173,10 @@ function App() {
           flashing.set(true);
           clearTimeout(flashEnd);
           flashEnd = setTimeout(() => flashing.set(false), FLASH_MS);
+        }}
+        onChase={(e) => {
+          if (switching || e.state === "idle") return;
+          floatText(game, { x: e.x, y: e.y + 18, text: e.state === "chase" ? "!" : "?", color: "#c8d2ff", duration: 0.6 });
         }}
         onStomp={(e) => {
           if (switching) return;

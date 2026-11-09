@@ -123,6 +123,8 @@ pub struct SpriteNode {
     /// 开着 2D 光照时不受光。
     #[serde(default)]
     pub unlit: bool,
+    /// 追某个节点（见 docs/ai.md）。
+    pub chase: Option<crate::ai::ChaseNode>,
 }
 
 /// `repeat`：`"x"`、`"y"` 或 `"xy"`。

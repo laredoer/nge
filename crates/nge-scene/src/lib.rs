@@ -4,6 +4,7 @@
 //! 节点内容没变的实体不会被改动，所以 Rust 系统可以按 [`SceneId`] 找到实体继续驱动它；
 //! 节点一旦在 TSX 里改了，就以 TSX 声明的为准整体覆盖。
 
+mod ai;
 mod anim;
 mod attach;
 mod audio;
@@ -32,6 +33,7 @@ use nge_render2d::{Assets, AtlasId, Atlases, Camera2d, Grid, Image, PointerWorld
 use nge_render3d::{Assets3d, Camera3d, Transform3d};
 use nge_text::TextPlugin;
 
+pub use ai::{CHASE, ChaseEvent, ChaseNode};
 pub use anim::{ANIM_END, AnimEnd, AnimNode, Ease, FrameAnimation, TWEEN, TWEEN_END, Tween, TweenCommand, TweenEnd, TweenProps, Tweens};
 pub use audio::{AudioNode, PlaySound, SOUND};
 pub use behave::{Spin, Tappable};
@@ -112,6 +114,9 @@ impl Plugin for ScenePlugin {
         if !app.is_plugin_added::<PhysicsPlugin>() {
             app.add_plugins(PhysicsPlugin::default());
         }
+        if !app.is_plugin_added::<nge_ai::AiPlugin>() {
+            app.add_plugins(nge_ai::AiPlugin);
+        }
         if !app.is_plugin_added::<AudioPlugin>() {
             app.add_plugins(AudioPlugin::default());
         }
@@ -146,6 +151,9 @@ impl Plugin for ScenePlugin {
             .add_event(TWEEN_END)
             .add_event(COLLIDE)
             .add_event(LEVEL_START)
+            .add_event(CHASE)
+            .add_systems(Update, ai::resolve_targets.before(nge_ai::chase))
+            .add_systems(Update, ai::send_changes.after(nge_ai::chase))
             .add_message::<LevelStart>()
             .add_systems(PreUpdate, level::switch_level.run_if(resource_changed::<Scene>).before(sync::sync_sprites))
             .add_systems(PreUpdate, synced.run_if(resource_changed::<Scene>).after(level::switch_level).before(PointerWorld))

@@ -31,6 +31,9 @@ opt-level = 3
 # 自己的 crate 在 nsh 生成的工作区里不是成员，也会匹配上面的 "*"：单独压回 1，改引擎后重编才快（3 时要一分多钟）。
 # 加了新 crate 要补一行（nge-core 的测试 dependencies_are_optimized_and_own_crates_stay_light 会提醒）。
 # 按包名匹配，不看来源：依赖里要是混进同名的包（比如叫 model、physics），它也会被压成 1。
+[profile.dev.package.nge-ai]
+opt-level = 1
+
 [profile.dev.package.nge-assets]
 opt-level = 1
 [profile.dev.package.nge-audio]

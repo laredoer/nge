@@ -47,6 +47,30 @@ export interface SpriteNode {
   masked?: "inside" | "outside";
   /** 开着 2D 光照时不受光（自己发光的东西）。 */
   unlit?: boolean;
+  /**
+   * 追某个节点：看见（`sight` 以内、中间没有墙）就在瓦片地图里绕开墙追过去，目标跑出 `sight` 的 1.5 倍、
+   * 自己离出发点超过 `leash`、找不到路就回出发点。直接挪位置，配 `kinematic` 刚体。见 docs/ai.md。
+   */
+  chase?: ChaseNode;
+}
+
+export interface ChaseNode {
+  /** 追哪个节点（id）。 */
+  target: string;
+  /** 每秒多少像素，默认 120。 */
+  speed?: number;
+  /** 多远能看见，默认 240。 */
+  sight?: number;
+  /** 离出发点多远就不追了，默认 480。 */
+  leash?: number;
+}
+
+/** `chase` 的状态变了：`idle` 在出发点等着，`chase` 在追，`return` 在回出发点。 */
+export interface ChaseEvent {
+  id: string;
+  state: "idle" | "chase" | "return";
+  x: number;
+  y: number;
 }
 
 /** 2D 光照：写了就开，受光的精灵颜色乘上环境光加上照到它的灯。粒子、文字不受光。 */
@@ -543,6 +567,7 @@ interface BuiltinEvents {
   key: KeyInput;
   /** 换关（场景的 `level` 换了值）后新关卡的实体建好了：要对新关卡发的命令（补间等）在这里发。 */
   levelStart: { level: string };
+  chase: ChaseEvent;
   fps: FrameStats;
   error: EngineError;
 }
@@ -553,14 +578,14 @@ export type GameViewProps<P, E> = NativeComponentProps<Partial<BuiltinProps> & P
 
 /**
  * 生成游戏视图组件。`props` / `events` 是游戏自己的通道名（Rust 侧 `add_prop` / `add_state` / `add_event`），
- * 类型由泛型给出；内置 prop `scene`、事件 `tap` / `collide` / `animEnd` / `tweenEnd` / `key` / `levelStart` / `fps` / `error`，触摸自动转成引擎的 `touch` command。
+ * 类型由泛型给出；内置 prop `scene`、事件 `tap` / `collide` / `animEnd` / `tweenEnd` / `key` / `levelStart` / `chase` / `fps` / `error`，触摸自动转成引擎的 `touch` command。
  */
 export function gameView<P extends object = {}, E extends object = {}>(
   spec: { props?: readonly (keyof P & string)[]; events?: readonly (keyof E & string)[] } = {},
 ) {
   const Native = nativeComponent<BuiltinProps & P, BuiltinEvents & E>("nge.game", {
     props: [...new Set(["scene", "captureKeys", ...(spec.props ?? [])])] as (keyof (BuiltinProps & P) & string)[],
-    events: [...new Set(["tap", "collide", "animEnd", "tweenEnd", "key", "levelStart", "fps", "error", ...(spec.events ?? [])])] as (keyof (BuiltinEvents & E) & string)[],
+    events: [...new Set(["tap", "collide", "animEnd", "tweenEnd", "key", "levelStart", "chase", "fps", "error", ...(spec.events ?? [])])] as (keyof (BuiltinEvents & E) & string)[],
   });
 
   return (props: GameViewProps<P, E>) => {

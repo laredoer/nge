@@ -73,9 +73,9 @@ pub(crate) fn sync_sprites(mut commands: Commands, scene: Res<Scene>, mut assets
         };
         let mut entity = commands.entity(entity);
         entity.remove::<(Spin, Tappable)>().insert(sprite);
-        // 有刚体时位置归物理管：声明的位置没变就只更新缩放和 z，不把它拉回去
+        // 有刚体时位置归物理管、有 chase 时归追击管：声明的位置没变就只更新缩放和 z，不把它拉回去
         let placed = before.is_some_and(|b| (b.x, b.y, b.rotation) == (node.x, node.y, node.rotation));
-        if node.body.is_some() && placed {
+        if (node.body.is_some() || node.chase.is_some()) && placed {
             entity.queue(move |mut e: EntityWorldMut| {
                 if let Some(mut t) = e.get_mut::<Transform2d>() {
                     (t.scale, t.z) = (transform.scale, transform.z);
@@ -115,6 +115,7 @@ pub(crate) fn sync_sprites(mut commands: Commands, scene: Res<Scene>, mut assets
             None => entity.remove::<Repeat>(),
         };
         crate::effects::apply_sprite(&mut entity, node);
+        crate::ai::apply_chase(&mut entity, before, node);
         // anim 没变时接着播，不从头开始
         if before.map(|b| &b.anim) != Some(&node.anim) {
             let anim = node.anim.as_ref().and_then(|a| FrameAnimation::new(a.frames.clone(), a.fps, a.looped));
