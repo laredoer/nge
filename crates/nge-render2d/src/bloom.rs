@@ -288,7 +288,7 @@ mod tests {
 
     #[test]
     fn the_shader_compiles() {
-        let module = nge_core::wgpu::naga::front::wgsl::parse_str(SHADER).expect("解析");
-        nge_core::wgpu::naga::valid::Validator::new(Default::default(), Default::default()).validate(&module).expect("校验");
+        let module = naga::front::wgsl::parse_str(SHADER).expect("解析");
+        naga::valid::Validator::new(Default::default(), Default::default()).validate(&module).expect("校验");
     }
 }

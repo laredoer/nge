@@ -7,6 +7,8 @@ publish.workspace = true
 license.workspace = true
 
 [dependencies]
+# 校验游戏写的着色器；只开 WebGPU 后端时 wgpu 不再导出 naga
+naga.workspace = true
 nge-core.workspace = true
 nge-ecs.workspace = true
 nge-assets.workspace = true

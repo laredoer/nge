@@ -32,7 +32,11 @@ nsh-core = "0.4.0"
 nsh-base = "0.4.0"
 nsh-platform-macos = { version = "0.4.0", default-features = false }
 nsh-platform-ios = { version = "0.4.0", default-features = false }
-wgpu = "30"
+# fragile-send-sync-non-atomic-wasm：wasm 上只有一个线程，wgpu 对象也当 Send + Sync，才放得进 ECS 的资源（见 docs/web.md）
+wgpu = { version = "30", features = ["fragile-send-sync-non-atomic-wasm"] }
+naga = { version = "30", features = ["wgsl-in"] }
+# nsh 0.4 的 web 打包按 0.2.129 的胶水写，wasm-bindgen 命令行要和这里同一个版本
+wasm-bindgen = "=0.2.129"
 pollster = "1"
 raw-window-handle = "0.6"
 bytemuck = { version = "1.25", features = ["derive"] }

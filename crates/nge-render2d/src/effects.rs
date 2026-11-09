@@ -294,7 +294,6 @@ const POST_BINDINGS: usize = 3;
 /// 用 naga 解析、校验一遍；不过时返回能给人看的错误（附上游戏写的那段从完整着色器的第几行开始）。
 /// 管线布局是固定的：游戏自己声明绑定、`override`、`var<immediate>` 时 naga 能过、建管线会失败，这里一并拒掉。
 pub(crate) fn validate(source: &str, user: &str) -> Result<(), String> {
-    use nge_core::wgpu::naga;
     let module = naga::front::wgsl::parse_str(source).map_err(|e| shift(&e.emit_to_string(source), source, user))?;
     naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::empty())
         .validate(&module)
