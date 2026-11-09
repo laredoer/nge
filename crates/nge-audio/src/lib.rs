@@ -3,7 +3,7 @@
 
 mod audio;
 
-pub use audio::{Audio, MAX_STARTS_PER_FRAME, MAX_VOICES, Play, Voice};
+pub use audio::{Audio, Bus, DEFAULT_RANGE, MAX_STARTS_PER_FRAME, MAX_VOICES, Play, Voice, spatial};
 
 use std::io::Cursor;
 use std::sync::Mutex;
@@ -53,8 +53,10 @@ impl Plugin for AudioPlugin {
             AudioManager::<DefaultBackend>::new(AudioManagerSettings::default()).map(Manager::Device).map_err(|e| e.to_string())
         };
         let manager = manager.inspect_err(|e| log::warn!("没有可用的音频设备，声音关掉: {e}")).ok();
+        let mut audio = Audio::new(manager.map(Mutex::new));
+        audio.add_buses();
         app.init_asset::<Sound>()
-            .insert_resource(Audio::new(manager.map(Mutex::new)))
+            .insert_resource(audio)
             .add_systems(PostUpdate, audio::update.in_set(AudioUpdated));
     }
 }
@@ -69,7 +71,7 @@ pub(crate) enum Manager {
 }
 
 pub mod prelude {
-    pub use crate::{Audio, AudioPlugin, Play, Sound, Voice};
+    pub use crate::{Audio, AudioPlugin, Bus, Play, Sound, Voice};
 }
 
 /// 测试用的工具。

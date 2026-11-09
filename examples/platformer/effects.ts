@@ -1,5 +1,5 @@
-// 平台跳跃的 2D 特效：金币扫过的亮光、终点上方的传送门、第三关的夜色、被撞回去时闪白（见 docs/effects2d.md）。
-import type { LightingNode, PostNode, SpriteNode } from "../../ts/nge";
+// 平台跳跃的 2D 特效：金币扫过的亮光、终点上方的传送门、第三关的夜色（含回声）、被撞回去时闪白（见 docs/effects2d.md）。
+import type { AudioNode, LightingNode, PostNode, SpriteNode } from "../../ts/nge";
 
 /** 自己写的着色器（WGSL）。 */
 export const SHADERS: Record<string, string> = {
@@ -32,6 +32,11 @@ export const COIN_SHADER: Pick<SpriteNode, "shader" | "params"> = { shader: "shi
 /** 被撞回起点后闪白的那一下：混 80% 的白，持续多久（毫秒）。 */
 export const FLASH: Pick<SpriteNode, "shader" | "params"> = { shader: "flash", params: [1, 1, 1, 0.8] };
 export const FLASH_MS = 250;
+
+/** 夜里那关的音效带回声（音效分组加混响，见 docs/audio-more.md），别的关不加。 */
+export function levelAudio(night: boolean): AudioNode {
+  return night ? { buses: { sfx: { reverb: 0.35 } } } : {};
+}
 
 /** 传送门的半径，在终点上方多高。 */
 export const PORTAL_R = 32;

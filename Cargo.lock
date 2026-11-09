@@ -2203,6 +2203,7 @@ name = "nge-audio"
 version = "0.1.0"
 dependencies = [
  "bevy_ecs",
+ "glam 0.34.2",
  "kira",
  "log",
  "nge-assets",

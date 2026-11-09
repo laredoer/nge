@@ -1,6 +1,6 @@
 // 平台跳跃的 2D 特效（见 docs/effects2d.md）：传送门的遮罩、第三关的夜色。着色器能不能编过在 Rust 那边测（src/lib.rs）。
 import { expect, test } from "nsh/test";
-import { night, PORTAL_R, portalOver, SHADERS } from "./effects";
+import { levelAudio, night, PORTAL_R, portalOver, SHADERS } from "./effects";
 import { LEVELS } from "./levels";
 
 test("传送门在终点正上方：一个圆形遮罩，星空和星星只画在里面，边框不受遮罩", () => {
@@ -32,4 +32,10 @@ test("只有第三关是夜里：角色带灯，终点和传送门各一盏，�
   expect(lights[0].follow).toBe("player");
   expect(lights.slice(1).map((l) => [l.x, l.y! > goal.y!])).toEqual([[goal.x, false], [goal.x, true]]);
   expect(post.map((p) => p.shader)).toEqual(["vignette"]);
+});
+
+test("夜里那关的音效有回声，别的关没有", () => {
+  expect(levelAudio(true).buses?.sfx?.reverb).toBeGreaterThan(0);
+  expect(levelAudio(true).buses?.music).toBe(undefined);
+  expect(levelAudio(false)).toEqual({});
 });

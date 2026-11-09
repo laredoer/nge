@@ -36,7 +36,7 @@ use nge_text::TextPlugin;
 
 pub use ai::{CHASE, ChaseEvent, ChaseNode};
 pub use anim::{ANIM_END, AnimEnd, AnimNode, Ease, FrameAnimation, TWEEN, TWEEN_END, Tween, TweenCommand, TweenEnd, TweenProps, Tweens};
-pub use audio::{AudioNode, PlaySound, SOUND};
+pub use audio::{AudioNode, BusName, BusNode, BusesNode, PlaySound, SOUND};
 pub use behave::{Spin, Tappable};
 pub use camera::{SHAKE, Shake};
 pub use effects::{Light2dNode, LightingNode, MaskedNode, PostNode};
@@ -171,7 +171,7 @@ impl Plugin for ScenePlugin {
             .add_systems(PostUpdate, joints::resolve.before(PhysicsStepped))
             .add_systems(PostUpdate, attach::attach.after(PhysicsStepped).before(behave::follow))
             .add_systems(PostUpdate, effects::lighting.after(PhysicsStepped).after(behave::follow).after(camera::camera_rig))
-            .add_systems(PostUpdate, (behave::follow, physics::collide.after(PhysicsStepped), physics3d::collide.after(nge_physics3d::Physics3dStepped), camera::camera_rig.after(PhysicsStepped), match2d::match_2d.after(camera::camera_rig)));
+            .add_systems(PostUpdate, (behave::follow, physics::collide.after(PhysicsStepped), audio::listen.after(camera::camera_rig).before(nge_audio::AudioUpdated), physics3d::collide.after(nge_physics3d::Physics3dStepped), camera::camera_rig.after(PhysicsStepped), match2d::match_2d.after(camera::camera_rig)));
     }
 }
 

@@ -1,6 +1,6 @@
 import { batch, mount, type NativeComponentRef, platform, signal, Text, View } from "nsh";
 import { floatText, gameView, KeyButton, push, saved, sound, tween, type Scene, type SpriteNode } from "../../ts/nge";
-import { COIN_SHADER, FLASH, FLASH_MS, night, portalOver, SHADERS } from "./effects";
+import { COIN_SHADER, FLASH, FLASH_MS, levelAudio, night, portalOver, SHADERS } from "./effects";
 import { finish, flagOn, LEVELS, NEW_PROGRESS, progressOf, ROWS, TILE, TOWER_TRIGGER, towerAt, type Progress } from "./levels";
 
 /** Rust 发的事件：掉出关卡或被敌人撞到送回起点、按 R 重新开始、踩到敌人。 */
@@ -14,6 +14,9 @@ const GameView = gameView<{}, Events>({ events: ["respawn", "restart", "stomp"] 
 
 const COIN_SOUND = "asset:/@platformer/coin.wav";
 const WIN_SOUND = "asset:/@platformer/win.wav";
+
+/** 同一只幽灵发现角色的声音多久最多响一次（毫秒）。 */
+const SPOT_COOLDOWN_MS = 2000;
 
 /** 通关后多久进下一关（毫秒）。 */
 const NEXT_DELAY = 1500;
@@ -49,6 +52,8 @@ function App() {
   const falls = signal(0);
   const won = signal<number | null>(null);
   const stomped = signal<string[]>([]);
+  /** 幽灵上一次发现角色时响声的时间。 */
+  const spotted = new Map<string, number>();
   /** 这一局的 3D 箱子已经撞散了。 */
   let toppled = false;
   /** 箱子摞了第几次：按 R 重来（关卡不重建）时也换 id，让箱子重新摞起来。 */
@@ -106,7 +111,7 @@ function App() {
     background: LEVELS[level()].night ? "#0b0f1e" : "#1b2233",
     shaders: SHADERS,
     ...(LEVELS[level()].night ? night(now().goal) : {}),
-    audio: { preload: [COIN_SOUND, WIN_SOUND] },
+    audio: { preload: [COIN_SOUND, WIN_SOUND], ...levelAudio(LEVELS[level()].night ?? false) },
     physics: { gravity: [0, -1800] },
     camera: { follow: "player", y: 60, smooth: 0.15, bounds: { left: 0, right: now().right, bottom: -160, top: (ROWS - 1) * TILE } },
     camera3d: { match2d: true, interleave: true },
@@ -200,6 +205,11 @@ function App() {
         }}
         onChase={(e) => {
           if (switching || e.state === "idle") return;
+          // 发现角色时从幽灵那儿响一声低八度的金币声：在左边的听起来在左边。同一只两秒内只响一次，追追停停时不吵
+          if (e.state === "chase" && Date.now() - (spotted.get(e.id) ?? 0) > SPOT_COOLDOWN_MS) {
+            spotted.set(e.id, Date.now());
+            sound(game, { src: COIN_SOUND, pitch: 0.5, volume: 0.6, x: e.x, y: e.y });
+          }
           floatText(game, { x: e.x, y: e.y + 18, text: e.state === "chase" ? "!" : "?", color: "#c8d2ff", duration: 0.6 });
         }}
         onStomp={(e) => {

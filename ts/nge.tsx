@@ -404,6 +404,20 @@ export interface AudioNode {
   muted?: boolean;
   /** 提前加载的声音，第一次播放时不用等。 */
   preload?: string[];
+  /** 混音分组：背景音乐进 music，`sound` 默认进 sfx。变了才设，0.3 秒过渡过去（见 docs/audio-more.md）。 */
+  buses?: { music?: BusNode; sfx?: BusNode; ui?: BusNode };
+  /** 带位置的声音多远就听不见，默认 1000。听的人在 2D 相机的位置。 */
+  range?: number;
+}
+
+/** 一个混音分组的设置。 */
+export interface BusNode {
+  /** 默认 1。 */
+  volume?: number;
+  /** 低通滤波的截止频率（赫兹，20 到 20000），不写是关：水下、暂停时的闷声。 */
+  lowpass?: number;
+  /** 混响的湿声比例（0 到 1），默认 0。 */
+  reverb?: number;
 }
 
 /** 点中了可点击的精灵或模型。x / y 是指针的 2D 世界坐标；点中模型时 point 是 3D 命中点。 */
@@ -520,8 +534,14 @@ export interface TweenEnd {
   cancelled: boolean;
 }
 
-/** 播一次音效。`pitch` 是播放速度（2 = 高八度，限制在 0.1 到 8），`pan` 从 -1（左）到 1（右）。同时发声数有上限，超出的会被丢掉。 */
-export function sound(game: NativeComponentRef | undefined, args: { src: string; volume?: number; pitch?: number; pan?: number }) {
+/**
+ * 播一次音效。`pitch` 是播放速度（2 = 高八度，限制在 0.1 到 8），`pan` 从 -1（左）到 1（右）。同时发声数有上限，超出的会被丢掉。
+ * `bus` 默认 "sfx"。`x`、`y` 都写了就按位置播：离相机越远越小，在左边就偏左。
+ */
+export function sound(
+  game: NativeComponentRef | undefined,
+  args: { src: string; volume?: number; pitch?: number; pan?: number; bus?: "music" | "sfx" | "ui"; x?: number; y?: number },
+) {
   game?.command("sound", args);
 }
 
