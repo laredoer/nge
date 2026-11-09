@@ -20,5 +20,8 @@ pub mod macos;
 #[cfg(target_os = "ios")]
 pub mod ios;
 
+#[cfg(any(target_arch = "wasm32", test))]
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+mod loading;
 #[cfg(target_arch = "wasm32")]
 pub mod web;

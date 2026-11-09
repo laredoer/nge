@@ -4,6 +4,7 @@
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
+use std::future::Future;
 use std::rc::{Rc, Weak};
 use std::sync::mpsc;
 
@@ -38,6 +39,16 @@ pub struct Engine {
 impl Engine {
     /// 在 `canvas` 上建 WebGPU 画面并开始异步初始化 GPU。浏览器没有 WebGPU 时返回错误。
     pub fn spawn(canvas: web_sys::HtmlCanvasElement, emit: Emit, factory: GameFactory) -> Result<Self, String> {
+        Self::spawn_after(canvas, emit, factory, async { Ok(()) })
+    }
+
+    /// 同 [`Engine::spawn`]，但先等 `before` 做完（比如把资源取进内存）再初始化 GPU、建游戏；它失败时发 `error`，不再往下走。
+    pub fn spawn_after(
+        canvas: web_sys::HtmlCanvasElement,
+        emit: Emit,
+        factory: GameFactory,
+        before: impl Future<Output = Result<(), String>> + 'static,
+    ) -> Result<Self, String> {
         let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
         // 只用 WebGPU：3D 的蒙皮和变形在顶点阶段读 storage buffer，WebGL2 没有
         descriptor.backends = wgpu::Backends::BROWSER_WEBGPU;
@@ -46,7 +57,10 @@ impl Engine {
         let inner = Rc::new(RefCell::new(Inner { phase: Phase::Starting(Gate::default()), queue: VecDeque::new(), emit: Rc::new(emit), factory }));
         let weak = Rc::downgrade(&inner);
         wasm_bindgen_futures::spawn_local(async move {
-            let gpu = request_gpu(&instance, surface).await;
+            let gpu = match before.await {
+                Ok(()) => request_gpu(&instance, surface).await.map_err(|e| format!("WebGPU 初始化失败: {e}")),
+                Err(e) => Err(e),
+            };
             gpu_ready(&weak, gpu);
         });
         Ok(Self { inner })
@@ -65,6 +79,11 @@ impl Engine {
 
     pub fn resume(&self) {
         self.send(Msg::Resume);
+    }
+
+    /// 游戏建好了（还没出错、没退出）。
+    pub fn running(&self) -> bool {
+        matches!(self.inner.borrow().phase, Phase::Running { .. })
     }
 
     /// 浏览器每帧调一次：处理攒下的消息，跑起来了就更新、画一帧。
@@ -124,7 +143,7 @@ fn gpu_ready(inner: &Weak<RefCell<Inner>>, gpu: Result<Gpu, String>) {
     let Phase::Starting(gate) = std::mem::replace(&mut inner.phase, Phase::Stopped) else { return };
     match gpu {
         Ok(gpu) => inner.phase = Phase::Ready(gpu, gate),
-        Err(e) => fail(&inner.emit, format!("WebGPU 初始化失败: {e}")),
+        Err(e) => fail(&inner.emit, e),
     }
 }
 

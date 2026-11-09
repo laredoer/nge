@@ -1,1 +1,1 @@
-{ "name": "sanguo", "id": "com.lewu.nge.sanguo", "version": "0.1.0", "build": 1, "rust": "." }
+{ "name": "sanguo", "id": "com.lewu.nge.sanguo", "version": "0.1.0", "build": 1, "rust": ".", "web": { "host": "web/loading.js" } }

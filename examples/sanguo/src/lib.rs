@@ -33,7 +33,7 @@ pub fn factory() -> nge_core::GameFactory {
 fn native(registry: &mut nsh_core::prelude::Registry) {
     registry.assets(assets!());
     #[cfg(target_arch = "wasm32")]
-    nge_platform::web::register(factory());
+    nge_platform::web::register(factory(), assets!().iter().map(|f| f.uri));
 }
 
 /// 把游戏视图注册进生成的宿主。

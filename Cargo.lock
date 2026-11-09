@@ -2300,6 +2300,7 @@ dependencies = [
  "block2",
  "js-sys",
  "log",
+ "nge-assets",
  "nge-core",
  "nsh-platform-ios",
  "nsh-platform-macos",
@@ -2313,6 +2314,7 @@ dependencies = [
  "raw-window-handle",
  "serde_json",
  "wasm-bindgen",
+ "wasm-bindgen-futures",
  "web-sys",
 ]
 

@@ -777,6 +777,40 @@ function frameViewport(frame, colorScheme) {
 }
 
 /** Loads the runtime and makes a player in `container`. */
+/**
+ * 下载运行时 wasm 的进度（本仓库加的）：边收边在 window 上发 `nsh-load-progress`，
+ * `detail` 是 `{ loaded, length, encoding, done }`（`length` 是 Content-Length，压缩传输时是压缩后的大小；
+ * 拿不到时为 0），最近一次也放在 `globalThis.nshLoadProgress`，页面上的加载页据此画进度条。
+ */
+function counted(response) {
+  if (!response.ok || !response.body || typeof ReadableStream !== "function") return response;
+  const length = Number(response.headers.get("Content-Length")) || 0;
+  const encoding = response.headers.get("Content-Encoding") || "";
+  const report = (loaded, done) => {
+    const detail = { loaded, length, encoding, done };
+    globalThis.nshLoadProgress = detail;
+    globalThis.dispatchEvent?.(new CustomEvent("nsh-load-progress", { detail }));
+  };
+  let loaded = 0;
+  const reader = response.body.getReader();
+  const body = new ReadableStream({
+    async pull(controller) {
+      const { done, value } = await reader.read();
+      if (done) {
+        report(loaded, true);
+        controller.close();
+        return;
+      }
+      loaded += value.byteLength;
+      report(loaded, false);
+      controller.enqueue(value);
+    },
+    cancel(reason) { return reader.cancel(reason); },
+  });
+  report(0, false);
+  return new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers });
+}
+
 export async function createPlayer(container, options = {}) {
   const player = new Player(container, options);
   await player.load(options.wasm ?? new URL("nsh.wasm", import.meta.url));
@@ -1030,7 +1064,7 @@ class Player {
     // `application/wasm` (streaming compilation rejects any other type,
     // parameters such as `; charset=utf-8` included) gets the body compiled
     // whole instead of streamed.
-    const response = await (typeof url === "string" || url instanceof URL ? fetch(url) : url);
+    const response = counted(await (typeof url === "string" || url instanceof URL ? fetch(url) : url));
     const type = response.headers.get("Content-Type")?.trim().toLowerCase();
     const module = type === "application/wasm" && WebAssembly.compileStreaming
       ? await WebAssembly.compileStreaming(response)
