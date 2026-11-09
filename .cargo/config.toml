@@ -14,6 +14,8 @@ nsh-platform-linux = { git = "https://github.com/longbridge/nsh", tag = "v0.4.0"
 nsh-platform-macos = { git = "https://github.com/longbridge/nsh", tag = "v0.4.0" }
 nsh-platform-windows = { git = "https://github.com/longbridge/nsh", tag = "v0.4.0" }
 nsh-testing = { git = "https://github.com/longbridge/nsh", tag = "v0.4.0" }
+# web 平台用仓库里改过的副本（加了原生组件，见 docs/web.md）；版本号保持 0.4.0，nsh 打包时从这里拷 nsh.js。
+nsh-platform-web = { path = "vendor/nsh-platform-web" }
 
 # nsh 0.4 要求 iOS 15；不设时按 10.0 链接，QuickJS 的 ___chkstk_darwin 找不到（nsh package --target ios）。
 [env]

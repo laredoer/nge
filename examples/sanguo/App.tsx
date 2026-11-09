@@ -6,6 +6,8 @@ import { hudOf } from "./hud";
 import { DT, NO_INPUT, type Input } from "./player";
 import { strings } from "./strings";
 import { sceneOf, SOUNDS } from "./view";
+// 打包时才保留 sanguo 的原生模块（web 上游戏视图在那里注册，见 docs/web.md）
+import "sanguo/native";
 
 const GameView = gameView();
 /** 文案跟系统语言（见 docs/localization.md）。 */
