@@ -729,6 +729,8 @@ export function gameView<P extends object = {}, E extends object = {}>(
   };
 }
 
+// 本地化见 docs/localization.md
+export { i18n, missing, plural, resolveLocale, type I18n, type I18nOptions, type Message, type Messages, type Params, type PluralCategory } from "./i18n";
 // 存档槽见 docs/saves.md
 export { saveSlots, type LoadResult, type SaveSlots, type SaveSlotsOptions, type SaveStore, type SlotInfo } from "./saves";
 

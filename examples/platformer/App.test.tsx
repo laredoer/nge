@@ -50,14 +50,14 @@ test("别的手指松开不影响按着的", () => {
 const hud = (app: { texts(): string[] }) => app.texts().join(" ");
 
 test("存档里的最好成绩显示在 HUD 上", async () => {
-  const app = await open(".", { platform: "macos", storage: { "nge:platformer": JSON.stringify({ unlocked: 2, best: { "1": 12.3 } }) } });
+  const app = await open(".", { platform: "macos", locale: "zh-CN", storage: { "nge:platformer": JSON.stringify({ unlocked: 2, best: { "1": 12.3 } }) } });
   await app.waitUntil(() => hud(app).includes("最好 12.3 秒"), { timeout: 1000 });
 });
 
 test("没有存档、存档坏了、结构不对都从头开始", async () => {
   const cases: [Record<string, string>, number][] = [[{}, 1], [{ "nge:platformer": "{坏的" }, 1], [{ "nge:platformer": "null" }, 1], [{ "nge:platformer": '{"unlocked":2}' }, 2]];
   for (const [storage, unlocked] of cases) {
-    const app = await open(".", { platform: "macos", storage });
+    const app = await open(".", { platform: "macos", locale: "zh-CN", storage });
     // 等读档回来再看
     await app.wait(100);
     expect(hud(app)).toContain(`解锁了 ${unlocked} 关`);
@@ -65,6 +65,14 @@ test("没有存档、存档坏了、结构不对都从头开始", async () => {
     expect(hud(app)).not.toContain("最好");
     expect(app.storage()).toEqual(storage);
   }
+});
+
+test("系统是英文时 HUD 是英文，存过的语言优先", async () => {
+  const en = await open(".", { platform: "macos", locale: "en-US" });
+  await en.waitUntil(() => hud(en).includes("Level 1 Meadow"), { timeout: 1000 });
+  expect(hud(en)).toContain("0 falls");
+  const chosen = await open(".", { platform: "macos", locale: "en-US", storage: { "nge:lang": JSON.stringify("zh") } });
+  await chosen.waitUntil(() => hud(chosen).includes("第 1 关 草原"), { timeout: 1000 });
 });
 
 test("通关解锁下一关，用时更短才记", () => {

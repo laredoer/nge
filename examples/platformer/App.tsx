@@ -1,6 +1,7 @@
-import { batch, mount, type NativeComponentRef, platform, signal, Text, View } from "nsh";
-import { floatText, gameView, KeyButton, push, saveSlots, sound, tween, type Scene, type SpriteNode } from "../../ts/nge";
+import { batch, effect, mount, type NativeComponentRef, platform, signal, Text, View } from "nsh";
+import { floatText, gameView, KeyButton, push, saved, saveSlots, sound, tween, type Scene, type SpriteNode } from "../../ts/nge";
 import { COIN_SHADER, FLASH, FLASH_MS, levelAudio, night, portalOver, SHADERS } from "./effects";
+import { levelKey, otherLocale, strings } from "./strings";
 import { NEW_SAVE, nextSlot, SAVE_MIGRATIONS, SAVE_VERSION, saveDataOf, saveSummary, SLOTS } from "./savefile";
 import { hpBar, outOfHearts, TITLE_HOLD_MS, titleBubble } from "./hud";
 import { finish, flagOn, LEVELS, ROWS, TILE, TOWER_TRIGGER, towerAt, type Progress } from "./levels";
@@ -40,7 +41,13 @@ const BACKDROP: SpriteNode[] = [
 ];
 
 
+/** 文案（见 docs/localization.md）：默认跟系统语言，按 L 在中文和英文之间切，记在设备上。 */
+const lang = strings();
+const t = lang.t;
+
 function App() {
+  const chosenLang = saved<string | null>("lang", null);
+  effect(() => lang.setLocale(chosenLang()));
   let game: NativeComponentRef | undefined;
   /** 第几关（从 0 数）、第几次开始：选同一关也算新的一局，引擎照样重建。 */
   /** 局数从启动时间起数：开发时只重载 JS、引擎还留着时，第一局的 level 也和上次不同，照样换关。 */
@@ -79,8 +86,8 @@ function App() {
   let toppled = false;
   /** 箱子摞了第几次：按 R 重来（关卡不重建）时也换 id，让箱子重新摞起来。 */
   const towerRound = signal(0);
-  /** 关卡名气泡：每关开始时冒出来，打完过一会儿去掉。 */
-  const title = signal<string | null>(null);
+  /** 关卡名气泡（存关卡号，画的时候取文案，换语言跟着变）：每关开始时冒出来，打完过一会儿去掉。 */
+  const title = signal<number | null>(null);
   let titleEnd: ReturnType<typeof setTimeout> | undefined;
   /** 刚被撞回起点：角色闪白一下。 */
   const flashing = signal(false);
@@ -176,7 +183,7 @@ function App() {
     physics3d: { gravity: [0, -1800, 0] },
     models: [now().crate.model, flagOn(now().goal), ...(tower()?.models ?? [])],
     bars: [hpBar(falls())],
-    bubbles: title() === null ? [] : [titleBubble(title()!)],
+    bubbles: title() === null ? [] : [titleBubble(t(levelKey(title()!)))],
     joints: now().swing.joints,
     tilemaps: now().tilemaps,
     sprites: [
@@ -213,9 +220,17 @@ function App() {
   return (
     <View class="flex-1 bg-black">
       <Text class="text-white p-4">
-        {platform.desktop ? `← → / A D / 手柄 移动 · 空格 / ↑ / A 跳 · R 重来 · 数字键选关（解锁了 ${progress().unlocked} 关）· S 换存档 · Q 调试 · P 性能 · ` : ""}存档 {slot() + 1}{brokenSlot() === "newer" ? "（新版本存的，不覆盖）" : brokenSlot() ? "（坏了）" : ""} · 第 {level() + 1} 关 {LEVELS[level()].name} · 金币 {taken().length} / {now().coins.length} · 失手 {falls()} 次
-        {best() === undefined ? "" : ` · 最好 ${best()} 秒`}
-        {won() === null ? "" : ` · 通关！用时 ${won()} 秒`}
+        {platform.desktop ? t("help", { count: progress().unlocked }) : ""}
+        {t("slot", { n: slot() + 1 })}
+        {brokenSlot() === "newer" ? t("slotNewer") : brokenSlot() ? t("slotBroken") : ""}
+        {" · "}
+        {t("level", { n: level() + 1, name: t(levelKey(level())) })}
+        {" · "}
+        {t("coins", { got: taken().length, all: now().coins.length, count: now().coins.length })}
+        {" · "}
+        {t("falls", { count: falls() })}
+        {best() === undefined ? "" : t("best", { seconds: best()! })}
+        {won() === null ? "" : t("won", { seconds: won()! })}
       </Text>
       <GameView
         class="flex-1"
@@ -227,7 +242,7 @@ function App() {
           switching = false;
           startTweens();
           clearTimeout(titleEnd);
-          title.set(LEVELS[level()].name);
+          title.set(level());
           // 换关时记下打到第几关；坏了的存档位不覆盖
           if (!brokenSlot()) persist();
         }}
@@ -252,6 +267,7 @@ function App() {
         }}
         onKey={(e) => {
           if (e.down && !e.repeat && e.code === "KeyS") return pick(nextSlot(target));
+          if (e.down && !e.repeat && e.code === "KeyL") return chosenLang.set(otherLocale(lang.locale()));
           // Digit1 … Digit9：选已经解锁的关
           const n = /^Digit([1-9])$/.exec(e.code)?.[1];
           if (!e.down || e.repeat || n === undefined) return;
@@ -279,7 +295,7 @@ function App() {
         onStomp={(e) => {
           if (switching) return;
           stomped.set([...stomped(), e.id]);
-          floatText(game, { x: e.x, y: e.y + 10, text: "踩！", color: "#c39bd3", duration: 0.6 });
+          floatText(game, { x: e.x, y: e.y + 10, text: t("stomp"), color: "#c39bd3", duration: 0.6 });
         }}
         onTyped={(e) => {
           if (e.id !== "title" || switching) return;
@@ -307,7 +323,7 @@ function TouchPad(props: { game: () => NativeComponentRef | undefined }) {
       </View>
       <View class="flex-row gap-4 items-end">
         <KeyButton game={props.game} code="KeyR" label="↺" class="w-12 h-12" />
-        <KeyButton game={props.game} code="Space" label="跳" class="w-20 h-20" />
+        <KeyButton game={props.game} code="Space" label={t("jump")} class="w-20 h-20" />
       </View>
     </View>
   );
