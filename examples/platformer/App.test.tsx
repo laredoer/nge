@@ -1,7 +1,7 @@
 // `nsh test`：无头 runner 里没有游戏视图，测按钮的显示和按住的手指怎么换成按键。
 import { expect, open, test } from "nsh/test";
 import { heldKey } from "../../ts/nge";
-import { finish, LEVELS, NEW_PROGRESS, progressOf } from "./levels";
+import { finish, LEVELS, NEW_PROGRESS, progressOf, rampOf } from "./levels";
 
 const BUTTONS = ["id:key-ArrowLeft", "id:key-ArrowRight", "id:key-Space", "id:key-KeyR"];
 
@@ -101,4 +101,20 @@ test("幽灵都在空格子里、id 以 enemy- 开头，前两关各有", () => 
   }
   expect(LEVELS[0].built.ghosts.length).toBeGreaterThan(0);
   expect(LEVELS[1].built.ghosts.length).toBeGreaterThan(0);
+});
+
+test("斜坡的顶面正好从一头到另一头，第一关有一段", () => {
+  for (const [a, b] of [[[0, 0], [100, 50]], [[200, 80], [50, 0]]]) {
+    const r = rampOf("r", a, b);
+    const angle = ((r.rotation ?? 0) * Math.PI) / 180;
+    // 顶面两头 = 中心 ± 半长沿坡 + 半厚沿法线
+    const [ux, uy] = [Math.cos(angle), Math.sin(angle)];
+    // 顶面朝上的法线
+    const [nx, ny] = ux >= 0 ? [-uy, ux] : [uy, -ux];
+    const ends = [1, -1].map((s) => [r.x! + (s * r.w! * ux) / 2 + (nx * r.h!) / 2, r.y! + (s * r.w! * uy) / 2 + (ny * r.h!) / 2]);
+    const near = (p: number[], q: number[]) => Math.hypot(p[0] - q[0], p[1] - q[1]) < 1e-6;
+    expect((near(ends[0], b) && near(ends[1], a)) || (near(ends[0], a) && near(ends[1], b))).toBe(true);
+    expect(r.body?.kind).toBe("fixed");
+  }
+  expect(LEVELS[0].built.ramps.length).toBe(1);
 });

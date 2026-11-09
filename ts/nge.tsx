@@ -104,8 +104,11 @@ export interface PostNode {
 
 /** 精灵的刚体和碰撞体。尺寸是精灵本地的大小，会乘精灵的 scale。 */
 export interface BodyNode {
-  /** 默认 "dynamic"。kinematic 跟着声明的位置平滑移动，会推开别的刚体。 */
-  kind?: "dynamic" | "fixed" | "kinematic";
+  /**
+   * 默认 "dynamic"。kinematic 跟着声明的位置平滑移动，会推开别的刚体。
+   * character 是角色控制器：Rust 改速度，引擎负责重力、贴地、沿墙滑、爬坡、上台阶、被脚下的平台带着走（见 docs/character.md）。
+   */
+  kind?: "dynamic" | "fixed" | "kinematic" | "character";
   /** 默认 "box"。 */
   shape?: "box" | "circle";
   /** 碰撞体大小，不填取精灵的 w / h（圆取短边的一半）；都没有时只建刚体、不建碰撞体。 */
@@ -128,6 +131,12 @@ export interface BodyNode {
   collide?: boolean;
   /** 不让碰撞把它转起来（平台游戏的角色）。 */
   fixedRotation?: boolean;
+  /** character：能爬的最陡的坡（度），默认 50。 */
+  slope?: number;
+  /** character：自动迈上去的台阶最高多高，默认 0（不自动上）。 */
+  step?: number;
+  /** character：离地多近就往下贴，默认 4（0 不贴）。 */
+  snap?: number;
 }
 
 export type Anchor = "top-left" | "top" | "top-right" | "left" | "center" | "right" | "bottom-left" | "bottom" | "bottom-right";

@@ -31,6 +31,8 @@ export interface Level {
   swing?: number[];
   /** 幽灵：在空中的列和 y，看见角色就绕开平台追过来。 */
   ghosts?: number[][];
+  /** 斜坡：两头的 [x, y]（顶面），角色控制器能走上去（见 docs/character.md）。 */
+  ramps?: number[][][];
 }
 
 /** 用代码描述的关卡。 */
@@ -48,9 +50,11 @@ const DESCRIBED: Level[] = [
       { col: 42.5, y: -8, to: { y: 152 }, duration: 2.5 },
     ],
     extraCoins: [[53.5, 124], [42.5, 200]],
-    enemies: [14, 31, 69],
+    enemies: [14, 44, 69],
     crate: 73.5,
     swing: [7.5, 150],
+    // 从地面走上第三块平台的右边
+    ramps: [[[28 * TILE, 3 * TILE], [28 * TILE + 3 * TILE * Math.sqrt(3), 0]]],
     // 第二组平台上方：从平台缝里看见地面上的角色
     ghosts: [[29, 240]],
   },
@@ -82,6 +86,8 @@ export interface Built {
   enemies: { id: string; x: number; to: { x: number } }[];
   /** 幽灵：id 以 enemy- 开头（踩它、碰它和别的敌人一样），会飞，追角色。 */
   ghosts: { id: string; x: number; y: number }[];
+  /** 斜坡：转过角度的固定刚体。 */
+  ramps: SpriteNode[];
   /** 3D 箱子：模型跟着一个看不见的 2D 刚体走（`attach`），角色能推着它走、跳上去。 */
   crate: { body: SpriteNode; model: ModelNode };
   /** 吊着的铁链：几节链子和一个铁球，用转动关节一节节连起来，挂在世界上的支点。 */
@@ -130,7 +136,27 @@ export function build(level: Level): Built {
   // 终点前转着的 3D 箱子（2.5D）：3D 相机跟着 2D 相机（`match2d`），模型的 (x, y) 就是关卡里的位置
   const swing = level.swing === undefined ? NO_SWING : swingAt(level.swing[0] * TILE, level.swing[1]);
   const ghosts = (level.ghosts ?? []).map(([c, y], i) => ({ id: `enemy-ghost-${i}`, x: (c + 0.5) * TILE, y }));
-  return { tilemaps: [tilemap], coins, lifts, enemies, ghosts, crate: crateAt(level.crate * TILE, 56), swing, goal: goalAt((cols - 4) * TILE, 40), right: cols * TILE };
+  const ramps = (level.ramps ?? []).map(([a, b], i) => rampOf(`ramp-${i}`, a, b));
+  return { tilemaps: [tilemap], coins, lifts, enemies, ghosts, ramps, crate: crateAt(level.crate * TILE, 56), swing, goal: goalAt((cols - 4) * TILE, 40), right: cols * TILE };
+}
+
+/** 厚 16 的斜坡，顶面从 `a` 到 `b`。 */
+export function rampOf(id: string, [ax, ay]: number[], [bx, by]: number[]): SpriteNode {
+  const [dx, dy] = [bx - ax, by - ay];
+  const length = Math.hypot(dx, dy);
+  // 顶面的中点往下（沿顶面的法线）挪半个厚度
+  const [nx, ny] = [-dy / length, dx / length].map((v) => (dx >= 0 ? v : -v));
+  return {
+    id,
+    x: (ax + bx) / 2 - nx * 8,
+    y: (ay + by) / 2 - ny * 8,
+    w: length,
+    h: 16,
+    z: 1,
+    rotation: (Math.atan2(dy, dx) * 180) / Math.PI,
+    color: "#8a6f4e",
+    body: { kind: "fixed", friction: 0 },
+  };
 }
 
 const lift = (id: string, x: number, y: number, to: Tween["to"], duration: number) => ({ node: { id, x, y, w: 64, h: 16 } as SpriteNode, to, duration });
@@ -202,6 +228,7 @@ export function fromTiled(map: TiledMap): Built {
     }),
     enemies: of("enemy").map((o, i) => ({ id: `enemy-${i}`, x: o.x, to: { x: o.x + num(o, "patrol", 3) * TILE } })),
     ghosts: of("ghost").map((o, i) => ({ id: `enemy-ghost-${i}`, x: o.x, y: o.y })),
+    ramps: [],
     crate: crateAt(crate.x, crate.y),
     swing: swing === undefined ? NO_SWING : swingAt(swing.x, swing.y),
     goal: goalAt(goal.x, goal.y),

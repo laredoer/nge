@@ -148,22 +148,14 @@ fn control(
     // 碰到的敌人：从上面落下来是踩到，别的方向是被撞
     let (stomps, hits): (Vec<&Contact>, Vec<&Contact>) =
         contacts.iter().filter(|c| is_enemy(c.other) && !ctl.stomped.contains(&c.other)).partition(|c| c.normal.y > GROUND_NORMAL);
-    // 脚下的东西（法线朝上）；移动平台有速度，地图的碰撞体没有。同时踩着地面和平台时跟着动得快的那个
-    let ground = contacts
-        .iter()
-        .filter(|c| c.normal.y > GROUND_NORMAL)
-        .map(|c| physics.velocity(c.other).map_or(Vec2::ZERO, |g| g.linear))
-        .max_by(|a, b| a.length_squared().total_cmp(&b.length_squared()));
-    // 刚起跳的下一帧可能还有地面的预测接触点：比脚下往上走得快就不算着地，免得连跳两次（上升的平台上照样能跳）
-    let grounded = ground.is_some_and(|g| v.linear.y - g.y <= 1.0);
+    // 脚下有东西（法线朝上）。角色控制器的接触是走完这一帧之后贴着的，起跳后的下一帧已经离开地面
+    let grounded = contacts.iter().any(|c| c.normal.y > GROUND_NORMAL);
     ctl.airborne = if grounded { 0.0 } else { ctl.airborne + dt };
     ctl.jump_pressed = if JUMP_KEYS.iter().any(|k| input.key_pressed(k)) { 0.0 } else { ctl.jump_pressed + dt };
 
     let accel = if grounded { GROUND_ACCEL } else { AIR_ACCEL };
     let mut velocity = v.linear;
-    // 站在横移的平台上：跟着平台走（关卡没有摩擦，不加的话平台会从脚底下滑走）
-    let carry = ground.filter(|_| grounded).map_or(0.0, |g| g.x);
-    velocity.x = move_toward(velocity.x, input.axis(&LEFT, &RIGHT) * SPEED + carry, accel * dt);
+    velocity.x = move_toward(velocity.x, input.axis(&LEFT, &RIGHT) * SPEED, accel * dt);
     let holding = JUMP_KEYS.iter().any(|k| input.key_down(k));
     if ctl.jump_pressed <= BUFFER && ctl.airborne <= COYOTE {
         // 缓冲里的跳到落地时键已经松开了：直接按短跳
@@ -280,7 +272,7 @@ mod tests {
         json!({
             "physics": { "gravity": [0, -1800] },
             "tilemaps": [{ "id": "level", "texture": "asset:/@platformer/tiles.png", "grid": [3, 1], "tile": 32, "cols": 40, "x": -640, "y": 0, "data": data, "solid": [1], "friction": 0 }],
-            "sprites": [{ "id": PLAYER, "w": 24, "h": 32, "y": 16, "body": { "fixedRotation": true, "friction": 0 } }],
+            "sprites": [{ "id": PLAYER, "w": 24, "h": 32, "y": 16, "body": { "kind": "character", "friction": 0 } }],
         })
     }
 
@@ -450,7 +442,7 @@ mod tests {
         let respawn = (0..120).find_map(|_| run(&mut app, 1).into_iter().find(|(n, _)| n == "respawn")).expect("掉进坑里");
         assert_eq!(respawn.1, json!({ "falls": 1 }));
         let (p, v) = player(&mut app);
-        assert!((p - start).length() < 0.1 && v.length() < 1e-3, "送回起点、速度清零 {p} {v}");
+        assert!((p - start).length() < 0.5 && v.length() < 1e-3, "送回起点、速度清零 {p} {v}");
     }
 
     /// 换关时重生点、掉坑次数重新算：新关卡的起点不一样。
@@ -553,7 +545,7 @@ mod tests {
         let events = run(&mut app, 1);
         assert_eq!(events.iter().filter(|(n, _)| n == "restart").count(), 1, "{events:?}");
         let (p, v) = player(&mut app);
-        assert!((p - start).length() < 0.1 && v.length() < 1e-3, "回到起点、速度清零 {p} {v}");
+        assert!((p - start).length() < 0.5 && v.length() < 1e-3, "回到起点、速度清零 {p} {v}");
         assert!(run(&mut app, 10).iter().all(|(n, _)| n != "restart"), "按住不重复");
         key(&mut app, "KeyR", false);
         key(&mut app, "ArrowRight", true);
@@ -566,6 +558,28 @@ mod tests {
         let enemy = json!({ "id": format!("{ENEMY}0"), "x": x, "y": 12, "w": 24, "h": 24, "body": { "kind": "kinematic", "friction": 0 } });
         scene["sprites"].as_array_mut().unwrap().push(enemy);
         scene
+    }
+
+    /// 30° 的斜坡（和 levels.ts 的 rampOf 一样摆：顶面从 (100, 0) 到 (100 + 96√3, 96)）：角色控制器走上去一直贴着坡，走到顶上。
+    #[test]
+    fn walks_up_a_ramp() {
+        let mut app = app();
+        let mut scene = level(None);
+        let (a, b) = (Vec2::new(100.0, 0.0), Vec2::new(100.0 + 96.0 * 3f32.sqrt(), 96.0));
+        let d = b - a;
+        let n = Vec2::new(-d.y, d.x).normalize();
+        let center = (a + b) / 2.0 - n * 8.0;
+        scene["sprites"].as_array_mut().unwrap().push(json!({ "id": "ramp", "x": center.x, "y": center.y, "w": d.length(), "h": 16,
+            "rotation": d.y.atan2(d.x).to_degrees(), "body": { "kind": "fixed", "friction": 0 } }));
+        app.prop("scene", Some(&scene));
+        run(&mut app, 20);
+        key(&mut app, "ArrowRight", true);
+        let mut highest: f32 = 0.0;
+        for _ in 0..90 {
+            run(&mut app, 1);
+            highest = highest.max(player(&mut app).0.y);
+        }
+        assert!(highest > 96.0 + 15.0, "走到坡顶 {highest}");
     }
 
     /// 右上方的幽灵：角色走近了才追，飞过来撞到角色，角色回到起点。

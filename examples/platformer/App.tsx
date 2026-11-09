@@ -99,7 +99,7 @@ function App() {
     tilemaps: now().tilemaps,
     sprites: [
       ...BACKDROP,
-      { id: "player", x: 3 * TILE, y: 16, w: 24, h: 32, z: 5, color: "#ff7a59", body: { fixedRotation: true, friction: 0, collide: true }, ...(flashing() ? FLASH : {}) },
+      { id: "player", x: 3 * TILE, y: 16, w: 24, h: 32, z: 5, color: "#ff7a59", body: { kind: "character", friction: 0, collide: true }, ...(flashing() ? FLASH : {}) },
       // 金币自己发光，夜里也不暗
       ...now().coins.filter((c) => !taken().includes(c.id)).map(
         (c): SpriteNode => ({ id: c.id, x: c.x, y: c.y, w: 14, z: 2, rotation: 45, color: "#ffd93d", body: { kind: "fixed", sensor: true }, ...COIN_SHADER, unlit: true }),
@@ -117,6 +117,7 @@ function App() {
           ? { id, x, y, w: 22, h: 22, z: 4, color: "#00000000" }
           : { id, x, y, w: 22, h: 22, z: 4, color: "#c8d2ffd0", unlit: true, body: { kind: "kinematic", friction: 0 }, chase: GHOST_CHASE },
       ),
+      ...now().ramps,
       now().crate.body,
       ...now().swing.sprites,
       now().goal,

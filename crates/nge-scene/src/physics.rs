@@ -7,7 +7,7 @@ use bevy_ecs::system::EntityCommands;
 use glam::Vec2;
 use nge_core::{CommandKey, EventKey};
 use nge_ecs::Outbox;
-use nge_physics2d::{Collider, Collision, Impulse, LockRotation, Physics, RigidBody, Velocity};
+use nge_physics2d::{Character, Collider, Collision, Impulse, LockRotation, Physics, RigidBody, Velocity};
 use nge_render2d::Sprite;
 use serde::{Deserialize, Serialize};
 
@@ -25,6 +25,8 @@ pub enum BodyKind {
     Dynamic,
     Fixed,
     Kinematic,
+    /// 角色控制器：kinematic 刚体，游戏改速度，引擎负责重力、贴地、爬坡、上台阶、被平台带着走（见 docs/character.md）。
+    Character,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
@@ -53,6 +55,12 @@ pub struct BodyNode {
     pub collide: bool,
     /// 不让碰撞把它转起来（平台游戏的角色）。
     pub fixed_rotation: bool,
+    /// `character`：能爬的最陡的坡（度）。
+    pub slope: f32,
+    /// `character`：自动迈上去的台阶最高多高，0 不自动上。
+    pub step: f32,
+    /// `character`：离地多近就往下贴，0 不贴。
+    pub snap: f32,
 }
 
 impl Default for BodyNode {
@@ -71,6 +79,9 @@ impl Default for BodyNode {
             angular_velocity: 0.0,
             collide: false,
             fixed_rotation: false,
+            slope: 50.0,
+            step: 0.0,
+            snap: 4.0,
         }
     }
 }
@@ -99,14 +110,19 @@ pub struct Push {
 /// 按精灵节点的 `body` 挂上或拿掉物理组件。`size` 是精灵声明的大小（没乘缩放）。
 pub(crate) fn apply_body(entity: &mut EntityCommands, before: Option<&SpriteNode>, node: &SpriteNode, size: Option<Vec2>) {
     let Some(body) = &node.body else {
-        entity.remove::<(RigidBody, Collider, Velocity, Impulse, LockRotation)>();
+        entity.remove::<(RigidBody, Collider, Velocity, Impulse, LockRotation, Character)>();
         return;
     };
     let kind = match body.kind {
         BodyKind::Dynamic => RigidBody::Dynamic,
         BodyKind::Fixed => RigidBody::Fixed,
-        BodyKind::Kinematic => RigidBody::Kinematic,
+        BodyKind::Kinematic | BodyKind::Character => RigidBody::Kinematic,
     };
+    if body.kind == BodyKind::Character {
+        entity.insert(Character { max_slope: body.slope.to_radians(), step: body.step, snap: body.snap, gravity_scale: 1.0 });
+    } else {
+        entity.remove::<Character>();
+    }
     // 不覆盖 Rust 系统设了还没用掉的冲量
     entity.insert(kind).insert_if_new(Impulse::default());
     if body.fixed_rotation {
@@ -277,6 +293,27 @@ mod tests {
         frame(&mut app, Some(json!({ "sprites": [{ "id": "a", "w": 10, "h": 20 }] })));
         assert!(get::<RigidBody>(&mut app, "a").is_none() && get::<Collider>(&mut app, "a").is_none());
         assert_eq!(app.world().resource::<Physics>().len(), (0, 0));
+    }
+
+    #[test]
+    fn character_bodies_get_a_character_controller() {
+        let mut app = app();
+        let hero = |kind: &str| json!({ "sprites": [
+            { "id": "floor", "y": -10, "w": 400, "h": 20, "body": { "kind": "fixed" } },
+            { "id": "hero", "y": 100, "w": 20, "body": { "kind": kind, "slope": 30, "step": 6 } },
+        ] });
+        frame(&mut app, Some(hero("character")));
+        assert_eq!(get::<RigidBody>(&mut app, "hero"), Some(RigidBody::Kinematic));
+        let c = get::<Character>(&mut app, "hero").expect("有角色控制器");
+        assert_eq!((c.step, c.snap, c.gravity_scale), (6.0, 4.0, 1.0));
+        assert!((c.max_slope - 30f32.to_radians()).abs() < 1e-6);
+        for _ in 0..10 {
+            frame(&mut app, None);
+        }
+        let y = get::<Transform2d>(&mut app, "hero").unwrap().translation.y;
+        assert!((y - 10.0).abs() < 1.0, "受重力落到地上 {y}");
+        frame(&mut app, Some(hero("kinematic")));
+        assert!(get::<Character>(&mut app, "hero").is_none(), "换成别的种类就去掉");
     }
 
     #[test]

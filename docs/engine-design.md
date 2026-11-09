@@ -86,6 +86,7 @@
 | **性能面板** | 引擎记下每帧更新、渲染、等待各花多少毫秒，以及 draw call、实例数、实体数（`Perf`，`Game::timing`），左上角的面板每半秒更新（`PerfOverlay`，TSX 的 `scene.perf`）；见 [perf-overlay.md](perf-overlay.md) | 平台跳跃按 P 开关性能面板 |
 | **开发版也开优化** | `.cargo/config.toml` 让 `nsh run` 和 `cargo test` 的依赖全开优化、自己的 crate 轻度优化；帧时间基准 `frame_bench`；见 [fast-dev.md](fast-dev.md) | 基准场景一帧的更新从 6.6 ms 降到 0.19 ms，改一行引擎代码重编约 3 秒 |
 | **寻路和 AI** | 新 crate `nge-ai`：格子 A*（不切墙角、路径拉直）、小状态机 `Fsm`、追击 `Chaser`（看见就绕墙追，追丢了回家）；瓦片地图自带 `NavGrid`，精灵写 `chase` 就会追，状态变了发 `chase` 事件；见 [ai.md](ai.md) | 平台跳跃前两关的幽灵绕开平台追角色 |
+| **角色控制器** | `nge-physics2d` 的 `Character`（底下是 rapier 的 `KinematicCharacterController`）：游戏只给速度，引擎负责重力、沿墙滑、爬坡、贴地、上矮台阶、被脚下的平台带着走、推箱子；场景写 `body.kind: "character"`；见 [character.md](character.md) | 平台跳跃的角色换上它，第一关加一段斜坡 |
 | **M6 Android** | SurfaceView 和 Vulkan，JNI 胶水层 | 示例游戏在 Android 真机上能跑 |
 
 ## 待定
