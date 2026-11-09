@@ -11,7 +11,7 @@ fi
 command -v llvm-ar >/dev/null 2>&1 || { echo "找不到 llvm-ar：brew install llvm@20，或设 LLVM_BIN" >&2; exit 1; }
 sysroot="$(cd "$(dirname "$0")/.." && rustc --print sysroot)"
 lld="$(find "$sysroot/lib/rustlib" -path '*/bin/rust-lld' | head -n 1)"
-if [ -n "$lld" ] && ! ("$lld" -flavor wasm --version) >/dev/null 2>&1; then
+if [ -n "$lld" ] && ! sh -c '"$1" -flavor wasm --version; exit $?' _ "$lld" >/dev/null 2>&1; then
   DYLD_FALLBACK_LIBRARY_PATH="$sysroot/lib${DYLD_FALLBACK_LIBRARY_PATH:+:$DYLD_FALLBACK_LIBRARY_PATH}"
   export DYLD_FALLBACK_LIBRARY_PATH
 fi

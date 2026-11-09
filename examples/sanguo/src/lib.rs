@@ -28,9 +28,12 @@ pub fn factory() -> nge_core::GameFactory {
 }
 
 /// `nsh run` / `nsh package` 生成的宿主要求应用的 crate 有它；TSX 不从这里导入东西，只带上资源（见 docs/native-components.md）。
+/// web 上生成的运行时不调组件注册函数，游戏视图在这里注册（App.tsx 要 `import "sanguo/native"`，见 docs/web.md）。
 #[nsh_core::prelude::native_module("sanguo/native")]
 fn native(registry: &mut nsh_core::prelude::Registry) {
     registry.assets(assets!());
+    #[cfg(target_arch = "wasm32")]
+    nge_platform::web::register(factory());
 }
 
 /// 把游戏视图注册进生成的宿主。

@@ -73,7 +73,7 @@ impl PostChain {
     pub fn run(&mut self, gfx: &Gfx, shaders: &Shaders, encoder: &mut wgpu::CommandEncoder, effects: &[PostEffect], source: &wgpu::TextureView, target: &wgpu::TextureView, time: f32) -> u32 {
         let gpu = self.gpu.get_or_insert_with(|| Gpu::new(gfx));
         // 管线、中间纹理都按目标的格式（平常就是 gfx.format）
-        let format = target.texture().format();
+        let format = gfx.target_format(target);
         gpu.sync(gfx, shaders, format);
         let mut passes: Vec<Pass> = Vec::new();
         for e in effects {

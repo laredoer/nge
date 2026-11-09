@@ -52,6 +52,15 @@ pub struct Gfx {
     pub viewport: Viewport,
 }
 
+impl Gfx {
+    /// 往 `target` 上画时用的格式。画面的纹理在 web 上不是 sRGB（WebGPU 画布没有 sRGB 格式），引擎画在它的 sRGB view 上，
+    /// 这时按 [`Gfx::format`] 算；别的纹理按纹理自己的格式。
+    pub fn target_format(&self, target: &wgpu::TextureView) -> wgpu::TextureFormat {
+        let format = target.texture().format();
+        if format != self.format && format.add_srgb_suffix() == self.format { self.format } else { format }
+    }
+}
+
 /// 每次回调时游戏能拿到的上下文。
 pub struct Ctx<'a> {
     pub viewport: Viewport,

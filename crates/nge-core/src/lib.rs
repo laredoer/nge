@@ -1,12 +1,20 @@
-//! NSH 游戏引擎核心：游戏接口、渲染线程帧循环、帧统计。
+//! NSH 游戏引擎核心：游戏接口、帧循环（原生是渲染线程，浏览器是主线程的 rAF）、帧统计。
 
 pub mod bridge;
+mod frame;
 pub mod game;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod runtime;
 pub mod stats;
+#[cfg(target_arch = "wasm32")]
+pub mod web;
 
 pub use bridge::{CommandKey, EventKey, GAME_COMPONENT, PropKey, StateKey};
+pub use frame::{Msg, compression_features};
 pub use game::{Ctx, Emit, FrameTiming, Game, GameFactory, Gfx, Viewport};
-pub use runtime::{Engine, Msg, create_surface};
+#[cfg(not(target_arch = "wasm32"))]
+pub use runtime::{Engine, create_surface};
 pub use stats::FrameReport;
+#[cfg(target_arch = "wasm32")]
+pub use web::Engine;
 pub use wgpu;

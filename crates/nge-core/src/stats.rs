@@ -1,6 +1,6 @@
 //! 帧统计：每秒汇总一次帧率和最长帧间隔，用来衡量卡顿。
 
-use std::time::{Duration, Instant};
+use web_time::{Duration, Instant};
 
 /// 一个统计窗口的结果，每秒通过 [`crate::bridge::FRAME_STATS`] 发给 NSH。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]

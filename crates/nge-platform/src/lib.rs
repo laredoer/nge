@@ -1,4 +1,4 @@
-//! NSH 游戏引擎平台层：把引擎挂成 NSH 原生组件。
+//! NSH 游戏引擎平台层：把引擎挂成 NSH 原生组件（macOS、iOS、浏览器）。
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 mod shared;
@@ -19,3 +19,6 @@ pub mod macos;
 
 #[cfg(target_os = "ios")]
 pub mod ios;
+
+#[cfg(target_arch = "wasm32")]
+pub mod web;

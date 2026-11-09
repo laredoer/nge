@@ -39,6 +39,10 @@ wgpu = { version = "30", features = ["fragile-send-sync-non-atomic-wasm"] }
 naga = { version = "30", features = ["wgsl-in"] }
 # nsh 0.4 的 web 打包按 0.2.129 的胶水写，wasm-bindgen 命令行要和这里同一个版本
 wasm-bindgen = "=0.2.129"
+wasm-bindgen-futures = "0.4"
+web-sys = "0.3"
+js-sys = "0.3"
+web-time = "1"
 pollster = "1"
 raw-window-handle = "0.6"
 bytemuck = { version = "1.25", features = ["derive"] }

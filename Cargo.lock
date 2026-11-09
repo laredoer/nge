@@ -2222,7 +2222,9 @@ dependencies = [
  "raw-window-handle",
  "serde",
  "serde_json",
- "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+ "web-time",
  "wgpu 30.0.1",
 ]
 
@@ -2296,10 +2298,12 @@ name = "nge-platform"
 version = "0.1.0"
 dependencies = [
  "block2",
+ "js-sys",
  "log",
  "nge-core",
  "nsh-platform-ios",
  "nsh-platform-macos",
+ "nsh-platform-web",
  "objc2",
  "objc2-app-kit",
  "objc2-foundation",
@@ -2308,6 +2312,8 @@ dependencies = [
  "objc2-ui-kit",
  "raw-window-handle",
  "serde_json",
+ "wasm-bindgen",
+ "web-sys",
 ]
 
 [[package]]
@@ -2530,6 +2536,21 @@ dependencies = [
  "objc2-quartz-core",
  "rustc-hash 2.1.3",
  "serde_json",
+]
+
+[[package]]
+name = "nsh-platform-web"
+version = "0.4.0"
+dependencies = [
+ "log",
+ "nsh-base",
+ "nsh-core",
+ "nsh-engine",
+ "rustc-hash 2.1.3",
+ "serde_json",
+ "ttf-parser",
+ "unicode-bidi",
+ "unicode-properties",
 ]
 
 [[package]]
@@ -4870,6 +4891,16 @@ checksum = "1cdc136a53ccd64a1211f107ccc34404769fbcc0f165f1afa065f5d88ab93538"
 dependencies = [
  "async-task",
  "cfg-if",
+ "js-sys",
+ "wasm-bindgen",
+]
+
+[[package]]
+name = "web-time"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a6580f308b1fad9207618087a65c04e7a10bc77e02c8e84e9b00dd4b12fa0bb"
+dependencies = [
  "js-sys",
  "wasm-bindgen",
 ]

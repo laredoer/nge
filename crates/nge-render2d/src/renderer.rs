@@ -355,7 +355,7 @@ impl Renderer for SpriteRenderer {
 /// 背景层画到的离屏纹理，跟着目标的大小、格式走。
 fn post_target(slot: &mut Option<wgpu::TextureView>, gfx: &Gfx, target: &wgpu::TextureView) -> wgpu::TextureView {
     let texture = target.texture();
-    let (size, format) = (wgpu::Extent3d { depth_or_array_layers: 1, ..texture.size() }, texture.format());
+    let (size, format) = (wgpu::Extent3d { depth_or_array_layers: 1, ..texture.size() }, gfx.target_format(target));
     if slot.as_ref().is_none_or(|v| v.texture().size() != size || v.texture().format() != format) {
         let view = gfx
             .device

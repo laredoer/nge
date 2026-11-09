@@ -24,6 +24,10 @@ impl<T: Send + 'static> Warm<T> {
 
     /// 开新的一批：`job` 在后台线程里跑，每编好一个交给 `send`；`send` 返回 false 时这批已经过时，别再编了。
     pub fn start(&mut self, job: impl FnOnce(&dyn Fn(T) -> bool) + Send + 'static) {
+        // wasm 上没有线程：不预热，用到时当场编（见 docs/web.md）
+        if cfg!(target_arch = "wasm32") {
+            return;
+        }
         let batch = self.batch.fetch_add(1, Ordering::SeqCst) + 1;
         self.busy = true;
         let (tx, current) = (self.tx.clone(), self.batch.clone());
