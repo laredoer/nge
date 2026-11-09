@@ -72,6 +72,8 @@ opt-level = 1
 opt-level = 1
 [profile.dev.package.platformer]
 opt-level = 1
+[profile.dev.package.sanguo]
+opt-level = 1
 [profile.dev.package.scene]
 opt-level = 1
 [profile.dev.package.scene3d]

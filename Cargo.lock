@@ -3743,6 +3743,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "sanguo"
+version = "0.1.0"
+dependencies = [
+ "bevy_ecs",
+ "nge-assets",
+ "nge-audio",
+ "nge-core",
+ "nge-ecs",
+ "nge-platform",
+ "nge-render2d",
+ "nge-render3d",
+ "nge-scene",
+ "nge-text",
+ "nsh-core",
+ "nsh-platform-ios",
+ "nsh-platform-macos",
+ "serde_json",
+]
+
+[[package]]
 name = "scene"
 version = "0.1.0"
 dependencies = [

@@ -1,0 +1,212 @@
+{
+ "player": {
+  "texture": "asset:/@sanguo/player.png",
+  "grid": [
+   8,
+   4
+  ],
+  "size": [
+   240,
+   144
+  ],
+  "foot": 63,
+  "frames": {
+   "idle": [
+    0,
+    1
+   ],
+   "walk": [
+    2,
+    3,
+    4,
+    5
+   ],
+   "atk1": [
+    6,
+    7,
+    8
+   ],
+   "atk2": [
+    9,
+    10,
+    11
+   ],
+   "atk3": [
+    12,
+    13,
+    14,
+    15
+   ],
+   "thrust": [
+    16,
+    17,
+    18
+   ],
+   "jump": [
+    19,
+    20
+   ],
+   "plunge": [
+    21,
+    22
+   ],
+   "hurt": [
+    23
+   ],
+   "down": [
+    24,
+    25
+   ]
+  }
+ },
+ "troops": {
+  "texture": "asset:/@sanguo/troops.png",
+  "grid": [
+   8,
+   3
+  ],
+  "size": [
+   240,
+   144
+  ],
+  "foot": 63,
+  "frames": {
+   "soldier.idle": [
+    0,
+    1
+   ],
+   "soldier.walk": [
+    2,
+    3,
+    4,
+    5
+   ],
+   "soldier.attack": [
+    6,
+    7,
+    8
+   ],
+   "soldier.hurt": [
+    9
+   ],
+   "soldier.down": [
+    10,
+    11
+   ],
+   "archer.idle": [
+    12,
+    13
+   ],
+   "archer.walk": [
+    14,
+    15,
+    16,
+    17
+   ],
+   "archer.attack": [
+    18,
+    19,
+    20
+   ],
+   "archer.hurt": [
+    21
+   ],
+   "archer.down": [
+    22,
+    23
+   ]
+  }
+ },
+ "boss": {
+  "texture": "asset:/@sanguo/boss.png",
+  "grid": [
+   4,
+   4
+  ],
+  "size": [
+   288,
+   192
+  ],
+  "foot": 87,
+  "frames": {
+   "idle": [
+    0,
+    1
+   ],
+   "walk": [
+    2,
+    3,
+    4,
+    5
+   ],
+   "windup": [
+    6,
+    7
+   ],
+   "charge": [
+    8,
+    9
+   ],
+   "attack": [
+    10,
+    11,
+    12
+   ],
+   "hurt": [
+    13
+   ],
+   "down": [
+    14,
+    15
+   ]
+  }
+ },
+ "fx": {
+  "texture": "asset:/@sanguo/fx.png",
+  "grid": [
+   6,
+   3
+  ],
+  "size": [
+   144,
+   144
+  ],
+  "foot": 3,
+  "frames": {
+   "arrow": [
+    0
+   ],
+   "slash1": [
+    1,
+    2
+   ],
+   "slash2": [
+    3,
+    4
+   ],
+   "slash3": [
+    5,
+    6
+   ],
+   "thrust": [
+    7,
+    8
+   ],
+   "shock": [
+    9,
+    10
+   ],
+   "spark": [
+    11,
+    12,
+    13
+   ],
+   "smoke": [
+    14,
+    15,
+    16,
+    17
+   ]
+  }
+ }
+}
