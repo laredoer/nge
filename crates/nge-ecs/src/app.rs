@@ -147,6 +147,12 @@ impl App {
         self
     }
 
+    /// 给系统集排顺序（比如让别的插件的系统集排在自己的系统后面）。
+    pub fn configure_sets<M>(&mut self, schedule: impl ScheduleLabel, sets: impl IntoScheduleConfigs<bevy_ecs::schedule::InternedSystemSet, M>) -> &mut Self {
+        self.world.resource_mut::<Schedules>().configure_sets(schedule, sets);
+        self
+    }
+
     pub fn insert_resource(&mut self, resource: impl Resource) -> &mut Self {
         self.world.insert_resource(resource);
         self

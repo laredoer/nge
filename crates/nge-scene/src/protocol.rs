@@ -26,6 +26,8 @@ pub struct Scene {
     pub texts: Vec<TextNode>,
     pub emitters: Vec<EmitterNode>,
     pub models: Vec<ModelNode>,
+    /// 3D 粒子发射器（见 docs/particles3d.md）。
+    pub emitters3d: Vec<crate::particles3d::Emitter3dNode>,
     pub camera3d: Option<Camera3dNode>,
     pub lights: Vec<LightNode>,
     pub ambient: Option<AmbientNode>,

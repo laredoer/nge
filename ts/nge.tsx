@@ -267,6 +267,59 @@ export interface ModelNode {
   animation?: ModelAnimation;
   /** 3D 刚体（见 docs/physics3d.md）。有了它位置和旋转归物理管：声明的位置、角度、缩放没变时不拉回去；`attach`、`spin` 不生效。 */
   body?: ModelBody;
+  /** 拖尾（见 docs/particles3d.md）：模型走过的地方留一条朝着相机的带子。去掉时马上消失；只改参数时保留已经记下的点。 */
+  trail?: TrailNode;
+}
+
+/** 混合方式：alpha 普通透明（从远往近画），add 叠加（火、光点）。 */
+export type Blend = "alpha" | "add";
+
+/** 模型的拖尾。 */
+export interface TrailNode {
+  /** 一个点留多久（秒），默认 0.5。 */
+  lifetime?: number;
+  /** [新, 旧] 两头的宽，默认 [0.2, 0]。 */
+  width?: [number, number];
+  /** [新, 旧]；不填是白色淡出。 */
+  color?: [string, string];
+  /** 相邻两个点至少隔多远，默认 0。静止时尾巴缩回去。 */
+  minDistance?: number;
+  /** 最多记多少个点，默认 64。 */
+  maxPoints?: number;
+  /** `asset:/` 路径或注册过的纹理名（不支持图集）。 */
+  texture?: string;
+  blend?: Blend;
+}
+
+/** 3D 粒子发射器（见 docs/particles3d.md）：粒子是朝着相机的方片，被模型挡住，自己不挡别的。 */
+export interface Emitter3dNode {
+  id: string;
+  x?: number;
+  y?: number;
+  z?: number;
+  /** 每秒发射多少个，默认 0。 */
+  rate?: number;
+  /** 寿命（秒），默认 [1, 1]。 */
+  lifetime?: [number, number];
+  /** 初速度（世界单位 / 秒），默认 [1, 2]。 */
+  speed?: [number, number];
+  /** 发射方向，默认 [0, 1, 0]（朝上）。 */
+  direction?: [number, number, number];
+  /** 方向锥的半角（度），默认 180（全方向）。 */
+  spread?: number;
+  /** 加速度 [x, y, z]。 */
+  gravity?: [number, number, number];
+  /** [出生, 死亡] 时的边长，默认 [0.2, 0]。 */
+  size?: [number, number];
+  /** 方片转动的速度（度 / 秒），出生时在范围里取。 */
+  spin?: [number, number];
+  /** [出生, 死亡]；不填是白色淡出。 */
+  color?: [string, string];
+  /** `asset:/` 路径或注册过的纹理名（不支持图集）；不填是方片。 */
+  texture?: string;
+  blend?: Blend;
+  /** 同时存活的上限，默认 10000。 */
+  max?: number;
 }
 
 /** 模型的 3D 刚体和碰撞体。和 2D 刚体在两个世界里，互不碰撞。 */
@@ -420,6 +473,8 @@ export interface Scene {
   texts?: TextNode[];
   emitters?: EmitterNode[];
   models?: ModelNode[];
+  /** 3D 粒子发射器。 */
+  emitters3d?: Emitter3dNode[];
   camera3d?: Camera3dNode;
   lights?: LightNode[];
   ambient?: { color?: string; brightness?: number };

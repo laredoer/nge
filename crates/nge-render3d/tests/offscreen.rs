@@ -6,7 +6,7 @@ use glam::{Quat, UVec2, Vec2, Vec3, Vec4};
 use nge_core::{Ctx, Emit, Gfx, Viewport, wgpu};
 use nge_ecs::prelude::*;
 use nge_render3d::prelude::*;
-use nge_render3d::{AssetPlugin, AssetSource, MemorySource};
+use nge_render3d::{AssetPlugin, AssetSource, ImageId, MemorySource};
 
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 const SIZE: u32 = 64;
@@ -763,4 +763,78 @@ fn models_count_their_draws_and_the_shadow_pass_counts_again() {
         }
         assert_eq!(*counts.lock().unwrap(), expected, "阴影 {shadows}");
     }
+}
+
+/// 每帧往 `Billboards` 里放东西（它在 PreUpdate 清空）。
+fn billboards(app: &mut App, push: impl Fn(&mut nge_render3d::Billboards) + Send + Sync + 'static) {
+    app.add_systems(Update, move |mut b: ResMut<nge_render3d::Billboards>| push(&mut b));
+}
+
+fn quad(z: f32, size: f32, color: Vec4) -> nge_render3d::Billboard {
+    nge_render3d::Billboard { position: Vec3::new(0.0, 0.0, z), size, rotation: 0.0, color }
+}
+
+#[test]
+fn billboards_are_hidden_by_models_in_front_of_them() {
+    use nge_render3d::Blend;
+    let Some(img) = render(SIZE, |app| {
+        unlit(app);
+        // 小方块在前面，后面一张大的红色方片
+        app.add_systems(Startup, |world: &mut World| solid(world, Vec4::new(0.0, 1.0, 0.0, 1.0), Mesh::cube(1.0), Transform3d::from_xyz(0.0, 0.0, 1.0)));
+        billboards(app, |b| b.push(ImageId::WHITE, Blend::Alpha, quad(-1.0, 4.0, Vec4::new(1.0, 0.0, 0.0, 1.0))));
+    }) else {
+        return eprintln!("没有 GPU，跳过");
+    };
+    assert!(close(img.center(), [0, 255, 0, 255]), "被方块挡住 {:?}", img.center());
+    assert!(close(img.at(SIZE / 2, 18), [255, 0, 0, 255]), "方块外面露出方片 {:?}", img.at(SIZE / 2, 18));
+    assert!(close(img.at(1, 1), [0, 0, 0, 255]));
+}
+
+#[test]
+fn additive_billboards_add_up_and_do_not_write_depth() {
+    use nge_render3d::Blend;
+    let Some(img) = render(SIZE, |app| {
+        unlit(app);
+        // 近的先放：要是写了深度，远的那张就被挡掉；颜色按透明度乘：0.5 × 0.5 两张加起来是 0.5
+        billboards(app, |b| {
+            b.push(ImageId::WHITE, Blend::Add, quad(1.0, 2.0, Vec4::new(0.5, 0.0, 0.0, 0.5)));
+            b.push(ImageId::WHITE, Blend::Add, quad(-1.0, 2.0, Vec4::new(0.5, 0.0, 0.0, 0.5)));
+        });
+    }) else {
+        return eprintln!("没有 GPU，跳过");
+    };
+    let c = img.center();
+    assert!(c[0].abs_diff(188) <= 4 && c[1] == 0, "线性 0.5 写进 sRGB 是 188 左右：{c:?}");
+}
+
+#[test]
+fn alpha_billboards_blend_over_what_is_behind() {
+    use nge_render3d::Blend;
+    let Some(img) = render(SIZE, |app| {
+        unlit(app);
+        app.add_systems(Startup, |world: &mut World| solid(world, Vec4::new(0.0, 0.0, 1.0, 1.0), Mesh::plane(4.0), facing_camera()));
+        billboards(app, |b| b.push(ImageId::WHITE, Blend::Alpha, quad(1.0, 1.0, Vec4::new(1.0, 0.0, 0.0, 0.5))));
+    }) else {
+        return eprintln!("没有 GPU，跳过");
+    };
+    let c = img.center();
+    // 线性空间里各一半，写进 sRGB 是 188 左右
+    assert!(c[0].abs_diff(188) <= 4 && c[2].abs_diff(188) <= 4 && c[1] == 0, "{c:?}");
+}
+
+#[test]
+fn ribbons_draw_a_band_facing_the_camera() {
+    use nge_render3d::{Blend, RibbonPoint};
+    let Some(img) = render(SIZE, |app| {
+        unlit(app);
+        billboards(app, |b| {
+            let point = |x: f32| RibbonPoint { position: Vec3::new(x, 0.0, 0.0), width: 0.5, color: Vec4::new(1.0, 1.0, 0.0, 1.0) };
+            b.ribbon(ImageId::WHITE, Blend::Alpha, [point(-1.0), point(0.0), point(1.0)]);
+        });
+    }) else {
+        return eprintln!("没有 GPU，跳过");
+    };
+    assert!(close(img.center(), [255, 255, 0, 255]), "{:?}", img.center());
+    assert!(close(img.at(SIZE / 2 - 10, SIZE / 2), [255, 255, 0, 255]), "沿 x 方向");
+    assert!(close(img.at(SIZE / 2, SIZE / 2 - 10), [0, 0, 0, 255]), "竖直方向只有带子那么宽");
 }

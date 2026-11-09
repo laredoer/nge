@@ -2,6 +2,8 @@
 
 mod animation;
 mod assets;
+mod billboard_gpu;
+mod billboards;
 mod camera;
 mod gltf_load;
 mod light;
@@ -10,6 +12,7 @@ mod renderer;
 mod shadow;
 
 pub use animation::{Animation, Animator, Channel, Interpolation, Node, Pose, Property, Skeleton, Skin, Trs};
+pub use billboards::{Billboard, Billboards, Blend, RibbonPoint};
 pub use assets::{Assets3d, Material, MaterialId, MeshId, Model, ModelId, Part};
 pub use nge_assets::{AssetPlugin, AssetServer, AssetSource, Assets, Image, ImageId, MAX_TEXTURE_SIDE, MemorySource};
 pub use camera::{Camera3d, Transform3d};

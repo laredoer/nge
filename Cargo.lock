@@ -2256,9 +2256,11 @@ dependencies = [
  "bytemuck",
  "glam 0.34.2",
  "log",
+ "nge-assets",
  "nge-core",
  "nge-ecs",
  "nge-render2d",
+ "nge-render3d",
  "pollster 1.0.1",
 ]
 

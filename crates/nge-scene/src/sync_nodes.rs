@@ -99,10 +99,12 @@ pub(crate) fn sync_models(
         };
         let mut entity = commands.entity(entity);
         entity.remove::<(Spin, Tappable, Attach)>();
-        // 有刚体的：声明的位置没变就不拉回去
-        if !crate::physics3d::keeps_place(before, node) {
+        // 有刚体的：声明的位置没变就不拉回去；变了就是瞬移
+        let keeps_place = crate::physics3d::keeps_place(before, node);
+        if !keeps_place {
             entity.insert(transform);
         }
+        let teleported = node.body.is_some() && before.is_some() && !keeps_place;
         crate::physics3d::apply_body(&mut entity, before, node);
         // 模型没换时保留已经展开的 Model3d，不闪
         let same_model = before.is_some_and(|b| b.model == node.model);
@@ -141,6 +143,7 @@ pub(crate) fn sync_models(
         if node.tap {
             entity.insert(Tappable);
         }
+        crate::particles3d::apply_trail(&mut entity, &node.id, node.trail.as_ref(), teleported, &mut assets);
     });
 }
 

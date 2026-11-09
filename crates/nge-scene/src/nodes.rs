@@ -147,6 +147,9 @@ pub struct ModelNode {
     /// 3D 刚体（见 docs/physics3d.md）：有了它位置和旋转归物理管，`attach`、`spin` 不生效。
     #[serde(default)]
     pub body: Option<crate::physics3d::ModelBody>,
+    /// 拖尾（见 docs/particles3d.md）。
+    #[serde(default)]
+    pub trail: Option<crate::particles3d::TrailNode>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]

@@ -11,6 +11,8 @@ use nge_ecs::{App, ClearColor, Interleave, Plugin, PostUpdate, PreUpdate, Render
 use nge_assets::{AssetApp, Assets, GpuImages, Image, ImageId};
 
 use crate::animation::{Pose, animate};
+use crate::billboard_gpu::BillboardGpu;
+use crate::billboards::{Batch, BillboardVertex, Billboards, View};
 use crate::assets::{Assets3d, MaterialId, MeshId, ModelId};
 use crate::gltf_load::{Gltf, GltfModels, resolve_gltf_models};
 use crate::camera::{Camera3d, Transform3d};
@@ -44,7 +46,9 @@ impl Plugin for Render3dPlugin {
         app.init_asset::<Gltf>()
             .init_resource::<GltfModels>()
             .add_systems(PreUpdate, resolve_gltf_models.after(nge_assets::AssetsApplied))
-            .add_systems(PostUpdate, animate);
+            .add_systems(PostUpdate, animate)
+            .init_resource::<crate::billboards::Billboards>()
+            .add_systems(PreUpdate, crate::billboards::clear_billboards);
         app.insert_resource(Assets3d::default()).init_resource::<AmbientLight>().init_resource::<Shadows>().add_renderer(MeshRenderer::default());
     }
 }
@@ -103,6 +107,7 @@ struct Gpu {
     textures: Vec<Option<wgpu::BindGroup>>,
     meshes: Vec<GpuMesh>,
     depth: Option<(wgpu::TextureView, wgpu::Extent3d)>,
+    billboards: BillboardGpu,
 }
 
 #[derive(Default)]
@@ -112,12 +117,14 @@ struct MeshRenderer {
     bytes: Vec<u8>,
     joints: Vec<Mat4>,
     warned_lights: bool,
+    billboard_vertices: Vec<BillboardVertex>,
+    billboard_batches: Vec<Batch>,
 }
 
 impl Renderer for MeshRenderer {
     fn render(&mut self, world: &mut World, gfx: &Gfx, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView) {
         let gpu = self.gpu.get_or_insert_with(|| Gpu::new(gfx));
-        let mut globals = globals(world, gfx.viewport.size.into());
+        let (mut globals, view) = globals(world, gfx.viewport.size.into());
         if globals.1 && !std::mem::replace(&mut self.warned_lights, true) {
             log::warn!("灯光数量超过上限，多出来的已忽略");
         }
@@ -128,10 +135,13 @@ impl Renderer for MeshRenderer {
         self.draws.retain(|d| (d.mesh.0 as usize) < gpu.meshes.len());
         // 先按管线、再按贴图排，减少切换
         self.draws.sort_by_key(|d| (d.pipeline, d.texture));
+        crate::billboards::build(world.resource::<Billboards>(), view, &mut self.billboard_vertices, &mut self.billboard_batches);
         let images = world.resource::<GpuImages>();
-        for id in std::iter::once(ImageId::WHITE).chain(self.draws.iter().map(|d| d.texture)) {
+        let textures = self.draws.iter().map(|d| d.texture).chain(self.billboard_batches.iter().map(|b| b.texture));
+        for id in std::iter::once(ImageId::WHITE).chain(textures) {
             gpu.cache_texture(gfx, images, id);
         }
+        gpu.billboards.prepare(gfx, Mat4::from_cols_array_2d(&globals.0.view_proj), &self.billboard_vertices);
         gpu.write_draws(gfx, &self.draws, &mut self.bytes, &self.joints);
         let shadowed = gpu.prepare_shadow(gfx, &mut globals.0, &self.draws, &self.joints, *world.resource::<Shadows>());
         gfx.queue.write_buffer(&gpu.globals, 0, bytemuck::bytes_of(&globals.0));
@@ -140,6 +150,9 @@ impl Renderer for MeshRenderer {
         }
         let n = self.draws.len() as u32;
         world.resource_mut::<RenderFrame>().count(if shadowed { 2 * n } else { n }, n);
+        let billboards = world.resource::<Billboards>();
+        let quads = (billboards.quads() + billboards.ribbons()) as u32;
+        world.resource_mut::<RenderFrame>().count(self.billboard_batches.len() as u32, quads);
         let depth = gpu.depth_view(gfx, target.texture().size());
         // 混排时深度留给后面的精灵
         let interleave = world.resource::<Interleave>().0;
@@ -175,6 +188,8 @@ impl Renderer for MeshRenderer {
             mesh.bind(&mut pass, draw);
             pass.draw_indexed(0..mesh.count, 0, 0..1);
         }
+        // 透明的方片和带子画在不透明的网格后面
+        gpu.billboards.draw(&mut pass, &self.billboard_batches, |id| gpu.texture(id));
     }
 }
 
@@ -198,7 +213,7 @@ fn world_box(m: Mat4, lo: Vec3, hi: Vec3) -> (Vec3, Vec3) {
 }
 
 /// 没有相机实体时，按默认相机放在 (0, 0, 5) 看向原点。
-fn globals(world: &mut World, size: Vec2) -> (Globals, bool) {
+fn globals(world: &mut World, size: Vec2) -> ((Globals, bool), View) {
     let (camera, eye) = world
         .query::<(&Camera3d, &Transform3d)>()
         .iter(world)
@@ -209,7 +224,8 @@ fn globals(world: &mut World, size: Vec2) -> (Globals, bool) {
     let ambient = *world.resource::<AmbientLight>();
     let dirs: Vec<DirectionalLight> = world.query::<&DirectionalLight>().iter(world).copied().collect();
     let points: Vec<(PointLight, Vec3)> = world.query::<(&PointLight, &Transform3d)>().iter(world).map(|(l, t)| (*l, t.translation)).collect();
-    Globals::new(view_proj, camera.eye(&eye), ambient, &dirs, points.iter().map(|(l, p)| (l, *p)))
+    let view = View { rotation: eye.rotation, eye: camera.eye(&eye) };
+    (Globals::new(view_proj, camera.eye(&eye), ambient, &dirs, points.iter().map(|(l, p)| (l, *p))), view)
 }
 
 /// 收集这一帧的 draw；蒙皮的部件把关节矩阵追加到 `joints`。
@@ -381,6 +397,7 @@ impl Gpu {
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
+        let billboards = BillboardGpu::new(gfx, &texture_layout);
         Self {
             pipelines: [a, b, c, d, e, f],
             globals,
@@ -399,6 +416,7 @@ impl Gpu {
             textures: Vec::new(),
             meshes: Vec::new(),
             depth: None,
+            billboards,
         }
     }
 

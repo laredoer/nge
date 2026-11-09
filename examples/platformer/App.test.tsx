@@ -1,7 +1,7 @@
 // `nsh test`：无头 runner 里没有游戏视图，测按钮的显示和按住的手指怎么换成按键。
 import { expect, open, test } from "nsh/test";
 import { heldKey } from "../../ts/nge";
-import { finish, LEVELS, NEW_PROGRESS, progressOf, rampOf, TOWER_BOX, TOWER_TRIGGER, towerAt } from "./levels";
+import { campfireAt, finish, LEVELS, NEW_PROGRESS, progressOf, rampOf, TOWER_BOX, TOWER_TRIGGER, towerAt } from "./levels";
 
 const BUTTONS = ["id:key-ArrowLeft", "id:key-ArrowRight", "id:key-Space", "id:key-KeyR"];
 
@@ -150,4 +150,23 @@ test("第一关有一摞 3D 箱子：摞在 3D 地面上、一个挨一个不重
   expect(trigger.body?.sensor).toBe(true);
   expect(trigger.x!).toBeLessThan(Math.min(...boxes.map((b) => b.x!)));
   expect(LEVELS[1].built.tower).toBe(null);
+});
+
+test("塔边一堆 3D 篝火：叠加混合往上飘，在箱子同一个深度；箱子带着拖尾", () => {
+  const x = LEVELS[0].built.tower!;
+  const { models } = towerAt(x, 0);
+  const [floor, ...boxes] = models;
+  const fire = campfireAt(x);
+  expect(fire.blend).toBe("add");
+  expect(fire.z).toBe(floor.z);
+  expect(fire.y!).toBeGreaterThanOrEqual(0);
+  expect(fire.x! > Math.max(...boxes.map((b) => b.x!)) + TOWER_BOX).toBe(true);
+  expect(fire.direction![1]).toBeGreaterThan(0);
+  expect(fire.spread!).toBeLessThan(45);
+  expect(fire.rate!).toBeGreaterThan(0);
+  expect(floor.trail).toBe(undefined);
+  for (const b of boxes) {
+    expect(b.trail?.minDistance ?? 0).toBeGreaterThan(0);
+    expect(b.trail!.width![0]).toBeLessThan(TOWER_BOX);
+  }
 });

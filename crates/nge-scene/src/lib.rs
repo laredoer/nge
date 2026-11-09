@@ -14,6 +14,7 @@ mod effects;
 mod joints;
 mod level;
 mod match2d;
+mod particles3d;
 mod nodes;
 mod physics;
 mod physics3d;
@@ -109,6 +110,9 @@ impl Plugin for ScenePlugin {
             }
         }
         app.world_mut().spawn((Camera2d::default(), Camera3d::default(), Transform3d::default(), SceneCamera));
+        if !app.is_plugin_added::<nge_particles::Particles3dPlugin>() {
+            app.add_plugins(nge_particles::Particles3dPlugin);
+        }
         if !app.is_plugin_added::<ParticlePlugin>() {
             app.add_plugins(ParticlePlugin);
         }
@@ -136,6 +140,7 @@ impl Plugin for ScenePlugin {
             sync_nodes::sync_texts,
             sync_nodes::sync_emitters,
             sync_nodes::sync_models,
+            particles3d::sync_emitters3d,
             sync_nodes::sync_lights,
             sync_nodes::sync_camera3d,
             physics::sync_gravity,
@@ -178,6 +183,11 @@ impl Plugin for ScenePlugin {
             // 精灵和关节都同步完了再连：关节可以在精灵之后才出现，反过来也行
             .add_systems(PostUpdate, joints::resolve.before(PhysicsStepped))
             .add_systems(PostUpdate, attach::attach.after(PhysicsStepped).before(behave::follow))
+            // 拖尾读这一帧最后的位置：物理、跟随都改完以后
+            .configure_sets(
+                PostUpdate,
+                nge_particles::Particles3dSimulated.after(PhysicsStepped).after(nge_physics3d::Physics3dStepped).after(attach::attach).after(behave::follow),
+            )
             .add_systems(PostUpdate, effects::lighting.after(PhysicsStepped).after(behave::follow).after(camera::camera_rig))
             .add_systems(PostUpdate, (behave::follow, physics::collide.after(PhysicsStepped), audio::listen.after(camera::camera_rig).before(nge_audio::AudioUpdated), physics3d::collide.after(nge_physics3d::Physics3dStepped), camera::camera_rig.after(PhysicsStepped), match2d::match_2d.after(camera::camera_rig)));
     }

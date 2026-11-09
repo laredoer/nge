@@ -4,7 +4,7 @@ import { COIN_SHADER, FLASH, FLASH_MS, levelAudio, night, portalOver, SHADERS } 
 import { levelKey, otherLocale, strings } from "./strings";
 import { NEW_SAVE, nextSlot, SAVE_MIGRATIONS, SAVE_VERSION, saveDataOf, saveSummary, SLOTS } from "./savefile";
 import { hpBar, outOfHearts, TITLE_HOLD_MS, titleBubble } from "./hud";
-import { finish, flagOn, LEVELS, ROWS, TILE, TOWER_TRIGGER, towerAt, type Progress } from "./levels";
+import { campfireAt, finish, flagOn, LEVELS, ROWS, TILE, TOWER_TRIGGER, towerAt, type Progress } from "./levels";
 
 /** Rust 发的事件：掉出关卡或被敌人撞到送回起点、按 R 重新开始、踩到敌人。 */
 interface Events {
@@ -182,6 +182,7 @@ function App() {
     // 3D 箱子摞起来的地面和关卡的地面一样高
     physics3d: { gravity: [0, -1800, 0] },
     models: [now().crate.model, flagOn(now().goal), ...(tower()?.models ?? [])],
+    emitters3d: now().tower === null ? [] : [campfireAt(now().tower!)],
     bars: [hpBar(falls())],
     bubbles: title() === null ? [] : [titleBubble(t(levelKey(title()!)))],
     joints: now().swing.joints,

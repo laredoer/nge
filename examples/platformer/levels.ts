@@ -1,5 +1,5 @@
 // 平台跳跃的关卡数据，以及按数据生成地图、金币、移动平台、敌人。
-import type { JointNode, ModelNode, SpriteNode, TilemapNode, Tween } from "../../ts/nge";
+import type { Emitter3dNode, JointNode, ModelNode, SpriteNode, TilemapNode, TrailNode, Tween } from "../../ts/nge";
 import { tiled, type TiledMap } from "../../ts/tiled";
 import level3 from "./maps/level3.json";
 
@@ -176,6 +176,30 @@ const crateAt = (x: number, y: number) => ({
 /** 一摞 3D 箱子的边长、离关卡平面多远（往后）。 */
 export const TOWER_BOX = 14;
 const TOWER_Z = -20;
+/** 飞出去的箱子拖的尾巴：静止时相邻的点挨得近，尾巴缩回去。 */
+const BOX_TRAIL: TrailNode = { lifetime: 0.35, width: [8, 0], color: ["#fff2a8cc", "#ffb34700"], minDistance: 2, blend: "add" };
+
+/** 塔右边一堆 3D 篝火：叠加混合的火苗往上飘、转着变小，和箱子在同一个深度，箱子飞到前面时挡住它。 */
+export function campfireAt(x: number): Emitter3dNode {
+  return {
+    id: "campfire",
+    x: x + 6 * TOWER_BOX,
+    y: 4,
+    z: TOWER_Z,
+    rate: 60,
+    lifetime: [0.6, 1.1],
+    speed: [30, 60],
+    direction: [0, 1, 0],
+    spread: 20,
+    gravity: [0, 40, 0],
+    size: [12, 2],
+    spin: [-180, 180],
+    color: ["#ffcf5aff", "#ff3a0a00"],
+    blend: "add",
+    max: 200,
+  };
+}
+
 /** 碰到它就把箱子撞散的 sensor 的 id。 */
 export const TOWER_TRIGGER = "tower-trigger";
 
@@ -195,6 +219,7 @@ export function towerAt(x: number, round: number): { trigger: SpriteNode; models
     z: TOWER_Z,
     scale: s,
     body: { density: 0.5 },
+    trail: BOX_TRAIL,
   }));
   const floor: ModelNode = {
     id: "tower-floor",
