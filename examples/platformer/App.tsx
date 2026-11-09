@@ -30,7 +30,7 @@ const GHOST_CHASE = { target: "player", speed: 110, sight: 224, leash: 448 };
 const BACKDROP: SpriteNode[] = [
   // 底边对齐地面的底边
   // 模型和精灵按深度混排（camera3d.interleave），背景的 z 要比箱子（前后各 20 多）更靠后，才不会盖住箱子
-  { id: "hills", texture: "asset:/@platformer/hills.png", x: 0, y: 120 - TILE, w: 384, h: 240, z: -100, color: "#232c42", parallax: [0.2, 1], repeat: "x" },
+  { id: "hills", texture: "asset:/@platformer/hills.ktx2", x: 0, y: 120 - TILE, w: 384, h: 240, z: -100, color: "#232c42", parallax: [0.2, 1], repeat: "x" },
   ...Array.from({ length: 24 }, (_, i): SpriteNode[] => {
     const x = -600 + i * 110 + (i % 4) * 17;
     return [

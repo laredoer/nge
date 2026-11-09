@@ -13,3 +13,7 @@ bevy_ecs.workspace = true
 glam.workspace = true
 image = { workspace = true, features = ["jpeg"] }
 log.workspace = true
+texture2ddecoder.workspace = true
+
+[dev-dependencies]
+texpresso.workspace = true

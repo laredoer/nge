@@ -197,6 +197,11 @@ fn device_limits(supported: &wgpu::Limits) -> wgpu::Limits {
     wgpu::Limits::default().or_worse_values_from(supported)
 }
 
+/// 贴图压缩格式（ASTC / BC / ETC2）：适配器支持哪个就要哪个，压缩贴图能直接上传。
+pub fn compression_features(supported: wgpu::Features) -> wgpu::Features {
+    supported & (wgpu::Features::TEXTURE_COMPRESSION_ASTC | wgpu::Features::TEXTURE_COMPRESSION_BC | wgpu::Features::TEXTURE_COMPRESSION_ETC2)
+}
+
 fn run(
     instance: wgpu::Instance,
     surface: wgpu::Surface<'static>,
@@ -229,7 +234,11 @@ fn run(
         ..Default::default()
     }))
     .map_err(|e| e.to_string())?;
-    let descriptor = wgpu::DeviceDescriptor { required_limits: device_limits(&adapter.limits()), ..Default::default() };
+    let descriptor = wgpu::DeviceDescriptor {
+        required_limits: device_limits(&adapter.limits()),
+        required_features: compression_features(adapter.features()),
+        ..Default::default()
+    };
     let (device, queue) = pollster::block_on(adapter.request_device(&descriptor)).map_err(|e| e.to_string())?;
     device.on_uncaptured_error(Arc::new(|e| log::error!("wgpu 错误: {e}")));
 
@@ -408,5 +417,14 @@ mod tests {
         // 硬件更好时不多要，按默认值
         let big = wgpu::Limits { max_texture_dimension_2d: 16384, ..wgpu::Limits::default() };
         assert_eq!(device_limits(&big), wgpu::Limits::default());
+    }
+
+    #[test]
+    fn asks_only_for_the_compression_the_adapter_has() {
+        use wgpu::Features as F;
+        let apple = F::TEXTURE_COMPRESSION_ASTC | F::TEXTURE_COMPRESSION_ETC2 | F::DEPTH_CLIP_CONTROL;
+        assert_eq!(compression_features(apple), F::TEXTURE_COMPRESSION_ASTC | F::TEXTURE_COMPRESSION_ETC2, "别的特性不要");
+        assert_eq!(compression_features(F::TEXTURE_COMPRESSION_BC), F::TEXTURE_COMPRESSION_BC);
+        assert_eq!(compression_features(F::empty()), F::empty());
     }
 }

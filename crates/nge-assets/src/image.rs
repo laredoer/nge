@@ -1,7 +1,8 @@
-//! 贴图：CPU 上的 RGBA8（sRGB），2D 和 3D 共用。
+//! 贴图：CPU 上的 RGBA8（sRGB）或 GPU 块压缩数据（KTX2），2D 和 3D 共用。
 
 use glam::UVec2;
 
+use crate::ktx2::{self, Compressed};
 use crate::server::{Asset, Assets, Handle, LoadContext};
 
 /// 纹理边长上限：wgpu 默认设备限制（WebGPU 默认值）。
@@ -16,8 +17,12 @@ impl Handle<Image> {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Image {
+    /// 像素尺寸（压缩贴图也是），精灵按它算大小。
     pub size: UVec2,
+    /// RGBA8；有 `compressed` 时是空的。
     pub rgba: Vec<u8>,
+    /// GPU 块压缩数据（来自 KTX2），带 mipmap。
+    pub compressed: Option<Compressed>,
 }
 
 impl Image {
@@ -30,11 +35,14 @@ impl Image {
         if rgba.len() as u64 != expected {
             return Err(format!("像素数据 {} 字节，尺寸 {size} 需要 {expected} 字节", rgba.len()));
         }
-        Ok(Self { size, rgba })
+        Ok(Self { size, rgba, compressed: None })
     }
 
-    /// 解码 PNG / JPEG。
+    /// 解码 PNG / JPEG / KTX2（按文件头认）。
     pub fn decode(bytes: &[u8]) -> Result<Self, String> {
+        if bytes.starts_with(&ktx2::MAGIC) {
+            return ktx2::parse(bytes);
+        }
         let image = image::load_from_memory(bytes).map_err(|e| format!("图片解码失败: {e}"))?.into_rgba8();
         Self::from_rgba(UVec2::new(image.width(), image.height()), image.into_raw())
     }
@@ -50,7 +58,7 @@ impl Assets<Image> {
     /// 第 0 号是白色贴图（[`ImageId::WHITE`]）。
     pub fn with_white() -> Self {
         let mut images = Self::default();
-        images.add(Image { size: UVec2::ONE, rgba: vec![255; 4] });
+        images.add(Image { size: UVec2::ONE, rgba: vec![255; 4], compressed: None });
         images
     }
 
@@ -58,7 +66,7 @@ impl Assets<Image> {
         Ok(self.add(Image::from_rgba(size, rgba)?))
     }
 
-    /// 解码 PNG / JPEG（通常来自 `include_bytes!`）。
+    /// 解码 PNG / JPEG / KTX2（通常来自 `include_bytes!`）。
     pub fn load_png(&mut self, bytes: &[u8]) -> Result<ImageId, String> {
         Ok(self.add(Image::decode(bytes)?))
     }
@@ -96,5 +104,13 @@ mod tests {
         assert_eq!(image.size, UVec2::new(1, 2));
         assert_eq!(image.rgba, [255, 0, 0, 255, 0, 0, 255, 128]);
         assert!(Image::decode(b"nope").is_err());
+    }
+
+    #[test]
+    fn decodes_ktx2_by_header() {
+        let bytes = ktx2::write(Some(ktx2::BlockFormat::Bc3), true, UVec2::new(4, 4), &[vec![0; 16]]);
+        let image = Image::decode(&bytes).unwrap();
+        assert_eq!((image.size, image.compressed.map(|c| c.format)), (UVec2::new(4, 4), Some(ktx2::BlockFormat::Bc3)));
+        assert!(Image::decode(&bytes[..20]).unwrap_err().contains("KTX2"), "头对但是坏了，报 KTX2 的错");
     }
 }

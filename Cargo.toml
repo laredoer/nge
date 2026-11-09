@@ -26,6 +26,8 @@ nge-text = { path = "crates/nge-text" }
 bevy_ecs = { version = "0.20.1", default-features = false, features = ["std"] }
 glam = { version = "0.34", features = ["bytemuck"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
+texture2ddecoder = "0.1.2"
+texpresso = "2.0.2"
 nsh-core = "0.4.0"
 nsh-base = "0.4.0"
 nsh-platform-macos = { version = "0.4.0", default-features = false }

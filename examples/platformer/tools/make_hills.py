@@ -1,6 +1,8 @@
-"""生成 assets/hills.png：白色的连绵山丘剪影，左右能无缝接上（横向重复用），颜色由精灵的 color 染。
+"""生成 tools/hills.png：白色的连绵山丘剪影，左右能无缝接上（横向重复用），颜色由精灵的 color 染。
+游戏里用的是转出来的压缩贴图 assets/hills.ktx2：
 
     python3 tools/make_hills.py
+    cargo run -p nge-assets --example ktx2 -- tools/hills.png assets/hills.ktx2
 """
 
 import math
@@ -36,7 +38,7 @@ def main() -> None:
             cover = max(0.0, min(1.0, height(x + 0.5) - (H - y - 0.5) + 0.5))
             row += bytes((255, 255, 255, round(cover * 255)))
         rows.append(bytes(row))
-    out = Path(__file__).resolve().parent.parent / "assets" / "hills.png"
+    out = Path(__file__).resolve().parent / "hills.png"
     out.write_bytes(png(W, H, rows))
     print(out)
 

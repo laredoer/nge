@@ -528,7 +528,16 @@ mod tests {
         assert!(tsx.contains("asset:/@platformer/coin.wav") && tsx.contains("asset:/@platformer/win.wav"));
         assert!(tsx.contains(&format!("id: `{ENEMY}${{i}}`")), "levels.ts 的敌人 id 用 {ENEMY} 开头");
         assert!(uris.contains(&"asset:/@platformer/crate.glb") && tsx.contains("asset:/@platformer/crate.glb"), "2.5D 的箱子");
-        assert!(uris.contains(&"asset:/@platformer/hills.png") && tsx.contains("asset:/@platformer/hills.png"), "横向重复的远山");
+        assert!(uris.contains(&"asset:/@platformer/hills.ktx2") && tsx.contains("asset:/@platformer/hills.ktx2"), "横向重复的远山");
+        assert!(!uris.iter().any(|u| u.ends_with("hills.png")), "PNG 源图放在 tools/，不打包");
+    }
+
+    /// 远山是 BC3 压缩贴图，带 mipmap，宽高是块的整数倍（GPU 能直接用）。
+    #[test]
+    fn hills_are_a_compressed_texture() {
+        let image = nge_assets::Image::decode(include_bytes!("../assets/hills.ktx2")).unwrap();
+        let c = image.compressed.expect("压缩贴图");
+        assert_eq!((image.size, c.format, c.srgb, c.levels.len()), (nge_ecs::glam::UVec2::new(256, 160), nge_assets::BlockFormat::Bc3, true, 9));
     }
 
     #[test]
