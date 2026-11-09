@@ -1,7 +1,7 @@
 import { batch, mount, type NativeComponentRef, platform, signal, Text, View } from "nsh";
-import { floatText, gameView, KeyButton, saved, sound, tween, type Scene, type SpriteNode } from "../../ts/nge";
+import { floatText, gameView, KeyButton, push, saved, sound, tween, type Scene, type SpriteNode } from "../../ts/nge";
 import { COIN_SHADER, FLASH, FLASH_MS, night, portalOver, SHADERS } from "./effects";
-import { finish, flagOn, LEVELS, NEW_PROGRESS, progressOf, ROWS, TILE, type Progress } from "./levels";
+import { finish, flagOn, LEVELS, NEW_PROGRESS, progressOf, ROWS, TILE, TOWER_TRIGGER, towerAt, type Progress } from "./levels";
 
 /** Rust 发的事件：掉出关卡或被敌人撞到送回起点、按 R 重新开始、踩到敌人。 */
 interface Events {
@@ -49,6 +49,10 @@ function App() {
   const falls = signal(0);
   const won = signal<number | null>(null);
   const stomped = signal<string[]>([]);
+  /** 这一局的 3D 箱子已经撞散了。 */
+  let toppled = false;
+  /** 箱子摞了第几次：按 R 重来（关卡不重建）时也换 id，让箱子重新摞起来。 */
+  const towerRound = signal(0);
   /** 刚被撞回起点：角色闪白一下。 */
   const flashing = signal(false);
   let flashEnd: ReturnType<typeof setTimeout> | undefined;
@@ -68,6 +72,8 @@ function App() {
     stomped.set([]);
     falls.set(0);
     won.set(null);
+    toppled = false;
+    towerRound.set(towerRound() + 1);
     started = Date.now();
   };
   /** 换到第 `index` 关（从 0 数）：场景的 `level` 变了，引擎把实体全部重建，建好后发 `levelStart`。 */
@@ -82,6 +88,19 @@ function App() {
     });
   };
 
+  /** 这一关的那摞 3D 箱子（没有就是 null）：id 带着摞的次数，重新开始时重建。 */
+  const tower = () => {
+    const x = now().tower;
+    return x === null ? null : towerAt(x, towerRound());
+  };
+  /** 角色撞上去：箱子朝右飞散，前后错开一点，上面的飞得高。 */
+  const topple = () => {
+    const t = tower();
+    if (toppled || t === null) return;
+    toppled = true;
+    t.models.filter((m) => m.body?.kind !== "fixed").forEach((m, i) => push(game, { id: m.id, x: 160 + i * 25, y: 120 + i * 40, z: (i % 2 ? 1 : -1) * 60 }));
+  };
+
   const scene = (): Scene => ({
     level: levelId(),
     background: LEVELS[level()].night ? "#0b0f1e" : "#1b2233",
@@ -94,7 +113,9 @@ function App() {
     // 箱子顶上的小箱子在大箱子顶面投下影子
     lights: [{ id: "sun", kind: "directional", direction: [-1, -2, -1.5], shadows: true }],
     ambient: { brightness: 0.35 },
-    models: [now().crate.model, flagOn(now().goal)],
+    // 3D 箱子摞起来的地面和关卡的地面一样高
+    physics3d: { gravity: [0, -1800, 0] },
+    models: [now().crate.model, flagOn(now().goal), ...(tower()?.models ?? [])],
     joints: now().swing.joints,
     tilemaps: now().tilemaps,
     sprites: [
@@ -118,6 +139,7 @@ function App() {
           : { id, x, y, w: 22, h: 22, z: 4, color: "#c8d2ffd0", unlit: true, body: { kind: "kinematic", friction: 0 }, chase: GHOST_CHASE },
       ),
       ...now().ramps,
+      ...(tower() === null ? [] : [tower()!.trigger]),
       now().crate.body,
       ...now().swing.sprites,
       now().goal,
@@ -147,6 +169,7 @@ function App() {
         onCollide={(e) => {
           if (switching || !e.started || (e.a !== "player" && e.b !== "player")) return;
           const other = e.a === "player" ? e.b : e.a;
+          if (other === TOWER_TRIGGER) return topple();
           const coin = now().coins.find((c) => c.id === other);
           if (coin && !taken().includes(coin.id)) {
             taken.set([...taken(), coin.id]);

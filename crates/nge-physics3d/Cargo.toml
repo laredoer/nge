@@ -1,0 +1,18 @@
+[package]
+name = "nge-physics3d"
+description = "nge 的 3D 物理（rapier3d）：刚体、碰撞体、碰撞事件、射线"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+nge-ecs.workspace = true
+nge-render3d.workspace = true
+bevy_ecs.workspace = true
+glam.workspace = true
+log.workspace = true
+rapier3d = "0.36.1"
+
+[dev-dependencies]
+nge-core.workspace = true

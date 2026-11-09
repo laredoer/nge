@@ -1,7 +1,7 @@
 // `nsh test`：无头 runner 里没有游戏视图，测按钮的显示和按住的手指怎么换成按键。
 import { expect, open, test } from "nsh/test";
 import { heldKey } from "../../ts/nge";
-import { finish, LEVELS, NEW_PROGRESS, progressOf, rampOf } from "./levels";
+import { finish, LEVELS, NEW_PROGRESS, progressOf, rampOf, TOWER_BOX, TOWER_TRIGGER, towerAt } from "./levels";
 
 const BUTTONS = ["id:key-ArrowLeft", "id:key-ArrowRight", "id:key-Space", "id:key-KeyR"];
 
@@ -117,4 +117,29 @@ test("斜坡的顶面正好从一头到另一头，第一关有一段", () => {
     expect(r.body?.kind).toBe("fixed");
   }
   expect(LEVELS[0].built.ramps.length).toBe(1);
+});
+
+test("第一关有一摞 3D 箱子：摞在 3D 地面上、一个挨一个不重叠，sensor 在左边", () => {
+  const x = LEVELS[0].built.tower!;
+  expect(x).not.toBe(null);
+  const { trigger, models } = towerAt(x, 7);
+  const [floor, ...boxes] = models;
+  expect(floor.body?.kind).toBe("fixed");
+  const floorTop = floor.y! + floor.body!.size![1] / 2;
+  expect(floorTop).toBe(0);
+  expect(boxes.length).toBe(6);
+  for (const b of boxes) {
+    expect(b.id.startsWith("tower-7-")).toBe(true);
+    expect(b.body?.kind ?? "dynamic").toBe("dynamic");
+    expect(b.z).toBe(floor.z);
+    // 每个箱子底下要么是地面，要么是箱子
+    const bottom = b.y! - TOWER_BOX / 2;
+    const below = boxes.filter((o) => o !== b && Math.abs(o.y! + TOWER_BOX / 2 - bottom) < 1e-6 && Math.abs(o.x! - b.x!) < TOWER_BOX);
+    expect(bottom === floorTop || below.length > 0).toBe(true);
+    for (const o of boxes) if (o !== b && o.y === b.y) expect(Math.abs(o.x! - b.x!)).toBeGreaterThan(TOWER_BOX);
+  }
+  expect(trigger.id).toBe(TOWER_TRIGGER);
+  expect(trigger.body?.sensor).toBe(true);
+  expect(trigger.x!).toBeLessThan(Math.min(...boxes.map((b) => b.x!)));
+  expect(LEVELS[1].built.tower).toBe(null);
 });

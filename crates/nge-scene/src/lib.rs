@@ -16,6 +16,7 @@ mod level;
 mod match2d;
 mod nodes;
 mod physics;
+mod physics3d;
 mod protocol;
 mod resolve;
 mod sync;
@@ -43,6 +44,7 @@ pub use joints::{JointKindName, JointNode, MotorNode};
 pub use level::{LEVEL_START, LevelStart};
 pub use nodes::{AmbientNode, AnchorName, BURST, Burst, Camera3dNode, EmitterNode, FLOAT_TEXT, FloatText, LightKind, LightNode, ModelNode, Particles, TextNode};
 pub use physics::{BodyKind, BodyNode, COLLIDE, Collide, PUSH, PhysicsNode, Push, ShapeName};
+pub use physics3d::{Body3dKind, ModelBody, Physics3dNode, Shape3dName};
 pub use protocol::{Bounds, CameraNode, Color, SCENE, Scene, SpriteNode, TAP, Tap};
 pub use sync::SceneId;
 pub use tilemap::TilemapNode;
@@ -114,6 +116,9 @@ impl Plugin for ScenePlugin {
         if !app.is_plugin_added::<PhysicsPlugin>() {
             app.add_plugins(PhysicsPlugin::default());
         }
+        if !app.is_plugin_added::<nge_physics3d::Physics3dPlugin>() {
+            app.add_plugins(nge_physics3d::Physics3dPlugin { gravity: physics3d::GRAVITY, length_unit: physics3d::LENGTH_UNIT });
+        }
         if !app.is_plugin_added::<nge_ai::AiPlugin>() {
             app.add_plugins(nge_ai::AiPlugin);
         }
@@ -132,6 +137,7 @@ impl Plugin for ScenePlugin {
             sync_nodes::sync_lights,
             sync_nodes::sync_camera3d,
             physics::sync_gravity,
+            physics3d::sync_gravity,
             joints::sync_joints,
             audio::sync_audio,
             effects::sync_effects,
@@ -165,7 +171,7 @@ impl Plugin for ScenePlugin {
             .add_systems(PostUpdate, joints::resolve.before(PhysicsStepped))
             .add_systems(PostUpdate, attach::attach.after(PhysicsStepped).before(behave::follow))
             .add_systems(PostUpdate, effects::lighting.after(PhysicsStepped).after(behave::follow).after(camera::camera_rig))
-            .add_systems(PostUpdate, (behave::follow, physics::collide.after(PhysicsStepped), camera::camera_rig.after(PhysicsStepped), match2d::match_2d.after(camera::camera_rig)));
+            .add_systems(PostUpdate, (behave::follow, physics::collide.after(PhysicsStepped), physics3d::collide.after(nge_physics3d::Physics3dStepped), camera::camera_rig.after(PhysicsStepped), match2d::match_2d.after(camera::camera_rig)));
     }
 }
 

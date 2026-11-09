@@ -30,6 +30,8 @@ pub struct Scene {
     pub lights: Vec<LightNode>,
     pub ambient: Option<AmbientNode>,
     pub physics: Option<PhysicsNode>,
+    /// 3D 物理（见 docs/physics3d.md）。
+    pub physics3d: Option<crate::physics3d::Physics3dNode>,
     /// 关节（见 docs/joints.md）。
     pub joints: Vec<JointNode>,
     /// 游戏写的着色器：名字 → WGSL（见 docs/effects2d.md）。

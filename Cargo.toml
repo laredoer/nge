@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/nge-ai", "crates/nge-assets", "crates/nge-audio", "crates/nge-core", "crates/nge-ecs", "crates/nge-nsh", "crates/nge-particles", "crates/nge-physics2d", "crates/nge-platform", "crates/nge-render2d", "crates/nge-render3d", "crates/nge-scene", "crates/nge-text", "examples/bounce", "examples/sprites", "examples/dodge", "examples/scene", "examples/model", "examples/effects", "examples/scene3d", "examples/physics", "examples/platformer"]
+members = ["crates/nge-ai", "crates/nge-assets", "crates/nge-audio", "crates/nge-core", "crates/nge-ecs", "crates/nge-nsh", "crates/nge-particles", "crates/nge-physics2d", "crates/nge-physics3d", "crates/nge-platform", "crates/nge-render2d", "crates/nge-render3d", "crates/nge-scene", "crates/nge-text", "examples/bounce", "examples/sprites", "examples/dodge", "examples/scene", "examples/model", "examples/effects", "examples/scene3d", "examples/physics", "examples/platformer"]
 
 [workspace.package]
 version = "0.1.0"
@@ -20,6 +20,7 @@ nge-render3d = { path = "crates/nge-render3d" }
 nge-nsh = { path = "crates/nge-nsh" }
 nge-particles = { path = "crates/nge-particles" }
 nge-physics2d = { path = "crates/nge-physics2d" }
+nge-physics3d = { path = "crates/nge-physics3d" }
 nge-scene = { path = "crates/nge-scene" }
 nge-text = { path = "crates/nge-text" }
 bevy_ecs = { version = "0.20.1", default-features = false, features = ["std"] }

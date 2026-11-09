@@ -144,6 +144,9 @@ pub struct ModelNode {
     pub attach: Option<String>,
     /// 播模型里的哪段动画（见 docs/3d-more.md）。
     pub animation: Option<ModelAnimation>,
+    /// 3D 刚体（见 docs/physics3d.md）：有了它位置和旋转归物理管，`attach`、`spin` 不生效。
+    #[serde(default)]
+    pub body: Option<crate::physics3d::ModelBody>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]

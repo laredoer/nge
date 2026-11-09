@@ -602,6 +602,52 @@ mod tests {
         assert!(respawn.is_some(), "幽灵飞过来撞到了角色");
     }
 
+    /// 和 levels.ts 的 towerAt 一样摆的一摞 3D 箱子（边长 14、留 1 的缝）：摞着自己不倒；角色跑过 sensor 时发 collide，
+    /// 游戏推一下就散开。
+    #[test]
+    fn a_tower_of_3d_crates_stands_and_scatters_when_pushed() {
+        let mut app = app();
+        let mut scene = level(None);
+        let (x, s) = (200.0, 14.0);
+        let mut models = vec![json!({ "id": "floor", "model": "asset:/@platformer/crate.glb", "x": x, "y": -10, "z": -20, "scale": 0.001,
+            "body": { "kind": "fixed", "size": [384, 20, 192] } })];
+        for (n, (i, row)) in [(-1.0, 0.0), (0.0, 0.0), (1.0, 0.0), (-0.5, 1.0), (0.5, 1.0), (0.0, 2.0)].into_iter().enumerate() {
+            models.push(json!({ "id": format!("box-{n}"), "model": "asset:/@platformer/crate.glb", "x": x + i * (s + 1.0), "y": s / 2.0 + row * s,
+                "z": -20, "scale": s, "body": { "density": 0.5 } }));
+        }
+        scene["physics3d"] = json!({ "gravity": [0, -1800, 0] });
+        scene["models"] = json!(models);
+        scene["sprites"].as_array_mut().unwrap()[0]["body"]["collide"] = json!(true);
+        scene["sprites"].as_array_mut().unwrap().push(json!({ "id": "tower-trigger", "x": x - 3.0 * s, "y": 32, "w": 8, "h": 64, "body": { "kind": "fixed", "sensor": true } }));
+        app.prop("scene", Some(&scene));
+        let boxes = |app: &mut App| -> Vec<nge_ecs::glam::Vec3> {
+            let world = app.world_mut();
+            let mut found: Vec<(String, nge_ecs::glam::Vec3)> = world.query::<(&SceneId, &nge_render3d::Transform3d)>().iter(world)
+                .filter(|(id, _)| id.0.starts_with("box-")).map(|(id, t)| (id.0.clone(), t.translation)).collect();
+            found.sort_by(|a, b| a.0.cmp(&b.0));
+            found.into_iter().map(|(_, p)| p).collect()
+        };
+        run(&mut app, 2);
+        let stacked = boxes(&mut app);
+        run(&mut app, 120);
+        for (a, b) in stacked.iter().zip(boxes(&mut app)) {
+            assert!(a.distance(b) < 1.0, "摞着不倒 {a} → {b}");
+        }
+        key(&mut app, "ArrowRight", true);
+        let hit = (0..120).find_map(|_| {
+            named(&run(&mut app, 1), "collide").into_iter().find(|e| e["started"] == json!(true) && (e["a"] == "tower-trigger" || e["b"] == "tower-trigger")).cloned()
+        });
+        assert!(hit.is_some(), "角色跑过 sensor");
+        for n in 0..6 {
+            app.command("push", &json!({ "id": format!("box-{n}"), "x": 160 + n * 25, "y": 120 + n * 40, "z": if n % 2 == 1 { 60 } else { -60 } }));
+        }
+        run(&mut app, 90);
+        let after = boxes(&mut app);
+        let spread = after.iter().map(|p| p.x).fold(f32::MIN, f32::max) - after.iter().map(|p| p.x).fold(f32::MAX, f32::min);
+        assert!(spread > 60.0, "散开了 {after:?}");
+        assert!(after.iter().all(|p| p.y > 0.0 && p.y < 60.0), "落在地上 {after:?}");
+    }
+
     fn named<'a>(events: &'a [(String, Value)], name: &str) -> Vec<&'a Value> {
         events.iter().filter(|(n, _)| n == name).map(|(_, d)| d).collect()
     }

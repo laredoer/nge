@@ -97,7 +97,12 @@ pub(crate) fn sync_models(
             scale: Vec3::splat(node.scale),
         };
         let mut entity = commands.entity(entity);
-        entity.remove::<(Spin, Tappable, Attach)>().insert(transform);
+        entity.remove::<(Spin, Tappable, Attach)>();
+        // 有刚体的：声明的位置没变就不拉回去
+        if !crate::physics3d::keeps_place(before, node) {
+            entity.insert(transform);
+        }
+        crate::physics3d::apply_body(&mut entity, before, node);
         // 模型没换时保留已经展开的 Model3d，不闪
         let same_model = before.is_some_and(|b| b.model == node.model);
         if !same_model {
@@ -120,7 +125,11 @@ pub(crate) fn sync_models(
                 }
             }
         }
-        if let Some(sprite) = &node.attach {
+        if node.body.is_some() {
+            if node.attach.is_some() || node.spin != 0.0 {
+                log::warn!("模型 {:?} 有刚体，attach / spin 不生效", node.id);
+            }
+        } else if let Some(sprite) = &node.attach {
             entity.insert(Attach { sprite: sprite.clone(), offset: transform.translation, rotation: transform.rotation });
             if node.spin != 0.0 {
                 log::warn!("模型 {:?} 跟着精灵走，spin 不生效", node.id);

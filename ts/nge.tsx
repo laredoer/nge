@@ -216,6 +216,34 @@ export interface ModelNode {
   attach?: string;
   /** 播模型里的一段骨骼 / 节点动画（glTF 的 animations），见 docs/3d-more.md。只改 speed、loop 时不从头播。 */
   animation?: ModelAnimation;
+  /** 3D 刚体（见 docs/physics3d.md）。有了它位置和旋转归物理管：声明的位置、角度、缩放没变时不拉回去；`attach`、`spin` 不生效。 */
+  body?: ModelBody;
+}
+
+/** 模型的 3D 刚体和碰撞体。和 2D 刚体在两个世界里，互不碰撞。 */
+export interface ModelBody {
+  /** 默认 "dynamic"。kinematic 跟着声明的位置平滑移动，会推开别的刚体。 */
+  kind?: "dynamic" | "fixed" | "kinematic";
+  /** 默认 "box"。capsule 是竖着的胶囊。 */
+  shape?: "box" | "ball" | "capsule";
+  /** 盒子的长宽高（世界单位，不乘 scale），默认边长 = 模型的 scale。 */
+  size?: [number, number, number];
+  /** 球、胶囊的半径，默认 scale / 2（球）、scale / 4（胶囊）。 */
+  r?: number;
+  /** 胶囊中间圆柱的高，默认 scale / 2。 */
+  h?: number;
+  /** 弹性，默认 0。 */
+  restitution?: number;
+  /** 默认 0.5。 */
+  friction?: number;
+  /** 默认 1。 */
+  density?: number;
+  /** 只检测重叠，不碰撞。 */
+  sensor?: boolean;
+  /** 初速度（point / s）。 */
+  velocity?: [number, number, number];
+  /** 碰撞开始 / 结束时发 collide 事件（两边都是模型时）。 */
+  collide?: boolean;
 }
 
 export interface ModelAnimation {
@@ -348,6 +376,8 @@ export interface Scene {
   ambient?: { color?: string; brightness?: number };
   /** 重力（point / s²），默认 [0, -981]。 */
   physics?: { gravity?: [number, number] };
+  /** 3D 重力，默认 [0, -981, 0]。 */
+  physics3d?: { gravity?: [number, number, number] };
   joints?: JointNode[];
   /** 自己写的着色器：名字 → WGSL。精灵着色器写 `fn effect(e: Effect) -> vec4f`，后处理写 `fn post(p: Post) -> vec4f`。见 docs/effects2d.md。 */
   shaders?: Record<string, string>;
@@ -417,8 +447,8 @@ export interface Collide {
   started: boolean;
 }
 
-/** 给精灵 `id` 的刚体加上 (x, y) 的速度（point / s，和质量无关）。 */
-export function push(game: NativeComponentRef | undefined, args: { id: string; x: number; y: number }) {
+/** 给精灵 `id` 的刚体加上 (x, y) 的速度（point / s，和质量无关）。`id` 是有 3D 刚体的模型时加 (x, y, z)。 */
+export function push(game: NativeComponentRef | undefined, args: { id: string; x: number; y: number; z?: number }) {
   game?.command("push", args);
 }
 

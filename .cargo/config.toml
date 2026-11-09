@@ -48,6 +48,8 @@ opt-level = 1
 opt-level = 1
 [profile.dev.package.nge-physics2d]
 opt-level = 1
+[profile.dev.package.nge-physics3d]
+opt-level = 1
 [profile.dev.package.nge-platform]
 opt-level = 1
 [profile.dev.package.nge-render2d]

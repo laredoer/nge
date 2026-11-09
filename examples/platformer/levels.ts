@@ -31,6 +31,8 @@ export interface Level {
   swing?: number[];
   /** 幽灵：在空中的列和 y，看见角色就绕开平台追过来。 */
   ghosts?: number[][];
+  /** 一摞 3D 箱子摆在第几列。 */
+  tower?: number;
   /** 斜坡：两头的 [x, y]（顶面），角色控制器能走上去（见 docs/character.md）。 */
   ramps?: number[][][];
 }
@@ -57,6 +59,8 @@ const DESCRIBED: Level[] = [
     ramps: [[[28 * TILE, 3 * TILE], [28 * TILE + 3 * TILE * Math.sqrt(3), 0]]],
     // 第二组平台上方：从平台缝里看见地面上的角色
     ghosts: [[29, 240]],
+    // 第一个坑后面的地面上：一摞 3D 箱子，角色跑过去撞散
+    tower: 23,
   },
   {
     name: "石阶",
@@ -88,6 +92,8 @@ export interface Built {
   ghosts: { id: string; x: number; y: number }[];
   /** 斜坡：转过角度的固定刚体。 */
   ramps: SpriteNode[];
+  /** 一摞 3D 箱子摆在哪（x），没有是 null；见 `towerAt`。 */
+  tower: number | null;
   /** 3D 箱子：模型跟着一个看不见的 2D 刚体走（`attach`），角色能推着它走、跳上去。 */
   crate: { body: SpriteNode; model: ModelNode };
   /** 吊着的铁链：几节链子和一个铁球，用转动关节一节节连起来，挂在世界上的支点。 */
@@ -137,7 +143,8 @@ export function build(level: Level): Built {
   const swing = level.swing === undefined ? NO_SWING : swingAt(level.swing[0] * TILE, level.swing[1]);
   const ghosts = (level.ghosts ?? []).map(([c, y], i) => ({ id: `enemy-ghost-${i}`, x: (c + 0.5) * TILE, y }));
   const ramps = (level.ramps ?? []).map(([a, b], i) => rampOf(`ramp-${i}`, a, b));
-  return { tilemaps: [tilemap], coins, lifts, enemies, ghosts, ramps, crate: crateAt(level.crate * TILE, 56), swing, goal: goalAt((cols - 4) * TILE, 40), right: cols * TILE };
+  const tower = level.tower === undefined ? null : (level.tower + 0.5) * TILE;
+  return { tilemaps: [tilemap], coins, lifts, enemies, ghosts, ramps, tower, crate: crateAt(level.crate * TILE, 56), swing, goal: goalAt((cols - 4) * TILE, 40), right: cols * TILE };
 }
 
 /** 厚 16 的斜坡，顶面从 `a` 到 `b`。 */
@@ -165,6 +172,44 @@ const crateAt = (x: number, y: number) => ({
   body: { id: "crate-body", x, y, w: 40, h: 40, z: 3, color: "#00000000", body: { density: 0.3, friction: 0.6 } } as SpriteNode,
   model: { id: "crate", model: "asset:/@platformer/crate.glb", attach: "crate-body", scale: 40, rotation: [20, 0, 0] } as ModelNode,
 });
+
+/** 一摞 3D 箱子的边长、离关卡平面多远（往后）。 */
+export const TOWER_BOX = 14;
+const TOWER_Z = -20;
+/** 碰到它就把箱子撞散的 sensor 的 id。 */
+export const TOWER_TRIGGER = "tower-trigger";
+
+/**
+ * 地面上 x 处一摞六个 3D 箱子（3D 物理，见 docs/physics3d.md），底下三个、中间两个、顶上一个，摆在关卡平面后面一点。
+ * 3D 地面是一块看不见的固定刚体（模型缩到看不见，刚体大小单独写）。左边一点有一个看不见的 2D sensor，角色碰到它时游戏把箱子推散。
+ * 箱子的 id 带着摞的次数（`round`）：换了就重建，回到原来摞着的样子。
+ */
+export function towerAt(x: number, round: number): { trigger: SpriteNode; models: ModelNode[] } {
+  const s = TOWER_BOX;
+  const boxes = [[-1, 0], [0, 0], [1, 0], [-0.5, 1], [0.5, 1], [0, 2]].map(([i, row], n): ModelNode => ({
+    id: `tower-${round}-${n}`,
+    model: "asset:/@platformer/crate.glb",
+    // 箱子之间留 1 的缝，摆上去不互相挤
+    x: x + i * (s + 1),
+    y: s / 2 + row * s,
+    z: TOWER_Z,
+    scale: s,
+    body: { density: 0.5 },
+  }));
+  const floor: ModelNode = {
+    id: "tower-floor",
+    model: "asset:/@platformer/crate.glb",
+    x,
+    y: -10,
+    z: TOWER_Z,
+    scale: 0.001,
+    body: { kind: "fixed", size: [12 * TILE, 20, 6 * TILE] },
+  };
+  return {
+    trigger: { id: TOWER_TRIGGER, x: x - 3 * s, y: 32, w: 8, h: 64, color: "#00000000", body: { kind: "fixed", sensor: true } },
+    models: [floor, ...boxes],
+  };
+}
 
 /** 链子几节、每节多长。 */
 export const LINKS = 4;
@@ -229,6 +274,7 @@ export function fromTiled(map: TiledMap): Built {
     enemies: of("enemy").map((o, i) => ({ id: `enemy-${i}`, x: o.x, to: { x: o.x + num(o, "patrol", 3) * TILE } })),
     ghosts: of("ghost").map((o, i) => ({ id: `enemy-ghost-${i}`, x: o.x, y: o.y })),
     ramps: [],
+    tower: null,
     crate: crateAt(crate.x, crate.y),
     swing: swing === undefined ? NO_SWING : swingAt(swing.x, swing.y),
     goal: goalAt(goal.x, goal.y),

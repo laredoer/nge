@@ -11,6 +11,7 @@ use nge_physics2d::{Character, Collider, Collision, Impulse, LockRotation, Physi
 use nge_render2d::Sprite;
 use serde::{Deserialize, Serialize};
 
+use crate::nodes::ModelNode;
 use crate::protocol::{Scene, SpriteNode};
 use crate::sync::{Declared, SceneId};
 use crate::tilemap::{TileSolid, TilemapNode};
@@ -99,12 +100,14 @@ pub struct Collide {
     pub started: bool,
 }
 
-/// 给节点的刚体加上 (x, y) 的速度（point / s，和质量无关）。
+/// 给节点的刚体加上 (x, y) 的速度（point / s，和质量无关）。id 是模型时推 3D 刚体，`z` 只对它有用。
 #[derive(Message, Debug, Clone, PartialEq, Deserialize)]
 pub struct Push {
     pub id: String,
     pub x: f32,
     pub y: f32,
+    #[serde(default)]
+    pub z: f32,
 }
 
 /// 按精灵节点的 `body` 挂上或拿掉物理组件。`size` 是精灵声明的大小（没乘缩放）。
@@ -220,8 +223,17 @@ pub(crate) fn collide(
     }
 }
 
-pub(crate) fn push(mut reader: MessageReader<Push>, mut bodies: Query<(&Declared<SpriteNode>, &RigidBody, &mut Velocity)>) {
+type Bodies3d<'w, 's> = Query<'w, 's, (&'static Declared<ModelNode>, &'static nge_physics3d::RigidBody, &'static mut nge_physics3d::Velocity)>;
+
+pub(crate) fn push(mut reader: MessageReader<Push>, mut bodies: Query<(&Declared<SpriteNode>, &RigidBody, &mut Velocity)>, mut models: Bodies3d) {
     for p in reader.read() {
+        if let Some((_, kind, mut v)) = models.iter_mut().find(|(d, ..)| d.0.id == p.id) {
+            match kind {
+                nge_physics3d::RigidBody::Dynamic => v.linear += glam::Vec3::new(p.x, p.y, p.z),
+                _ => log::warn!("push：{:?} 不是 dynamic 刚体，推不动", p.id),
+            }
+            continue;
+        }
         match bodies.iter_mut().find(|(d, ..)| d.0.id == p.id) {
             Some((_, RigidBody::Dynamic, mut v)) => v.linear += Vec2::new(p.x, p.y),
             Some(_) => log::warn!("push：{:?} 不是 dynamic 刚体，推不动", p.id),
