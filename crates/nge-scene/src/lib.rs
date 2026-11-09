@@ -22,6 +22,7 @@ mod resolve;
 mod sync;
 mod sync_nodes;
 mod tilemap;
+mod world_ui;
 
 use std::collections::HashMap;
 
@@ -35,6 +36,7 @@ use nge_render3d::{Assets3d, Camera3d, Transform3d};
 use nge_text::TextPlugin;
 
 pub use ai::{CHASE, ChaseEvent, ChaseNode};
+pub use world_ui::{BarNode, BubbleNode, TYPED, Typed};
 pub use anim::{ANIM_END, AnimEnd, AnimNode, Ease, FrameAnimation, TWEEN, TWEEN_END, Tween, TweenCommand, TweenEnd, TweenProps, Tweens};
 pub use audio::{AudioNode, BusName, BusNode, BusesNode, PlaySound, SOUND};
 pub use behave::{Spin, Tappable};
@@ -141,6 +143,8 @@ impl Plugin for ScenePlugin {
             joints::sync_joints,
             audio::sync_audio,
             effects::sync_effects,
+            world_ui::sync_bars,
+            world_ui::sync_bubbles,
         );
         app.insert_resource(textures)
             .init_resource::<resolve::UriAtlases>()
@@ -158,6 +162,10 @@ impl Plugin for ScenePlugin {
             .add_event(COLLIDE)
             .add_event(LEVEL_START)
             .add_event(CHASE)
+            .add_event(TYPED)
+            .add_systems(Update, world_ui::type_text)
+            // 跟随插值过的位置；屏幕气泡用这一帧的相机
+            .add_systems(PostUpdate, (world_ui::place_bars, world_ui::place_bubbles).after(PhysicsStepped).after(camera::camera_rig))
             .add_systems(Update, ai::resolve_targets.before(nge_ai::chase))
             .add_systems(Update, ai::send_changes.after(nge_ai::chase))
             .add_message::<LevelStart>()

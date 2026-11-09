@@ -89,6 +89,7 @@
 | **角色控制器** | `nge-physics2d` 的 `Character`（底下是 rapier 的 `KinematicCharacterController`）：游戏只给速度，引擎负责重力、沿墙滑、爬坡、贴地、上矮台阶、被脚下的平台带着走、推箱子；场景写 `body.kind: "character"`；见 [character.md](character.md) | 平台跳跃的角色换上它，第一关加一段斜坡 |
 | **3D 物理** | 新 crate `nge-physics3d`（rapier3d）：盒子、球、胶囊刚体，碰撞消息、接触、射线；模型节点写 `body` 就有刚体，`collide`、`push` 对模型也管用；见 [physics3d.md](physics3d.md) | 平台跳跃第一关的一摞 3D 箱子，角色跑过去撞散 |
 | **音频补齐** | 混音分组（音乐、音效、界面）各自的音量、低通、混响；带位置的声音按离相机的距离衰减、按左右定声像；`scene.audio.buses`、`sound` 的 `bus` / `x` / `y`；见 [audio-more.md](audio-more.md) | 平台跳跃夜里那关的音效有回声，幽灵发现角色时从它那儿响一声 |
+| **世界里的 UI** | `bars`：跟着精灵的进度条，值平滑过渡；`bubbles`：背景框按文字撑开的气泡，能固定在屏幕上当对话框；`typing` 打字机效果，打完发 `typed`；`Text2d.visible`、`TextBox`；见 [world-ui.md](world-ui.md) | 平台跳跃角色头顶的血条（失手三次整关重来）、每关开始时的关卡名气泡 |
 | **M6 Android** | SurfaceView 和 Vulkan，JNI 胶水层 | 示例游戏在 Android 真机上能跑 |
 
 ## 待定

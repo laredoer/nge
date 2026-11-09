@@ -164,6 +164,55 @@ export interface TextNode {
   lift?: number;
 }
 
+/** 进度条（血条），见 docs/world-ui.md。 */
+export interface BarNode {
+  id: string;
+  /** 0 到 1，超出截断；不写或 NaN 当 0。 */
+  value?: number;
+  /** 跟着这个精灵（id）画的位置走，x / y 变成相对它的偏移；找不到就藏起来。 */
+  follow?: string;
+  x?: number;
+  y?: number;
+  /** 默认 32 × 4。 */
+  w?: number;
+  h?: number;
+  /** 填充色，默认 "#4ade80"。 */
+  color?: string;
+  /** 底色，默认 "#000000a0"。 */
+  back?: string;
+  /** 默认 50。 */
+  z?: number;
+  /** 数值变化的过渡时间（秒），默认 0.15，0 是立刻。 */
+  smooth?: number;
+}
+
+/** 带背景框的一段文字：背景框按文字排版后的大小撑开。 */
+export interface BubbleNode {
+  id: string;
+  text: string;
+  /** 跟着这个精灵走，x / y 是相对它的偏移；位置是气泡的底边中点。 */
+  follow?: string;
+  x?: number;
+  y?: number;
+  /** 固定在屏幕上（对话框）：x / y 是屏幕坐标（左上角原点，y 朝下），位置是气泡的顶边中点。 */
+  screen?: boolean;
+  /** 字号，默认 14。 */
+  size?: number;
+  /** 字的颜色，默认白色。 */
+  color?: string;
+  /** 背景框颜色，默认 "#000000b0"。 */
+  back?: string;
+  /** 背景框比文字大出来的边，默认 6。 */
+  padding?: number;
+  /** 超过就换行，默认 160。 */
+  maxWidth?: number;
+  /** 每秒出几个字，默认 0（一下全出来）。改了文字从头打，打完发 `typed`；改成 0 一下全出来。 */
+  typing?: number;
+  font?: string;
+  /** 背景框的 z，默认 60；字总在所有精灵上面。 */
+  z?: number;
+}
+
 /** 粒子参数。范围写成 [最小, 最大]，角度用度（0 朝右、逆时针）。 */
 export interface Particles {
   x?: number;
@@ -379,6 +428,8 @@ export interface Scene {
   /** 3D 重力，默认 [0, -981, 0]。 */
   physics3d?: { gravity?: [number, number, number] };
   joints?: JointNode[];
+  bars?: BarNode[];
+  bubbles?: BubbleNode[];
   /** 自己写的着色器：名字 → WGSL。精灵着色器写 `fn effect(e: Effect) -> vec4f`，后处理写 `fn post(p: Post) -> vec4f`。见 docs/effects2d.md。 */
   shaders?: Record<string, string>;
   lighting?: LightingNode;
@@ -627,6 +678,8 @@ interface BuiltinEvents {
   /** 换关（场景的 `level` 换了值）后新关卡的实体建好了：要对新关卡发的命令（补间等）在这里发。 */
   levelStart: { level: string };
   chase: ChaseEvent;
+  /** 气泡的字打完了。 */
+  typed: { id: string };
   fps: FrameStats;
   error: EngineError;
 }
@@ -637,14 +690,14 @@ export type GameViewProps<P, E> = NativeComponentProps<Partial<BuiltinProps> & P
 
 /**
  * 生成游戏视图组件。`props` / `events` 是游戏自己的通道名（Rust 侧 `add_prop` / `add_state` / `add_event`），
- * 类型由泛型给出；内置 prop `scene`、事件 `tap` / `collide` / `animEnd` / `tweenEnd` / `key` / `levelStart` / `chase` / `fps` / `error`，触摸自动转成引擎的 `touch` command。
+ * 类型由泛型给出；内置 prop `scene`、事件 `tap` / `collide` / `animEnd` / `tweenEnd` / `key` / `levelStart` / `chase` / `typed` / `fps` / `error`，触摸自动转成引擎的 `touch` command。
  */
 export function gameView<P extends object = {}, E extends object = {}>(
   spec: { props?: readonly (keyof P & string)[]; events?: readonly (keyof E & string)[] } = {},
 ) {
   const Native = nativeComponent<BuiltinProps & P, BuiltinEvents & E>("nge.game", {
     props: [...new Set(["scene", "captureKeys", ...(spec.props ?? [])])] as (keyof (BuiltinProps & P) & string)[],
-    events: [...new Set(["tap", "collide", "animEnd", "tweenEnd", "key", "levelStart", "chase", "fps", "error", ...(spec.events ?? [])])] as (keyof (BuiltinEvents & E) & string)[],
+    events: [...new Set(["tap", "collide", "animEnd", "tweenEnd", "key", "levelStart", "chase", "typed", "fps", "error", ...(spec.events ?? [])])] as (keyof (BuiltinEvents & E) & string)[],
   });
 
   return (props: GameViewProps<P, E>) => {

@@ -1,6 +1,7 @@
 import { batch, mount, type NativeComponentRef, platform, signal, Text, View } from "nsh";
 import { floatText, gameView, KeyButton, push, saved, sound, tween, type Scene, type SpriteNode } from "../../ts/nge";
 import { COIN_SHADER, FLASH, FLASH_MS, levelAudio, night, portalOver, SHADERS } from "./effects";
+import { hpBar, outOfHearts, TITLE_HOLD_MS, titleBubble } from "./hud";
 import { finish, flagOn, LEVELS, NEW_PROGRESS, progressOf, ROWS, TILE, TOWER_TRIGGER, towerAt, type Progress } from "./levels";
 
 /** Rust 发的事件：掉出关卡或被敌人撞到送回起点、按 R 重新开始、踩到敌人。 */
@@ -58,6 +59,9 @@ function App() {
   let toppled = false;
   /** 箱子摞了第几次：按 R 重来（关卡不重建）时也换 id，让箱子重新摞起来。 */
   const towerRound = signal(0);
+  /** 关卡名气泡：每关开始时冒出来，打完过一会儿去掉。 */
+  const title = signal<string | null>(null);
+  let titleEnd: ReturnType<typeof setTimeout> | undefined;
   /** 刚被撞回起点：角色闪白一下。 */
   const flashing = signal(false);
   let flashEnd: ReturnType<typeof setTimeout> | undefined;
@@ -89,6 +93,9 @@ function App() {
     // 一次换关只发一次场景
     batch(() => {
       reset();
+      // 上一关的名字不带到新关卡上：新关卡建好（levelStart）时再冒
+      clearTimeout(titleEnd);
+      title.set(null);
       current.set({ index, round: current().round + 1 });
     });
   };
@@ -121,6 +128,8 @@ function App() {
     // 3D 箱子摞起来的地面和关卡的地面一样高
     physics3d: { gravity: [0, -1800, 0] },
     models: [now().crate.model, flagOn(now().goal), ...(tower()?.models ?? [])],
+    bars: [hpBar(falls())],
+    bubbles: title() === null ? [] : [titleBubble(title()!)],
     joints: now().swing.joints,
     tilemaps: now().tilemaps,
     sprites: [
@@ -170,6 +179,8 @@ function App() {
           if (e.level !== levelId()) return;
           switching = false;
           startTweens();
+          clearTimeout(titleEnd);
+          title.set(LEVELS[level()].name);
         }}
         onCollide={(e) => {
           if (switching || !e.started || (e.a !== "player" && e.b !== "player")) return;
@@ -199,6 +210,8 @@ function App() {
         onRespawn={(e) => {
           if (switching) return;
           falls.set(e.falls);
+          // 血掉光了：整关重来（重建关卡，引擎那边的失手次数也清零）
+          if (outOfHearts(e.falls)) return play(level());
           flashing.set(true);
           clearTimeout(flashEnd);
           flashEnd = setTimeout(() => flashing.set(false), FLASH_MS);
@@ -216,6 +229,11 @@ function App() {
           if (switching) return;
           stomped.set([...stomped(), e.id]);
           floatText(game, { x: e.x, y: e.y + 10, text: "踩！", color: "#c39bd3", duration: 0.6 });
+        }}
+        onTyped={(e) => {
+          if (e.id !== "title" || switching) return;
+          clearTimeout(titleEnd);
+          titleEnd = setTimeout(() => title.set(null), TITLE_HOLD_MS);
         }}
         onRestart={() => {
           clearTimeout(next);

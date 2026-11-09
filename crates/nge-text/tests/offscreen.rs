@@ -221,3 +221,47 @@ fn all_text_is_one_draw() {
     offscreen.frame_until_drawn();
     assert_eq!(*counts.lock().unwrap(), (1, 2), "两段字一次 draw");
 }
+
+/// 排在文字渲染器后面，记下所有文字框的大小。
+struct BoxProbe(Arc<Mutex<Vec<Vec2>>>);
+
+impl nge_ecs::Renderer for BoxProbe {
+    fn render(&mut self, world: &mut World, _: &Gfx, _: &mut wgpu::CommandEncoder, _: &wgpu::TextureView) {
+        *self.0.lock().unwrap() = world.query::<&TextBox>().iter(world).map(|b| b.0).collect();
+    }
+}
+
+/// 摆一段 `HH`（只显示 `visible` 个字），相机缩放 `zoom`；返回亮像素和文字框。
+fn typed(visible: Option<usize>, zoom: f32) -> Option<(Vec<Vec2>, Vec<Vec2>)> {
+    let boxes = Arc::new(Mutex::new(Vec::new()));
+    let probe = boxes.clone();
+    let build = scene(memory(), move |world, font| {
+        world.spawn((Text2d { visible, ..label(font) }, Transform2d::default()));
+        world.spawn(Camera2d { zoom, ..Default::default() });
+    });
+    let mut offscreen = Offscreen::new(move |app| {
+        build(app);
+        app.add_renderer(BoxProbe(probe.clone()));
+    })?;
+    let lit = offscreen.frame_until_drawn();
+    let boxes = boxes.lock().unwrap().clone();
+    Some((lit, boxes))
+}
+
+#[test]
+fn typing_hides_the_rest_and_the_box_is_written_back() {
+    let Some((all, full_box)) = typed(None, 1.0) else {
+        return eprintln!("没有 GPU，跳过");
+    };
+    let (half, half_box) = typed(Some(1), 1.0).unwrap();
+    let right = |lit: &[Vec2]| lit.iter().fold(f32::MIN, |m, p| m.max(p.x));
+    let left = |lit: &[Vec2]| lit.iter().fold(f32::MAX, |m, p| m.min(p.x));
+    assert!((left(&half) - left(&all)).abs() < 1.0, "第一个字在原来的位置上 {} / {}", left(&half), left(&all));
+    assert!(right(&half) < right(&all) - 5.0, "第二个字没画 {} / {}", right(&half), right(&all));
+    assert_eq!(full_box.len(), 1);
+    assert_eq!(half_box, full_box, "没显示的字照样占地方");
+    let b = full_box[0];
+    assert!(b.x > 20.0 && b.x < 60.0 && b.y > 20.0 && b.y < 40.0, "24 号的 HH 大约这么大 {b}");
+    let (_, zoomed) = typed(None, 2.0).unwrap();
+    assert!((zoomed[0] - b).length() < 0.5, "世界文字的框按世界单位，不随缩放变 {b} / {}", zoomed[0]);
+}

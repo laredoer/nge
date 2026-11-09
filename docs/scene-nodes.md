@@ -30,6 +30,8 @@ TSX 里除了精灵，还能声明 3D 模型、文字和粒子，并触发一次
 | `camera3d` | `{ x, y, z, target: [x, y, z], fov（度）}`；不填时在 (0, 2, 6) 看向原点 |
 | `lights[]` | `{ id, kind: "directional" \| "point", direction: [x, y, z], x, y, z, color, intensity, range }` |
 | `ambient` | `{ color, brightness }` |
+| `bars[]` | `{ id, value=0（0 到 1，`null` 当 0）, follow, x, y, w=32, h=4, color, back, z=50, smooth=0.15 }`：跟着精灵的进度条，见 [world-ui.md](world-ui.md) |
+| `bubbles[]` | `{ id, text, follow, x, y, screen=false, size=14, color, back, padding=6, maxWidth=160, typing=0, font, z=60 }`：背景框按文字撑开的气泡，`typing` 是每秒出几个字，打完发 `typed { id }` |
 
 一次性命令的参数：
 - `burst`：`emitters[]` 去掉 `id` 和 `rate`，加 `count`（默认 100），粒子死完自动删除；

@@ -32,6 +32,10 @@ pub struct Scene {
     pub physics: Option<PhysicsNode>,
     /// 3D 物理（见 docs/physics3d.md）。
     pub physics3d: Option<crate::physics3d::Physics3dNode>,
+    /// 进度条（见 docs/world-ui.md）。
+    pub bars: Vec<crate::world_ui::BarNode>,
+    /// 气泡。
+    pub bubbles: Vec<crate::world_ui::BubbleNode>,
     /// 关节（见 docs/joints.md）。
     pub joints: Vec<JointNode>,
     /// 游戏写的着色器：名字 → WGSL（见 docs/effects2d.md）。

@@ -41,6 +41,7 @@ pub(crate) fn sync_texts(mut commands: Commands, scene: Res<Scene>, mut assets: 
             color: node.color.map_or(Vec4::ONE, |c| c.0),
             anchor: node.anchor.into(),
             max_width: node.max_width,
+            visible: None,
         };
         let mut entity = commands.entity(entity);
         entity.remove::<(ScreenText, Follow)>().insert((text, Transform2d::from_xy(node.x, node.y)));

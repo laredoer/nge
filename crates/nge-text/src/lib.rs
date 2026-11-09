@@ -9,7 +9,7 @@ mod perf;
 mod renderer;
 
 use bevy_ecs::prelude::*;
-use glam::Vec4;
+use glam::{Vec2, Vec4};
 use nge_assets::{Asset, AssetApp, Handle, LoadContext};
 use nge_ecs::{App, Plugin, PostUpdate, Update};
 
@@ -46,11 +46,13 @@ pub struct Text2d {
     pub anchor: Anchor,
     /// 超过这个宽度（point）自动换行。
     pub max_width: Option<f32>,
+    /// 只显示前几个字（按 `char` 数），后面的照样排版、只是透明：打字机效果不会换行跳动。
+    pub visible: Option<usize>,
 }
 
 impl Text2d {
     pub fn new(text: impl Into<String>) -> Self {
-        Self { text: text.into(), font: None, size: 16.0, color: Vec4::ONE, anchor: Anchor::Center, max_width: None }
+        Self { text: text.into(), font: None, size: 16.0, color: Vec4::ONE, anchor: Anchor::Center, max_width: None, visible: None }
     }
 
     pub fn with_font(self, font: FontId) -> Self {
@@ -74,6 +76,10 @@ impl Text2d {
     }
 }
 
+/// 渲染器排完版后写回的文字框大小（point）：世界文字是世界单位，屏幕文字是屏幕 point。变了才写；没有渲染时没有。
+#[derive(Component, Debug, Clone, Copy, PartialEq)]
+pub struct TextBox(pub Vec2);
+
 /// [`Text2d`] 的位置是视图内坐标（左上角原点、y 朝下），不跟 2D 相机。
 #[derive(Component, Debug, Clone, Copy, Default)]
 pub struct ScreenText;
@@ -92,7 +98,7 @@ impl Plugin for TextPlugin {
 }
 
 pub mod prelude {
-    pub use crate::{Anchor, FloatingText, Font, FontId, PerfOverlay, ScreenText, Text2d, TextPlugin};
+    pub use crate::{Anchor, FloatingText, Font, FontId, PerfOverlay, ScreenText, Text2d, TextBox, TextPlugin};
 }
 
 #[cfg(test)]
