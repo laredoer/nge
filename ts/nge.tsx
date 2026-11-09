@@ -48,6 +48,13 @@ export interface SpriteNode {
   /** 开着 2D 光照时不受光（自己发光的东西）。 */
   unlit?: boolean;
   /**
+   * 法线图（`asset:/` 路径或注册过的纹理名，不能是图集），和 `texture` 同样排布：RGB = 法线 × 0.5 + 0.5，
+   * 绿色朝上、蓝色朝外，按原值读（不做 sRGB 转换）。受光时按表面朝向明暗。
+   */
+  normal?: string;
+  /** 挡住开了 `shadows` 的灯：`true` 是精灵画出来的矩形，数组是本地坐标的多边形（至少 2 个点，首尾自动连上）。挡光的精灵自己照常亮。 */
+  occluder?: boolean | [number, number][];
+  /**
    * 追某个节点：看见（`sight` 以内、中间没有墙）就在瓦片地图里绕开墙追过去，目标跑出 `sight` 的 1.5 倍、
    * 自己离出发点超过 `leash`、找不到路就回出发点。直接挪位置，配 `kinematic` 刚体。见 docs/ai.md。
    */
@@ -93,13 +100,28 @@ export interface Light2dNode {
   intensity?: number;
   /** 跟着这个精灵（有刚体时是插值过的位置）。 */
   follow?: string;
+  /** 离画面多高，只影响带 `normal` 的精灵：越低越像从侧面打过来。默认半径的 0.25 倍。 */
+  height?: number;
+  /**
+   * 被 `occluder` 的精灵挡住，后面落在阴影里（硬阴影）。默认 false。
+   * 开销是受光的像素 × 开了 shadows 的灯 × 挡光的边数，灯和挡光物都少放几个。
+   */
+  shadows?: boolean;
 }
 
-/** 后处理的一遍：`shader` 是 `scene.shaders` 或内置的后处理（grayscale、vignette、pixelate）。 */
+/**
+ * 后处理的一遍：`shader` 是 `scene.shaders` 或内置的后处理（grayscale、vignette、pixelate），
+ * 或者内置的多遍效果 `bloom`（亮的地方往外晕开，params 是 [阈值 0.8, 强度 1, 级数 5, 0]）。
+ */
 export interface PostNode {
   shader: string;
   /** 交给着色器的 4 个数（`p.params`），不写用着色器的默认值。 */
   params?: [number, number, number, number];
+  /**
+   * "back" 只给 z < 0 的背景层（要背景层第一个画）。和 3D 混排时也照样分出这一层，在 3D 之前画，所以这些精灵总在 3D 后面。
+   * 默认 "screen"（整屏）。
+   */
+  layer?: "screen" | "back";
 }
 
 /** 精灵的刚体和碰撞体。尺寸是精灵本地的大小，会乘精灵的 scale。 */

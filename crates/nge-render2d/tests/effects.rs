@@ -4,7 +4,7 @@ use glam::{Vec2, Vec4};
 use nge_core::{Ctx, Emit, Gfx, Viewport, wgpu};
 use nge_ecs::prelude::*;
 use nge_render2d::prelude::*;
-use nge_render2d::{Light2d, Lighting2d, Masking, PostEffect, PostEffects, Shaders, SpriteImage, SpriteInstance, SpriteInstances, SpriteShader, TextureId, Unlit};
+use nge_render2d::{Light2d, Lighting2d, Masking, PostEffect, PostEffects, PostLayer, Shaders, SpriteImage, SpriteInstance, SpriteInstances, SpriteShader, TextureId, Unlit};
 use glam::Vec3;
 
 const SIZE: u32 = 64;
@@ -183,7 +183,7 @@ fn lighting_darkens_lit_sprites_and_lights_brighten_them() {
             world.insert_resource(Lighting2d {
                 enabled: true,
                 ambient: Vec3::splat(0.25),
-                lights: vec![Light2d { position: Vec2::new(16.0, 16.0), radius: 20.0, color: Vec3::ONE, intensity: 0.75 }],
+                lights: vec![Light2d { position: Vec2::new(16.0, 16.0), radius: 20.0, color: Vec3::ONE, intensity: 0.75, ..Default::default() }],
             });
             // 整屏白色、受光
             square(world, 0.0, 0.0, 64.0, Vec4::ONE);
@@ -228,11 +228,11 @@ fn post_effects_run_in_order() {
         shaders.set([("red".to_owned(), "fn post(p: Post) -> vec4f {\n    return vec4f(p.color.r, 0.0, 0.0, 1.0);\n}".to_owned())].into());
         world.insert_resource(PostEffects(vec![
             // 用不了的跳过，不打乱后面的
-            PostEffect { shader: "nope".into(), params: Vec4::ZERO },
-            PostEffect { shader: "grayscale".into(), params: Vec4::new(1.0, 0.0, 0.0, 0.0) },
-            PostEffect { shader: "red".into(), params: Vec4::ZERO },
+            PostEffect { shader: "nope".into(), params: Vec4::ZERO, ..Default::default() },
+            PostEffect { shader: "grayscale".into(), params: Vec4::new(1.0, 0.0, 0.0, 0.0), ..Default::default() },
+            PostEffect { shader: "red".into(), params: Vec4::ZERO, ..Default::default() },
             // 第三遍（什么都不改）：中间纹理要来回换着用，不能读写同一张
-            PostEffect { shader: "grayscale".into(), params: Vec4::ZERO },
+            PostEffect { shader: "grayscale".into(), params: Vec4::ZERO, ..Default::default() },
         ]));
     });
     // 去色：红 → 0.2126，绿 → 0.7152（线性），再只留红色通道
@@ -247,10 +247,10 @@ fn unknown_or_broken_post_effects_are_skipped() {
         square(world, 0.0, 0.0, 64.0, RED);
         world.resource_mut::<Shaders>().set([("bad".to_owned(), "fn post(p: Post) -> vec4f { return 1; }".to_owned())].into());
         world.insert_resource(PostEffects(vec![
-            PostEffect { shader: "nope".into(), params: Vec4::ZERO },
-            PostEffect { shader: "bad".into(), params: Vec4::ZERO },
+            PostEffect { shader: "nope".into(), params: Vec4::ZERO, ..Default::default() },
+            PostEffect { shader: "bad".into(), params: Vec4::ZERO, ..Default::default() },
             // 精灵着色器不能当后处理
-            PostEffect { shader: "flash".into(), params: Vec4::ZERO },
+            PostEffect { shader: "flash".into(), params: Vec4::ZERO, ..Default::default() },
         ]));
     });
     assert_eq!(at(&pixels, 32, 32), [255, 0, 0, 255]);
@@ -261,7 +261,7 @@ fn vignette_darkens_the_corners_only() {
     let Some(gfx) = gfx() else { return eprintln!("没有可用 GPU，跳过") };
     let pixels = render(&gfx, |world| {
         square(world, 0.0, 0.0, 64.0, Vec4::ONE);
-        world.insert_resource(PostEffects(vec![PostEffect { shader: "vignette".into(), params: Shaders::default_params("vignette") }]));
+        world.insert_resource(PostEffects(vec![PostEffect { shader: "vignette".into(), params: Shaders::default_params("vignette"), ..Default::default() }]));
     });
     assert_eq!(at(&pixels, 32, 32), gray(255));
     assert!(at(&pixels, 0, 0)[0] < 200, "{:?}", at(&pixels, 0, 0));
@@ -380,8 +380,8 @@ fn post_passes_count_as_draws() {
         app.add_systems(Startup, |world: &mut World| {
             square(world, 0.0, 0.0, 8.0, RED);
             world.insert_resource(PostEffects(vec![
-                PostEffect { shader: "grayscale".into(), params: Vec4::ONE },
-                PostEffect { shader: "vignette".into(), params: Vec4::ONE },
+                PostEffect { shader: "grayscale".into(), params: Vec4::ONE, ..Default::default() },
+                PostEffect { shader: "vignette".into(), params: Vec4::ONE, ..Default::default() },
             ]));
         });
         app.add_systems(Update, move |perf: Res<nge_ecs::Perf>| {
@@ -391,4 +391,232 @@ fn post_passes_count_as_draws() {
         });
     });
     assert_eq!(*draws.lock().unwrap(), Some(3), "一个精灵加两遍后处理");
+}
+
+/// 一张 1×1 的法线图（RGB 是存着的原值，按线性数据读）。
+fn normal_map(world: &mut World, n: Vec3) -> TextureId {
+    let c = ((n.normalize() * 0.5 + 0.5) * 255.0 + 0.5).to_array().map(|v| v as u8);
+    world.resource_mut::<Assets<Image>>().add_rgba(glam::UVec2::ONE, vec![c[0], c[1], c[2], 255]).unwrap()
+}
+
+fn lit(world: &mut World, lights: Vec<Light2d>) {
+    world.insert_resource(ClearColor(wgpu::Color::BLACK));
+    world.insert_resource(Lighting2d { enabled: true, ambient: Vec3::ZERO, lights });
+}
+
+fn srgb(linear: f32) -> u8 {
+    let c = if linear <= 0.003_130_8 { linear * 12.92 } else { 1.055 * linear.powf(1.0 / 2.4) - 0.055 };
+    (c.clamp(0.0, 1.0) * 255.0).round() as u8
+}
+
+/// 灯在画面中间、高度 0：法线朝着灯的一侧亮、背着的黑；镜像、转 180° 的法线跟着翻；朝外的法线按灯的高度算。
+#[test]
+fn normal_maps_light_the_side_facing_the_light() {
+    let Some(gfx) = gfx() else { return eprintln!("没有可用 GPU，跳过") };
+    // 左右各一块，`left` / `right` 是（宽，转角，法线）
+    let scene = |left: (f32, f32, Vec3), right: (f32, f32, Vec3), height: f32| {
+        move |world: &mut World| {
+            lit(world, vec![Light2d { position: Vec2::ZERO, radius: 100.0, height, ..Default::default() }]);
+            for (x, (w, rotation, n)) in [(-20.0, left), (20.0, right)] {
+                let n = normal_map(world, n);
+                let mut t = Transform2d::from_xy(x, 0.0);
+                t.rotation = rotation;
+                world.spawn((Sprite::color(Vec2::new(w, 16.0), Vec4::ONE), t, nge_render2d::NormalMap(n)));
+            }
+        }
+    };
+    // 像素 (12, 31) 的中心是世界 (−19.5, 0.5)，(51, 31) 是 (19.5, 0.5)
+    let p = Vec2::new(19.5, 0.5);
+    let fall = (1.0 - p.length() / 100.0).powi(2);
+    let facing = srgb(fall * p.x / p.length());
+    let pixels = render(&gfx, scene((16.0, 0.0, Vec3::X), (16.0, 0.0, Vec3::X), 0.0));
+    assert!(near(at(&pixels, 12, 31), gray(facing), 2), "朝着灯 {:?} ≈ {facing}", at(&pixels, 12, 31));
+    assert_eq!(at(&pixels, 51, 31), gray(0), "背着灯");
+    let pixels = render(&gfx, scene((16.0, std::f32::consts::PI, Vec3::X), (-16.0, 0.0, Vec3::X), 0.0));
+    assert_eq!(at(&pixels, 12, 31), gray(0), "转 180° 后朝左，背着灯");
+    assert!(near(at(&pixels, 51, 31), gray(facing), 2), "镜像后朝左，朝着灯 {:?}", at(&pixels, 51, 31));
+    let height = 20.0;
+    let pixels = render(&gfx, scene((16.0, 0.0, Vec3::Z), (16.0, 0.0, Vec3::Z), height));
+    let up = srgb(fall * height / p.extend(height).length());
+    assert!(near(at(&pixels, 12, 31), gray(up), 2), "朝外的法线 {:?} ≈ {up}", at(&pixels, 12, 31));
+}
+
+/// 方块挡住开了 shadows 的灯：后面黑，前面、旁边照常；挡光的方块自己照常亮；没开 shadows 的灯穿过去。
+#[test]
+fn occluders_cast_shadows_from_lights_that_want_them() {
+    let Some(gfx) = gfx() else { return eprintln!("没有可用 GPU，跳过") };
+    // `plain`：同一个位置再放一盏没开 shadows 的灯
+    let scene = |shadows: bool, plain: bool| {
+        move |world: &mut World| {
+            let light = |shadows| Light2d { position: Vec2::new(-24.0, 0.0), radius: 200.0, shadows, ..Default::default() };
+            lit(world, if plain { vec![light(true), light(false)] } else { vec![light(shadows)] });
+            square(world, 0.0, 0.0, 64.0, Vec4::ONE);
+            // 灯右边一根竖着的挡光块：2 × 12 放大两倍，画出来 4 × 24（多边形的写法在下面那块）
+            let mut bar = Transform2d::from_xy(-8.0, 0.0).with_z(1.0);
+            bar.scale = Vec2::splat(2.0);
+            world.spawn((Sprite::color(Vec2::new(2.0, 12.0), Vec4::ONE), bar, nge_render2d::Occluder2d::default()));
+            // 只有两个点的挡光线（没有精灵），在灯下方
+            world.spawn((Transform2d::from_xy(-24.0, -16.0), nge_render2d::Occluder2d::polygon([Vec2::new(-8.0, 0.0), Vec2::new(8.0, 0.0)])));
+        }
+    };
+    let pixels = render(&gfx, scene(true, false));
+    assert_eq!(at(&pixels, 40, 31), gray(0), "挡光块后面");
+    assert_eq!(at(&pixels, 40, 12), gray(0), "挡光块按放大后的大小挡");
+    assert!(at(&pixels, 40, 1)[0] > 0, "斜上方擦过挡光块上沿，没被挡");
+    assert!(at(&pixels, 2, 31)[0] > 0, "灯左边");
+    assert!(at(&pixels, 24, 31)[0] > 0, "挡光块自己照常亮");
+    assert_eq!(at(&pixels, 8, 60), gray(0), "线段下面");
+    let pixels = render(&gfx, scene(false, false));
+    assert!(at(&pixels, 40, 31)[0] > 0 && at(&pixels, 8, 60)[0] > 0, "没开 shadows 的灯穿过去");
+    let pixels = render(&gfx, scene(true, true));
+    assert!(at(&pixels, 40, 31)[0] > 0, "开了 shadows 的灯被挡，旁边没开的照常照过来");
+}
+
+/// 法线图还没加载好时当没有法线图画，不会因为白色的「法线」暗一下。
+#[test]
+fn normal_maps_not_loaded_yet_are_ignored() {
+    let Some(gfx) = gfx() else { return eprintln!("没有可用 GPU，跳过") };
+    let pixels = render(&gfx, |world| {
+        lit(world, vec![Light2d { position: Vec2::ZERO, radius: 100.0, ..Default::default() }]);
+        world.spawn((Sprite::color(Vec2::new(16.0, 16.0), Vec4::ONE), Transform2d::from_xy(-20.0, 0.0)));
+        world.spawn((Sprite::color(Vec2::new(16.0, 16.0), Vec4::ONE), Transform2d::from_xy(20.0, 0.0), nge_render2d::NormalMap(TextureId::new(999))));
+    });
+    assert_eq!(at(&pixels, 51, 31), at(&pixels, 12, 31), "和没有法线图的一样亮");
+}
+
+/// bloom：亮的方块往外晕开，远处和方块本身不变；低于阈值的不晕。
+#[test]
+fn bloom_spreads_bright_pixels_only() {
+    let Some(gfx) = gfx() else { return eprintln!("没有可用 GPU，跳过") };
+    let scene = |brightness: f32, bloom: bool| {
+        move |world: &mut World| {
+            world.insert_resource(ClearColor(wgpu::Color::BLACK));
+            square(world, 0.0, 0.0, 8.0, Vec4::new(brightness, brightness, brightness, 1.0));
+            if bloom {
+                world.insert_resource(PostEffects(vec![PostEffect { shader: "bloom".into(), params: Vec4::new(0.5, 1.0, 4.0, 0.0), ..Default::default() }]));
+            }
+        }
+    };
+    let plain = render(&gfx, scene(1.0, false));
+    let glow = render(&gfx, scene(1.0, true));
+    assert_eq!(at(&plain, 40, 32), gray(0));
+    assert!(at(&glow, 40, 32)[0] > 20, "方块旁边晕开 {:?}", at(&glow, 40, 32));
+    assert_eq!(at(&glow, 32, 32), gray(255), "方块本身");
+    assert!(at(&glow, 2, 2)[0] < at(&glow, 40, 32)[0] / 3, "远处的角暗得多 {:?}", at(&glow, 2, 2));
+    let dim = render(&gfx, scene(0.3, true));
+    assert_eq!(at(&dim, 40, 32), gray(0), "低于阈值不晕");
+}
+
+/// 背景层的后处理只改 z < 0 的精灵，前面的不变；只有背景层的后处理时不开整屏后处理。
+#[test]
+fn back_layer_post_leaves_the_front_alone() {
+    let Some(gfx) = gfx() else { return eprintln!("没有可用 GPU，跳过") };
+    let pixels = render(&gfx, |world| {
+        world.insert_resource(ClearColor(wgpu::Color::BLACK));
+        world.spawn((Sprite::color(Vec2::new(32.0, 64.0), RED), Transform2d::from_xy(-16.0, 0.0).with_z(-1.0)));
+        world.spawn((Sprite::color(Vec2::new(32.0, 64.0), RED), Transform2d::from_xy(16.0, 0.0)));
+        world.insert_resource(PostEffects(vec![PostEffect { shader: "grayscale".into(), params: Vec4::X, layer: PostLayer::Back }]));
+    });
+    // 线性红 (1, 0, 0) 去色是 0.2126，sRGB ≈ 127
+    assert!(near(at(&pixels, 16, 32), gray(127), 2), "背景去色 {:?}", at(&pixels, 16, 32));
+    assert_eq!(at(&pixels, 48, 32), [255, 0, 0, 255], "前面的不变");
+}
+
+/// 和 3D 混排（Interleave）时，有背景层的后处理照样把 z < 0 的精灵分出来先画、过后处理。
+#[test]
+fn back_layer_post_works_when_interleaved() {
+    let Some(gfx) = gfx() else { return eprintln!("没有可用 GPU，跳过") };
+    let pixels = render(&gfx, |world| {
+        world.insert_resource(nge_ecs::Interleave(true));
+        world.insert_resource(ClearColor(wgpu::Color::BLACK));
+        world.spawn((Sprite::color(Vec2::new(32.0, 64.0), RED), Transform2d::from_xy(-16.0, 0.0).with_z(-1.0)));
+        world.spawn((Sprite::color(Vec2::new(32.0, 64.0), RED), Transform2d::from_xy(16.0, 0.0)));
+        world.insert_resource(PostEffects(vec![PostEffect { shader: "grayscale".into(), params: Vec4::X, layer: PostLayer::Back }]));
+    });
+    assert!(near(at(&pixels, 16, 32), gray(127), 2), "背景去色 {:?}", at(&pixels, 16, 32));
+    assert_eq!(at(&pixels, 48, 32), [255, 0, 0, 255], "前面的不变");
+}
+
+/// 级数只改晕开的范围，不把亮度叠上去：6 级在方块旁边不比 2 级亮。
+#[test]
+fn bloom_levels_change_the_reach_not_the_brightness() {
+    let Some(gfx) = gfx() else { return eprintln!("没有可用 GPU，跳过") };
+    let glow = |levels: f32| {
+        render(&gfx, move |world| {
+            world.insert_resource(ClearColor(wgpu::Color::BLACK));
+            square(world, 0.0, 0.0, 8.0, Vec4::ONE);
+            world.insert_resource(PostEffects(vec![PostEffect { shader: "bloom".into(), params: Vec4::new(0.5, 1.0, levels, 0.0), ..Default::default() }]));
+        })
+    };
+    let (few, many) = (at(&glow(2.0), 32, 32)[0], at(&glow(6.0), 32, 32)[0]);
+    let (a, b) = (at(&glow(2.0), 38, 32)[0] as f32, at(&glow(6.0), 38, 32)[0] as f32);
+    assert_eq!((few, many), (255, 255));
+    // 不归一时 6 级比 2 级亮得多（各级加起来）；归一后同样的亮度摊到更大的范围，旁边不会更亮
+    assert!(a > 0.0 && b > 0.0 && b <= a, "旁边的亮度 2 级 {a}，6 级 {b}");
+}
+
+/// 背景层和整屏都有后处理、整屏那串里 bloom 和普通的混着：每遍的参数各是各的（uniform 不互相覆盖）。
+#[test]
+fn back_and_screen_post_chains_with_bloom_keep_their_own_params() {
+    let Some(gfx) = gfx() else { return eprintln!("没有可用 GPU，跳过") };
+    let pixels = render(&gfx, |world| {
+        world.insert_resource(ClearColor(wgpu::Color::BLACK));
+        world.resource_mut::<Shaders>().set([("scale".to_owned(), "fn post(p: Post) -> vec4f {\n    return vec4f(p.color.rgb * p.params.x, 1.0);\n}".to_owned())].into());
+        world.spawn((Sprite::color(Vec2::new(32.0, 64.0), RED), Transform2d::from_xy(-16.0, 0.0).with_z(-1.0)));
+        world.spawn((Sprite::color(Vec2::new(32.0, 64.0), RED), Transform2d::from_xy(16.0, 0.0)));
+        world.insert_resource(PostEffects(vec![
+            PostEffect { shader: "grayscale".into(), params: Vec4::X, layer: PostLayer::Back },
+            // 阈值 2：什么都不晕，原样过
+            PostEffect { shader: "bloom".into(), params: Vec4::new(2.0, 1.0, 3.0, 0.0), ..Default::default() },
+            PostEffect { shader: "scale".into(), params: Vec4::new(0.5, 0.0, 0.0, 0.0), ..Default::default() },
+        ]));
+    });
+    // 线性 0.2126 × 0.5 → sRGB ≈ 92；线性红 0.5 → sRGB 188
+    assert!(near(at(&pixels, 16, 32), gray(92), 2), "背景去色再减半 {:?}", at(&pixels, 16, 32));
+    assert!(near(at(&pixels, 48, 32), [188, 0, 0, 255], 2), "前面只减半 {:?}", at(&pixels, 48, 32));
+}
+
+/// 灯在方块的 45° 方向：对角线正好擦过两个角，也挡住（光不从角缝漏过去）。
+#[test]
+fn light_does_not_leak_through_occluder_corners() {
+    let Some(gfx) = gfx() else { return eprintln!("没有可用 GPU，跳过") };
+    let pixels = render(&gfx, |world| {
+        lit(world, vec![Light2d { position: Vec2::splat(-20.0), radius: 200.0, shadows: true, ..Default::default() }]);
+        square(world, 0.0, 0.0, 64.0, Vec4::ONE);
+        world.spawn((Transform2d::default(), nge_render2d::Occluder2d::polygon(nge_render2d_square(8.0))));
+    });
+    // 像素 (51, 12) 的中心是世界 (19.5, 19.5)，和灯的连线正好过 (−4, −4)、(4, 4) 两个角
+    assert_eq!(at(&pixels, 51, 12), gray(0));
+}
+
+fn nge_render2d_square(side: f32) -> Vec<Vec2> {
+    let h = side / 2.0;
+    vec![Vec2::new(-h, -h), Vec2::new(h, -h), Vec2::new(h, h), Vec2::new(-h, h)]
+}
+
+/// 灯高 0、像素正好在灯心：带法线图的也照亮，不出 NaN。
+#[test]
+fn normal_mapped_pixel_right_under_a_flat_light_is_lit() {
+    let Some(gfx) = gfx() else { return eprintln!("没有可用 GPU，跳过") };
+    let pixels = render(&gfx, |world| {
+        // 像素 (32, 31) 的中心是世界 (0.5, 0.5)
+        lit(world, vec![Light2d { position: Vec2::splat(0.5), radius: 100.0, height: 0.0, ..Default::default() }]);
+        let n = normal_map(world, Vec3::Z);
+        world.spawn((Sprite::color(Vec2::splat(16.0), Vec4::ONE), Transform2d::default(), nge_render2d::NormalMap(n)));
+    });
+    assert_eq!(at(&pixels, 32, 31), gray(255));
+}
+
+/// 没写大小、贴图还没加载好的挡光精灵先不挡（不当成 1 × 1 的小块）。
+#[test]
+fn occluders_without_a_size_yet_do_not_block() {
+    let Some(gfx) = gfx() else { return eprintln!("没有可用 GPU，跳过") };
+    let pixels = render(&gfx, |world| {
+        lit(world, vec![Light2d { position: Vec2::new(-24.0, 0.0), radius: 200.0, shadows: true, ..Default::default() }]);
+        square(world, 0.0, 0.0, 64.0, Vec4::ONE);
+        // 读不到的文件：句柄在（加载中 / 失败），一直没有尺寸
+        let pending = world.resource_scope(|world, mut server: Mut<AssetServer>| server.load(&mut world.resource_mut::<Assets<Image>>(), "no-such-file.png"));
+        world.spawn((Sprite::from_texture(pending), Transform2d::from_xy(-8.0, 0.0).with_z(1.0), nge_render2d::Occluder2d::default()));
+    });
+    assert!(at(&pixels, 40, 31)[0] > 0);
 }

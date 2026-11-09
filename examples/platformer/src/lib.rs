@@ -847,7 +847,7 @@ mod tests {
             }
             found += 1;
         }
-        assert_eq!(found, 2, "shimmer、starfield");
+        assert_eq!(found, 3, "shimmer、starfield、blur");
     }
 
     /// 终点的旗子带蒙皮和 wave 动画：播起来布的末端前后摆。

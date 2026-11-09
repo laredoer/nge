@@ -131,6 +131,10 @@ pub struct SpriteNode {
     /// 开着 2D 光照时不受光。
     #[serde(default)]
     pub unlit: bool,
+    /// 法线图（和贴图同样排布），受光时按表面朝向明暗（见 docs/render2d-more.md）。
+    pub normal: Option<String>,
+    /// 挡住开了 shadows 的灯：`true` 是精灵的矩形，或者本地坐标的多边形。
+    pub occluder: Option<crate::effects::OccluderNode>,
     /// 追某个节点（见 docs/ai.md）。
     pub chase: Option<crate::ai::ChaseNode>,
 }

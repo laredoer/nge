@@ -1,4 +1,5 @@
-// 平台跳跃的 2D 特效：金币扫过的亮光、终点上方的传送门、第三关的夜色（含回声）、被撞回去时闪白（见 docs/effects2d.md）。
+// 平台跳跃的 2D 特效：金币扫过的亮光、终点上方的传送门、第三关的夜色（含回声）、被撞回去时闪白（见 docs/effects2d.md）；
+// 亮处晕开、远景糊一点、夜里的石碑有凹凸、挡住角色的灯（见 docs/render2d-more.md）。
 import type { AudioNode, LightingNode, PostNode, SpriteNode } from "../../ts/nge";
 
 /** 自己写的着色器（WGSL）。 */
@@ -24,7 +25,39 @@ fn effect(e: Effect) -> vec4f {
     let base = mix(vec3f(0.25, 0.1, 0.45), vec3f(0.04, 0.02, 0.12), length(c) * 2.0);
     return vec4f(base + vec3f(star), 1.0);
 }`,
+  // 背景层的模糊：5×5 格取平均，params.x 是格子之间隔几个屏幕像素
+  blur: `fn post(p: Post) -> vec4f {
+    let step = p.params.x / p.size;
+    var sum = vec4f(0.0);
+    for (var i = -2; i <= 2; i++) {
+        for (var j = -2; j <= 2; j++) {
+            sum += sample(p.uv + vec2f(f32(i), f32(j)) * step);
+        }
+    }
+    return sum / 25.0;
+}`,
 };
+
+/** 每关都有的后处理：亮的地方（金币、终点的绿灯附近）往外晕开；只给背景层（远山、树）的轻微模糊。 */
+export const POST: PostNode[] = [
+  { shader: "bloom", params: [0.6, 0.9, 5, 0] },
+  { shader: "blur", params: [1.5, 0, 0, 0], layer: "back" },
+];
+
+/** 夜里那关的石碑：带法线图（灯从哪边来哪边亮），挡住角色的灯（开了 shadows），走过去时影子往外甩。没有碰撞体。 */
+export function stonesNear(x: number): SpriteNode[] {
+  return [4, 9].map((tiles, i) => ({
+    id: `stone-${i}`,
+    x: x + tiles * 32,
+    y: 24,
+    w: 24,
+    h: 48,
+    z: 1,
+    color: "#8a93a8",
+    normal: "asset:/@platformer/stone_n.png",
+    occluder: true,
+  }));
+}
 
 /** 金币：亮光每 1.6 秒扫一次。 */
 export const COIN_SHADER: Pick<SpriteNode, "shader" | "params"> = { shader: "shimmer", params: [1.6, 0, 0, 0] };
@@ -63,7 +96,8 @@ export function night(goal: SpriteNode): { lighting: LightingNode; post: PostNod
     lighting: {
       ambient: "#4a5578",
       lights: [
-        { follow: "player", y: 10, radius: 260, color: "#ffd9a0", intensity: 1.1 },
+        // 角色的灯低一点（石碑的凹凸明显），会被石碑挡住
+        { follow: "player", y: 10, radius: 260, color: "#ffd9a0", intensity: 1.1, height: 40, shadows: true },
         { x, y, radius: 140, color: "#6bcb77", intensity: 0.8 },
         { x, y: y + PORTAL_ABOVE, radius: 150, color: "#b388ff", intensity: 0.9 },
       ],

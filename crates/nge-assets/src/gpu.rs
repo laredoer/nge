@@ -10,7 +10,8 @@ use crate::server::Assets;
 
 #[derive(Resource, Default)]
 pub struct GpuImages {
-    views: Vec<Option<wgpu::TextureView>>,
+    /// 平常的视图，和按线性数据读的视图（sRGB 的贴图另开一个不带 sRGB 的；本来就不是 sRGB 的两个一样）。
+    views: Vec<Option<(wgpu::TextureView, wgpu::TextureView)>>,
 }
 
 impl GpuImages {
@@ -22,15 +23,30 @@ impl GpuImages {
         for (id, image) in images.iter() {
             let slot = &mut self.views[id.index() as usize];
             if slot.is_none() {
-                *slot = Some(upload(gfx, image));
+                let view = upload(gfx, image);
+                let linear = linear_view(&view);
+                *slot = Some((view, linear));
             }
         }
     }
 
     /// 还没加载完（或者没上传）的贴图返回 None，调用方用 [`ImageId::WHITE`] 代替，并且不要缓存。
     pub fn view(&self, id: ImageId) -> Option<&wgpu::TextureView> {
-        self.views.get(id.index() as usize).and_then(Option::as_ref)
+        self.views.get(id.index() as usize).and_then(Option::as_ref).map(|(v, _)| v)
     }
+
+    /// 按线性数据读的视图（法线图之类）：sRGB 的贴图取样时不做 sRGB → 线性的转换，拿到存着的原值。
+    pub fn linear_view(&self, id: ImageId) -> Option<&wgpu::TextureView> {
+        self.views.get(id.index() as usize).and_then(Option::as_ref).map(|(_, v)| v)
+    }
+}
+
+fn linear_view(view: &wgpu::TextureView) -> wgpu::TextureView {
+    let format = view.texture().format();
+    if !format.is_srgb() {
+        return view.clone();
+    }
+    view.texture().create_view(&wgpu::TextureViewDescriptor { format: Some(format.remove_srgb_suffix()), ..Default::default() })
 }
 
 /// 块压缩格式对应的 wgpu 格式和需要的设备特性。
@@ -73,6 +89,7 @@ fn upload(gfx: &Gfx, image: &Image) -> wgpu::TextureView {
 }
 
 fn texture(gfx: &Gfx, size: UVec2, levels: u32, format: wgpu::TextureFormat) -> wgpu::Texture {
+    let linear = [format.remove_srgb_suffix()];
     gfx.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("image"),
         size: wgpu::Extent3d { width: size.x, height: size.y, depth_or_array_layers: 1 },
@@ -81,7 +98,8 @@ fn texture(gfx: &Gfx, size: UVec2, levels: u32, format: wgpu::TextureFormat) -> 
         dimension: wgpu::TextureDimension::D2,
         format,
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-        view_formats: &[],
+        // sRGB 的贴图也能按线性数据读（法线图）
+        view_formats: if format.is_srgb() { &linear } else { &[] },
     })
 }
 

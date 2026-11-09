@@ -6,7 +6,10 @@ use bevy_ecs::prelude::*;
 use nge_core::{Gfx, wgpu};
 use nge_ecs::{PostProcess, Time};
 
-use crate::effects::{PostEffects, Shaders, post_source, validate};
+use glam::Vec4;
+
+use crate::bloom::Bloom;
+use crate::effects::{PostEffect, PostEffects, PostLayer, Shaders, post_source, validate};
 use crate::warm::Warm;
 
 /// 什么都不做的一遍：有后处理但一个都用不了时，把画好的原样搬到屏幕上。
@@ -22,9 +25,120 @@ struct PostGlobals {
     _pad: f32,
 }
 
+/// 整屏的后处理：只看 [`PostLayer::Screen`] 的。
 #[derive(Default)]
 pub(crate) struct PostRenderer {
+    chain: PostChain,
+}
+
+impl PostProcess for PostRenderer {
+    fn active(&self, world: &World) -> bool {
+        world.get_resource::<PostEffects>().is_some_and(|p| p.layer(PostLayer::Screen).next().is_some())
+    }
+
+    fn warm(&mut self, world: &World, gfx: &Gfx) {
+        self.chain.warm(gfx, world.resource::<Shaders>());
+    }
+
+    fn process(&mut self, world: &mut World, gfx: &Gfx, encoder: &mut wgpu::CommandEncoder, source: &wgpu::TextureView, target: &wgpu::TextureView) {
+        let effects: Vec<PostEffect> = world.resource::<PostEffects>().layer(PostLayer::Screen).cloned().collect();
+        let time = world.resource::<Time>().elapsed as f32;
+        let count = self.chain.run(gfx, world.resource::<Shaders>(), encoder, &effects, source, target, time);
+        world.resource_mut::<nge_ecs::RenderFrame>().count(count, 0);
+    }
+}
+
+/// 一串后处理：按顺序一遍遍画（两张中间纹理来回用），最后一遍画到目标上。整屏和背景层各用一个（uniform 不共用）。
+#[derive(Default)]
+pub(crate) struct PostChain {
     gpu: Option<Gpu>,
+}
+
+/// 一遍：着色器库里的（`None` 是原样搬），或者内置的 bloom。
+enum Pass<'a> {
+    Shader(Option<&'a str>, Vec4),
+    Bloom(Vec4),
+}
+
+impl PostChain {
+    /// 每帧调（这一帧用不用都调）：后台把库里的后处理编好，bloom 的管线也提前建好，用到时不卡。
+    pub fn warm(&mut self, gfx: &Gfx, shaders: &Shaders) {
+        let gpu = self.gpu.get_or_insert_with(|| Gpu::new(gfx));
+        gpu.sync(gfx, shaders, gfx.format);
+        gpu.bloom.get_or_insert_with(|| Bloom::new(gfx)).prepare(gfx, gpu.format);
+    }
+
+    /// 从 `source` 画到 `target`；用不了的跳过，一遍都用不了时原样搬。返回画了几遍。
+    #[allow(clippy::too_many_arguments)]
+    pub fn run(&mut self, gfx: &Gfx, shaders: &Shaders, encoder: &mut wgpu::CommandEncoder, effects: &[PostEffect], source: &wgpu::TextureView, target: &wgpu::TextureView, time: f32) -> u32 {
+        let gpu = self.gpu.get_or_insert_with(|| Gpu::new(gfx));
+        // 管线、中间纹理都按目标的格式（平常就是 gfx.format）
+        let format = target.texture().format();
+        gpu.sync(gfx, shaders, format);
+        let mut passes: Vec<Pass> = Vec::new();
+        for e in effects {
+            if e.shader == Shaders::BLOOM {
+                passes.push(Pass::Bloom(e.params));
+            } else if gpu.prepare(gfx, shaders, &e.shader) {
+                passes.push(Pass::Shader(Some(e.shader.as_str()), e.params));
+            }
+        }
+        if passes.is_empty() {
+            passes.push(Pass::Shader(None, Vec4::ZERO));
+        }
+        if passes.iter().any(|p| matches!(p, Pass::Shader(None, _))) && gpu.identity.is_none() {
+            gpu.identity = Some(build(&gfx.device, &gpu.pipeline_layout, format, "post identity", &post_source(IDENTITY)));
+        }
+        let size = target.texture().size();
+        let ping = gpu.ping_views(gfx, size, format);
+        gpu.used = 0;
+        let mut count = 0;
+        let mut input = source.clone();
+        for (i, pass) in passes.iter().enumerate() {
+            let output = if i + 1 == passes.len() { target.clone() } else { ping[i % 2].clone() };
+            match pass {
+                Pass::Bloom(params) => {
+                    let mut bloom = gpu.bloom.take().unwrap_or_else(|| Bloom::new(gfx));
+                    let pixels = glam::UVec2::new(size.width, size.height);
+                    count += bloom.draw(gfx, encoder, &input, &output, pixels, format, *params, &mut |bytes| gpu.uniform(gfx, bytes));
+                    gpu.bloom = Some(bloom);
+                }
+                Pass::Shader(name, params) => {
+                    let globals = PostGlobals { params: params.to_array(), size: [size.width as f32, size.height as f32], time, _pad: 0.0 };
+                    let uniform = gpu.uniform(gfx, bytemuck::bytes_of(&globals));
+                    let group = gfx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("post"),
+                        layout: &gpu.layout,
+                        entries: &[
+                            wgpu::BindGroupEntry { binding: 0, resource: uniform.as_entire_binding() },
+                            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&input) },
+                            wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&gpu.sampler) },
+                        ],
+                    });
+                    let pipeline = match name {
+                        Some(name) => gpu.pipelines[*name].as_ref().expect("只留了编好的"),
+                        None => gpu.identity.as_ref().expect("刚编好"),
+                    };
+                    let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("post"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &output,
+                            depth_slice: None,
+                            resolve_target: None,
+                            ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
+                        })],
+                        ..Default::default()
+                    });
+                    rp.set_pipeline(pipeline);
+                    rp.set_bind_group(0, &group, &[]);
+                    rp.draw(0..3, 0..1);
+                    count += 1;
+                }
+            }
+            input = output;
+        }
+        count
+    }
 }
 
 struct Gpu {
@@ -36,86 +150,17 @@ struct Gpu {
     identity: Option<wgpu::RenderPipeline>,
     generation: u64,
     format: wgpu::TextureFormat,
-    /// 两张来回用的中间纹理，跟着渲染目标的大小走。
+    /// 两张来回用的中间纹理，跟着渲染目标的大小、格式走。
     ping: Option<([wgpu::TextureView; 2], wgpu::Extent3d)>,
-    /// 每一遍一个 uniform。
+    /// uniform 池：同一帧里每一遍用一个新的（`used` 是这一帧用到第几个）。
     uniforms: Vec<wgpu::Buffer>,
+    used: usize,
+    bloom: Option<Bloom>,
     warned: HashSet<String>,
     /// 后台编好的（名字，管线），名字是 `None` 的是原样搬的那一遍。
     warm: Warm<(Option<String>, wgpu::RenderPipeline)>,
     /// 后台在为哪一代、哪种格式预热。
     warming: Option<(u64, wgpu::TextureFormat)>,
-}
-
-impl PostProcess for PostRenderer {
-    fn active(&self, world: &World) -> bool {
-        world.get_resource::<PostEffects>().is_some_and(|p| !p.0.is_empty())
-    }
-
-    fn warm(&mut self, world: &World, gfx: &Gfx) {
-        self.gpu.get_or_insert_with(|| Gpu::new(gfx)).sync(gfx, world.resource::<Shaders>());
-    }
-
-    fn process(&mut self, world: &mut World, gfx: &Gfx, encoder: &mut wgpu::CommandEncoder, source: &wgpu::TextureView, target: &wgpu::TextureView) {
-        let gpu = self.gpu.get_or_insert_with(|| Gpu::new(gfx));
-        gpu.sync(gfx, world.resource::<Shaders>());
-        let shaders = world.resource::<Shaders>();
-        let effects = &world.resource::<PostEffects>().0;
-        let passes: Vec<_> = effects.iter().filter(|e| gpu.prepare(gfx, shaders, &e.shader)).map(|e| (Some(e.shader.as_str()), e.params.to_array())).collect();
-        let passes = if passes.is_empty() { vec![(None, [0.0; 4])] } else { passes };
-        if passes.iter().any(|(name, _)| name.is_none()) && gpu.identity.is_none() {
-            gpu.identity = Some(build(&gfx.device, &gpu.pipeline_layout, gfx.format, "post identity", &post_source(IDENTITY)));
-        }
-
-        let count = passes.len() as u32;
-        let size = target.texture().size();
-        let ping = gpu.ping_views(gfx, size);
-        let time = world.resource::<Time>().elapsed as f32;
-        while gpu.uniforms.len() < passes.len() {
-            gpu.uniforms.push(gfx.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("post globals"),
-                size: size_of::<PostGlobals>() as u64,
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            }));
-        }
-        let mut input = source.clone();
-        for (i, (name, params)) in passes.iter().enumerate() {
-            let last = i + 1 == passes.len();
-            let output = if last { target.clone() } else { ping[i % 2].clone() };
-            let globals = PostGlobals { params: *params, size: [size.width as f32, size.height as f32], time, _pad: 0.0 };
-            gfx.queue.write_buffer(&gpu.uniforms[i], 0, bytemuck::bytes_of(&globals));
-            let group = gfx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("post"),
-                layout: &gpu.layout,
-                entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: gpu.uniforms[i].as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&input) },
-                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&gpu.sampler) },
-                ],
-            });
-            let pipeline = match name {
-                Some(name) => gpu.pipelines[*name].as_ref().expect("只留了编好的"),
-                None => gpu.identity.as_ref().expect("刚编好"),
-            };
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("post"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &output,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
-                })],
-                ..Default::default()
-            });
-            pass.set_pipeline(pipeline);
-            pass.set_bind_group(0, &group, &[]);
-            pass.draw(0..3, 0..1);
-            drop(pass);
-            input = output;
-        }
-        world.resource_mut::<nge_ecs::RenderFrame>().count(count, 0);
-    }
 }
 
 impl Gpu {
@@ -173,6 +218,8 @@ impl Gpu {
             format: gfx.format,
             ping: None,
             uniforms: Vec::new(),
+            used: 0,
+            bloom: None,
             warned: HashSet::new(),
             warm: Warm::new(),
             warming: None,
@@ -180,9 +227,9 @@ impl Gpu {
     }
 
     /// 每帧调：着色器库换了一代、目标格式变了时编过的全丢掉、后台重新预热；收下后台编好的。
-    fn sync(&mut self, gfx: &Gfx, shaders: &Shaders) {
-        if gfx.format != self.format {
-            self.format = gfx.format;
+    fn sync(&mut self, gfx: &Gfx, shaders: &Shaders, format: wgpu::TextureFormat) {
+        if format != self.format {
+            self.format = format;
             self.identity = None;
             self.pipelines.clear();
         }
@@ -214,7 +261,7 @@ impl Gpu {
 
     /// 后台把原样搬的那一遍和库里每个后处理的管线都编一遍。编不过的（多半是精灵着色器）跳过，用到时再当场校验、提示。
     fn start_warm(&mut self, gfx: &Gfx, shaders: &Shaders) {
-        let (device, layout, format) = (gfx.device.clone(), self.pipeline_layout.clone(), gfx.format);
+        let (device, layout, format) = (gfx.device.clone(), self.pipeline_layout.clone(), self.format);
         let library = shaders.library();
         self.warm.start(move |send| {
             if !send((None, build(&device, &layout, format, "post identity", &post_source(IDENTITY)))) {
@@ -246,7 +293,7 @@ impl Gpu {
                         self.warn(name, || format!("后处理 {name} 编不过（是不是精灵着色器？），跳过：{e}"));
                         None
                     }
-                    Ok(()) => Some(build(&gfx.device, &self.pipeline_layout, gfx.format, name, &source)),
+                    Ok(()) => Some(build(&gfx.device, &self.pipeline_layout, self.format, name, &source)),
                 }
             }
         };
@@ -269,9 +316,24 @@ impl Gpu {
         }
     }
 
-    fn ping_views(&mut self, gfx: &Gfx, size: wgpu::Extent3d) -> [wgpu::TextureView; 2] {
+    /// 这一帧下一个 uniform（32 字节），写上 `bytes`。
+    fn uniform(&mut self, gfx: &Gfx, bytes: &[u8]) -> wgpu::Buffer {
+        if self.used == self.uniforms.len() {
+            self.uniforms.push(gfx.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("post globals"),
+                size: size_of::<PostGlobals>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
+        }
+        let buffer = self.uniforms[self.used].clone();
+        self.used += 1;
+        gfx.queue.write_buffer(&buffer, 0, bytes);
+        buffer
+    }
+
+    fn ping_views(&mut self, gfx: &Gfx, size: wgpu::Extent3d, format: wgpu::TextureFormat) -> [wgpu::TextureView; 2] {
         let size = wgpu::Extent3d { depth_or_array_layers: 1, ..size };
-        let format = gfx.format;
         if self.ping.as_ref().is_none_or(|(views, s)| *s != size || views[0].texture().format() != format) {
             let view = || {
                 gfx.device
@@ -337,11 +399,22 @@ mod tests {
     }
 
     #[test]
+    fn screen_post_only_turns_on_for_screen_effects() {
+        let mut world = World::new();
+        let renderer = PostRenderer::default();
+        assert!(!renderer.active(&world));
+        world.insert_resource(PostEffects(vec![PostEffect { shader: "grayscale".into(), layer: PostLayer::Back, ..Default::default() }]));
+        assert!(!renderer.active(&world), "只有背景层的不开整屏后处理");
+        world.resource_mut::<PostEffects>().0.push(PostEffect { shader: "vignette".into(), ..Default::default() });
+        assert!(renderer.active(&world));
+    }
+
+    #[test]
     fn warms_the_identity_pass_and_every_post_shader() {
         let Some(gfx) = test_gfx(wgpu::TextureFormat::Rgba8UnormSrgb) else { return };
         let shaders = library();
         let mut gpu = Gpu::new(&gfx);
-        gpu.sync(&gfx, &shaders);
+        gpu.sync(&gfx, &shaders, gfx.format);
         gpu.settle();
         assert!(gpu.identity.is_some());
         assert_eq!(warmed(&gpu), ["dim", "grayscale", "pixelate", "vignette"]);
@@ -357,9 +430,9 @@ mod tests {
         let bgra = Gfx { device: srgb.device.clone(), queue: srgb.queue.clone(), format: wgpu::TextureFormat::Bgra8Unorm, viewport: srgb.viewport };
         let shaders = library();
         let mut gpu = Gpu::new(&srgb);
-        gpu.sync(&srgb, &shaders);
+        gpu.sync(&srgb, &shaders, srgb.format);
         gpu.settle();
-        gpu.sync(&bgra, &shaders);
+        gpu.sync(&bgra, &shaders, bgra.format);
         gpu.settle();
         assert!(gpu.identity.is_some());
         assert_eq!(warmed(&gpu), ["dim", "grayscale", "pixelate", "vignette"]);

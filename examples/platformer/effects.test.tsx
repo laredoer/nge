@@ -1,6 +1,6 @@
 // 平台跳跃的 2D 特效（见 docs/effects2d.md）：传送门的遮罩、第三关的夜色。着色器能不能编过在 Rust 那边测（src/lib.rs）。
 import { expect, test } from "nsh/test";
-import { levelAudio, night, PORTAL_R, portalOver, SHADERS } from "./effects";
+import { levelAudio, night, PORTAL_R, portalOver, POST, SHADERS, stonesNear } from "./effects";
 import { LEVELS } from "./levels";
 
 test("传送门在终点正上方：一个圆形遮罩，星空和星星只画在里面，边框不受遮罩", () => {
@@ -32,6 +32,21 @@ test("只有第三关是夜里：角色带灯，终点和传送门各一盏，�
   expect(lights[0].follow).toBe("player");
   expect(lights.slice(1).map((l) => [l.x, l.y! > goal.y!])).toEqual([[goal.x, false], [goal.x, true]]);
   expect(post.map((p) => p.shader)).toEqual(["vignette"]);
+  expect(lights[0].shadows).toBe(true);
+});
+
+test("每关都有 bloom 和背景层的模糊；夜里的石碑带法线图、挡光、没有碰撞体", () => {
+  expect(POST.map((p) => [p.shader, p.layer ?? "screen"])).toEqual([["bloom", "screen"], ["blur", "back"]]);
+  expect(SHADERS.blur === undefined).toBe(false);
+  const stones = stonesNear(96);
+  expect(stones.length).toBe(2);
+  for (const s of stones) {
+    expect(s.normal).toBe("asset:/@platformer/stone_n.png");
+    expect(s.occluder).toBe(true);
+    expect(s.body).toBe(undefined);
+    // 底边贴着地面（y = 0）
+    expect(s.y! - s.h! / 2).toBe(0);
+  }
 });
 
 test("夜里那关的音效有回声，别的关没有", () => {

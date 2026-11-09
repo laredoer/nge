@@ -114,7 +114,7 @@ pub(crate) fn sync_sprites(mut commands: Commands, scene: Res<Scene>, mut assets
             }
             None => entity.remove::<Repeat>(),
         };
-        crate::effects::apply_sprite(&mut entity, node);
+        crate::effects::apply_sprite(&mut entity, node, &mut assets);
         crate::ai::apply_chase(&mut entity, before, node);
         // anim 没变时接着播，不从头开始
         if before.map(|b| &b.anim) != Some(&node.anim) {

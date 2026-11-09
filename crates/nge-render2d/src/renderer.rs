@@ -1,7 +1,7 @@
 //! 精灵渲染器：每帧从 World 提取精灵 → 合批 → 一个实例缓冲 + 每批一次 draw。
 
 use std::cell::{OnceCell, RefCell};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use bevy_ecs::prelude::*;
@@ -12,11 +12,12 @@ use nge_ecs::{App, ClearColor, Input, Interleave, Plugin, PreUpdate, RenderFrame
 use nge_assets::{Assets, GpuImages, Image};
 
 use crate::assets::{Atlases, TextureId};
-use crate::batch::{Batch, Instance, Item, LIT, batch};
+use crate::batch::{BUMPY, Batch, Instance, Item, LIT, NO_SHADOW, batch};
 use crate::camera::{Camera2d, DrawAt, Parallax, Transform2d, drawn};
-use crate::effects::{Globals, Lighting2d, Masking, PostEffects, Shaders, SpriteShader, Unlit};
+use crate::effects::{Globals, Lighting2d, Masking, PostEffect, PostEffects, PostLayer, Shaders, SpriteShader, Unlit};
+use crate::occluders::{NormalMap, Occluder2d, outline, pack_edges, rect};
 use crate::pipes::{Mode, Pipes, STENCIL_FORMAT, pipe};
-use crate::post::PostRenderer;
+use crate::post::{PostChain, PostRenderer};
 use crate::repeat::{Repeat, copies};
 use crate::sprite::{Sprite, SpriteInstances};
 
@@ -73,8 +74,8 @@ struct Gpu {
     globals: wgpu::Buffer,
     globals_group: wgpu::BindGroup,
     sampler: wgpu::Sampler,
-    /// 按贴图编号缓存；贴图还没加载完的不缓存，先用白色贴图的。
-    textures: Vec<Option<wgpu::BindGroup>>,
+    /// 按（贴图，法线图）缓存；贴图还没加载完的不缓存，先用白色贴图的。
+    textures: HashMap<(TextureId, TextureId), wgpu::BindGroup>,
     instances: wgpu::Buffer,
     capacity: u64,
 }
@@ -87,9 +88,10 @@ enum Layer {
 }
 
 impl Layer {
-    /// 和 3D 混排时背景层不画，前面那层画全部（深度交给 3D 的深度缓冲比）。
-    fn contains(self, z: f32, interleave: bool) -> bool {
-        if interleave {
+    /// 和 3D 混排时背景层不画，前面那层画全部（深度交给 3D 的深度缓冲比）；
+    /// 但有背景层的后处理时（`back_post`）照样分两层：z < 0 的在 3D 之前画、总在 3D 后面。
+    fn contains(self, z: f32, interleave: bool, back_post: bool) -> bool {
+        if interleave && !back_post {
             return self == Layer::Front;
         }
         (z < 0.0) == (self == Layer::Back)
@@ -109,11 +111,21 @@ struct SpriteRenderer {
     warned: HashSet<Entity>,
     /// 提示过「这一层有只画在遮罩里 / 外的精灵、却没有遮罩」。
     warned_unmasked: bool,
+    /// 这一帧挡光的边（世界坐标）和打进 uniform 的样子（复用）。
+    edges: Vec<(Vec2, Vec2)>,
+    packed_edges: Vec<[f32; 4]>,
+    /// 提示过挡光的边太多。
+    warned_edges: bool,
+    /// 背景层自己的后处理和画到的离屏纹理。
+    post: PostChain,
+    post_target: Option<wgpu::TextureView>,
+    /// 提示过背景层的后处理做不了。
+    warned_post: bool,
 }
 
 impl SpriteRenderer {
     fn new(layer: Layer, pipes: SharedPipes) -> Self {
-        Self { layer, pipes, gpu: None, items: Vec::new(), instances: Vec::new(), batches: Vec::new(), copies: Vec::new(), warned: HashSet::new(), warned_unmasked: false }
+        Self { layer, pipes, gpu: None, items: Vec::new(), instances: Vec::new(), batches: Vec::new(), copies: Vec::new(), warned: HashSet::new(), warned_unmasked: false, edges: Vec::new(), packed_edges: Vec::new(), warned_edges: false, post: PostChain::default(), post_target: None, warned_post: false }
     }
 }
 
@@ -128,21 +140,43 @@ impl Renderer for SpriteRenderer {
         let gpu = self.gpu.get_or_insert_with(|| Gpu::new(gfx, &self.pipes));
         let shared = gpu.pipes.clone();
         let mut pipes = shared.get().expect("Gpu::new 建好了").borrow_mut();
-        let mut sprites = world.query::<(Entity, &Sprite, &Transform2d, Option<&DrawAt>, Option<&Parallax>, Option<&Repeat>, Option<&SpriteShader>, Option<&Masking>, Has<Unlit>)>();
+        let mut sprites = world.query::<(
+            Entity,
+            &Sprite,
+            &Transform2d,
+            Option<&DrawAt>,
+            Option<&Parallax>,
+            Option<&Repeat>,
+            Option<&SpriteShader>,
+            Option<&Masking>,
+            Has<Unlit>,
+            Option<&NormalMap>,
+            Has<Occluder2d>,
+        )>();
+        let mut occluders = world.query::<(&Occluder2d, &Transform2d, Option<&Sprite>, Option<&DrawAt>, Option<&Parallax>)>();
         let camera = world.query::<&Camera2d>().iter(world).next().copied().unwrap_or_default();
         world.resource_scope(|world, mut images: Mut<GpuImages>| images.sync(gfx, world.resource::<Assets<Image>>()));
         let (images, atlases, gpu_images) = (world.resource::<Assets<Image>>(), world.resource::<Atlases>(), world.resource::<GpuImages>());
         let extra = world.resource::<SpriteInstances>();
         let interleave = world.resource::<Interleave>().0;
+        let has_back_post = world.resource::<PostEffects>().layer(PostLayer::Back).next().is_some();
         // 3D 留下了深度（混排、前面有 3D 渲染器）时精灵按深度和模型比
         let scene_depth = world.resource::<RenderFrame>().depth().cloned();
         let depth = scene_depth.is_some();
         let shaders = world.resource::<Shaders>();
         pipes.sync(gfx, shaders, depth);
+        // 背景层自己那串后处理也每帧预热（用不用都热），切到有背景层后处理的关卡时不卡
+        if self.layer == Layer::Back {
+            self.post.warm(gfx, shaders);
+        }
 
         self.items.clear();
         let view = camera.visible(Vec2::from(gfx.viewport.size));
-        for (entity, sprite, transform, draw, parallax, repeat, shader, masking, unlit) in sprites.iter(world).filter(|(_, _, t, ..)| self.layer.contains(t.z, interleave)) {
+        let lighting = world.resource::<Lighting2d>();
+        let lit_scene = lighting.enabled;
+        for (entity, sprite, transform, draw, parallax, repeat, shader, masking, unlit, normal, occluder) in
+            sprites.iter(world).filter(|(_, _, t, ..)| self.layer.contains(t.z, interleave, has_back_post))
+        {
             let Transform2d { translation: pos, rotation, .. } = drawn(transform, draw, parallax, &camera);
             let region = atlases.region(images, sprite.image);
             let size = sprite.size.unwrap_or(region.size) * transform.scale;
@@ -162,9 +196,16 @@ impl Renderer for SpriteRenderer {
             let mode = Mode::of(masking);
             let module = shader.map_or(0, |s| pipes.module(gfx, shaders, &s.name));
             let params = shader.map_or([0.0; 4], |s| s.params.into());
+            // 法线图加载好了才用，不然当没有（不会暗一帧）
+            let normal = normal.map(|n| n.0).filter(|&n| !unlit && lit_scene && gpu_images.view(n).is_some());
+            let flags = match (unlit, normal.is_some(), occluder) {
+                (true, ..) => 0,
+                (false, bumpy, occluder) => LIT | if bumpy { BUMPY } else { 0 } | if occluder { NO_SHADOW } else { 0 },
+            };
             for &pos in &self.copies {
                 self.items.push(Item {
                     texture: region.texture,
+                    normal: normal.unwrap_or(TextureId::WHITE),
                     pipe: pipe(module, mode, depth),
                     mask: mode == Mode::Write,
                     instance: Instance {
@@ -173,7 +214,7 @@ impl Renderer for SpriteRenderer {
                         rotation_z: [rotation, transform.z],
                         uv: region.uv.into(),
                         color: to_rgba8(sprite.color),
-                        flags: if unlit { 0 } else { LIT },
+                        flags,
                         params,
                     },
                 });
@@ -181,7 +222,7 @@ impl Renderer for SpriteRenderer {
         }
         // 同一张图的额外实例通常是连着放的（一个发射器一批），只在图变了时重新查区域
         let mut last = None;
-        for &(image, sprite) in extra.items.iter().filter(|(_, s)| self.layer.contains(s.z, interleave)) {
+        for &(image, sprite) in extra.items.iter().filter(|(_, s)| self.layer.contains(s.z, interleave, has_back_post)) {
             let region = match last {
                 Some((i, region)) if i == image => region,
                 _ => atlases.region(images, image),
@@ -190,6 +231,7 @@ impl Renderer for SpriteRenderer {
             // 粒子、文字、调试线不受光
             self.items.push(Item {
                 texture: region.texture,
+                normal: TextureId::WHITE,
                 pipe: pipe(0, Mode::Normal, depth),
                 mask: false,
                 instance: Instance {
@@ -212,8 +254,31 @@ impl Renderer for SpriteRenderer {
             return;
         }
         batch(&mut self.items, &mut self.instances, &mut self.batches);
-        for id in std::iter::once(TextureId::WHITE).chain(self.batches.iter().map(|b| b.texture)) {
-            gpu.cache_texture(gfx, gpu_images, id);
+        for (color, normal) in std::iter::once((TextureId::WHITE, TextureId::WHITE)).chain(self.batches.iter().map(|b| (b.texture, b.normal))) {
+            gpu.cache_texture(gfx, gpu_images, color, normal);
+        }
+        // 挡光的边：只在有灯开了 shadows 时收
+        self.edges.clear();
+        if lighting.enabled && lighting.lights.iter().any(|l| l.shadows) {
+            for (occluder, transform, sprite, draw, parallax) in occluders.iter(world) {
+                let t = drawn(transform, draw, parallax, &camera);
+                if occluder.points.is_empty() {
+                    let Some(sprite) = sprite else { continue };
+                    let region = atlases.region(images, sprite.image);
+                    // 没写大小、贴图还在加载时不知道多大，先不挡
+                    if sprite.size.is_none() && images.size(region.texture).is_none() {
+                        continue;
+                    }
+                    let size = sprite.size.unwrap_or(region.size);
+                    outline(&rect(size), t.translation, t.rotation, t.scale, &mut self.edges);
+                } else {
+                    outline(&occluder.points, t.translation, t.rotation, t.scale, &mut self.edges);
+                }
+            }
+        }
+        let dropped = pack_edges(&self.edges, &lighting.lights, &mut self.packed_edges);
+        if dropped > 0 && !std::mem::replace(&mut self.warned_edges, true) {
+            log::warn!("挡光的边超过 {} 条，多出的 {dropped} 条不挡光", crate::MAX_OCCLUDER_EDGES);
         }
         for b in &self.batches {
             pipes.prepare(gfx, b.pipe);
@@ -221,7 +286,7 @@ impl Renderer for SpriteRenderer {
 
         let view_proj = camera.view_proj(Vec2::from(gfx.viewport.size));
         let time = world.resource::<Time>().elapsed as f32;
-        let globals = Globals::new(view_proj.to_cols_array(), scene_depth.as_ref().map(|d| d.view_proj), time, world.resource::<Lighting2d>());
+        let globals = Globals::new(view_proj.to_cols_array(), scene_depth.as_ref().map(|d| d.view_proj), time, lighting, &self.packed_edges);
         gfx.queue.write_buffer(&gpu.globals, 0, bytemuck::bytes_of(&globals));
         gpu.write_instances(gfx, &self.instances);
         // 混排时用 3D 的深度（读深度、清模板），否则用自己的模板缓冲
@@ -231,13 +296,28 @@ impl Renderer for SpriteRenderer {
         };
 
         let clear = *world.resource::<ClearColor>();
+        let back_post: Vec<PostEffect> = match self.layer {
+            Layer::Back if has_back_post => world.resource::<PostEffects>().layer(PostLayer::Back).cloned().collect(),
+            Layer::Back => Vec::new(),
+            Layer::Front => Vec::new(),
+        };
         let mut frame = world.resource_mut::<RenderFrame>();
         frame.count(self.batches.len() as u32, self.instances.len() as u32);
         let load = frame.color_load(clear);
+        // 背景层的后处理：先画到离屏纹理上，过完一串再画到目标上。前面已经有别的渲染器画过时不做（会盖掉它们）
+        let offscreen = match (back_post.is_empty(), load) {
+            (true, _) => None,
+            (false, wgpu::LoadOp::Clear(_)) => Some(post_target(&mut self.post_target, gfx, target)),
+            (false, _) => {
+                warn_once(&mut self.warned_post, "背景层的后处理要背景层第一个画：前面已经有渲染器画过，跳过");
+                None
+            }
+        };
+        let draw_to = offscreen.clone().unwrap_or_else(|| target.clone());
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("sprites"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: target,
+                view: &draw_to,
                 depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations { load, store: wgpu::StoreOp::Store },
@@ -249,21 +329,55 @@ impl Renderer for SpriteRenderer {
             }),
             ..Default::default()
         });
-        if self.batches.is_empty() {
-            return;
-        }
-        pass.set_stencil_reference(1);
-        pass.set_bind_group(0, &gpu.globals_group, &[]);
-        pass.set_vertex_buffer(0, gpu.instances.slice(..));
-        let mut current = None;
-        for b in &self.batches {
-            if current != Some(b.pipe) {
-                pass.set_pipeline(pipes.get(b.pipe));
-                current = Some(b.pipe);
+        if !self.batches.is_empty() {
+            pass.set_stencil_reference(1);
+            pass.set_bind_group(0, &gpu.globals_group, &[]);
+            pass.set_vertex_buffer(0, gpu.instances.slice(..));
+            let mut current = None;
+            for b in &self.batches {
+                if current != Some(b.pipe) {
+                    pass.set_pipeline(pipes.get(b.pipe));
+                    current = Some(b.pipe);
+                }
+                pass.set_bind_group(1, gpu.texture(b.texture, b.normal), &[]);
+                pass.draw(0..6, b.range.clone());
             }
-            pass.set_bind_group(1, gpu.texture(b.texture), &[]);
-            pass.draw(0..6, b.range.clone());
         }
+        drop(pass);
+        if let Some(source) = offscreen {
+            let time = world.resource::<Time>().elapsed as f32;
+            let count = self.post.run(gfx, world.resource::<Shaders>(), encoder, &back_post, &source, target, time);
+            world.resource_mut::<RenderFrame>().count(count, 0);
+        }
+    }
+}
+
+/// 背景层画到的离屏纹理，跟着目标的大小、格式走。
+fn post_target(slot: &mut Option<wgpu::TextureView>, gfx: &Gfx, target: &wgpu::TextureView) -> wgpu::TextureView {
+    let texture = target.texture();
+    let (size, format) = (wgpu::Extent3d { depth_or_array_layers: 1, ..texture.size() }, texture.format());
+    if slot.as_ref().is_none_or(|v| v.texture().size() != size || v.texture().format() != format) {
+        let view = gfx
+            .device
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some("back layer"),
+                size,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            })
+            .create_view(&Default::default());
+        *slot = Some(view);
+    }
+    slot.clone().expect("刚建好")
+}
+
+fn warn_once(warned: &mut bool, message: &str) {
+    if !std::mem::replace(warned, true) {
+        log::warn!("{message}");
     }
 }
 
@@ -295,7 +409,7 @@ impl Gpu {
         let instances = instance_buffer(device, INITIAL_CAPACITY);
         let texture_layout = pipes.texture_layout.clone();
         drop(pipes);
-        Self { pipes: shared.clone(), texture_layout, stencil: None, globals, globals_group, sampler, textures: Vec::new(), instances, capacity: INITIAL_CAPACITY }
+        Self { pipes: shared.clone(), texture_layout, stencil: None, globals, globals_group, sampler, textures: HashMap::new(), instances, capacity: INITIAL_CAPACITY }
     }
 
     /// 模板缓冲跟着渲染目标的大小走（返回的 view 是克隆，便宜）。
@@ -317,28 +431,27 @@ impl Gpu {
         self.stencil.as_ref().expect("刚创建").0.clone()
     }
 
-    /// 贴图加载好了就建 bind group 缓存起来；没加载好的什么也不做（画的时候用白色）。
-    fn cache_texture(&mut self, gfx: &Gfx, images: &GpuImages, id: TextureId) {
-        let index = id.index() as usize;
-        if self.textures.get(index).is_some_and(Option::is_some) {
+    /// 贴图和法线图都加载好了就建 bind group 缓存起来；没加载好的什么也不做（画的时候用白色）。
+    fn cache_texture(&mut self, gfx: &Gfx, images: &GpuImages, color: TextureId, normal: TextureId) {
+        if self.textures.contains_key(&(color, normal)) {
             return;
         }
-        let Some(view) = images.view(id) else { return };
-        if self.textures.len() <= index {
-            self.textures.resize_with(index + 1, || None);
-        }
-        self.textures[index] = Some(gfx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        // 法线图按线性数据读
+        let (Some(view), Some(normal_view)) = (images.view(color), images.linear_view(normal)) else { return };
+        let group = gfx.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("sprite texture"),
             layout: &self.texture_layout,
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(view) },
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(normal_view) },
             ],
-        }));
+        });
+        self.textures.insert((color, normal), group);
     }
 
-    fn texture(&self, id: TextureId) -> &wgpu::BindGroup {
-        self.textures.get(id.index() as usize).and_then(Option::as_ref).or(self.textures[0].as_ref()).expect("白色贴图总是先上传")
+    fn texture(&self, color: TextureId, normal: TextureId) -> &wgpu::BindGroup {
+        self.textures.get(&(color, normal)).or(self.textures.get(&(TextureId::WHITE, TextureId::WHITE))).expect("白色贴图总是先上传")
     }
 
     /// 写实例数据；容量不够时按两倍扩容。
@@ -375,6 +488,16 @@ mod tests {
         let (back, front) = sprite_layers();
         assert!(back.layer == Layer::Back && front.layer == Layer::Front);
         assert!(std::rc::Rc::ptr_eq(&back.pipes, &front.pipes));
+    }
+
+    #[test]
+    fn layers_split_by_z_unless_interleaved_without_back_post() {
+        let (back, front) = (Layer::Back, Layer::Front);
+        assert!(back.contains(-1.0, false, false) && !front.contains(-1.0, false, false));
+        assert!(front.contains(0.0, false, false) && !back.contains(0.0, false, false));
+        assert!(!back.contains(-1.0, true, false) && front.contains(-1.0, true, false), "混排时前面那层画全部");
+        assert!(back.contains(-1.0, true, true) && !front.contains(-1.0, true, true), "有背景层后处理时照样分两层");
+        assert!(front.contains(2.0, true, true) && !back.contains(2.0, true, true));
     }
 
     #[test]

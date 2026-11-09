@@ -2,10 +2,11 @@
 
 use bevy_ecs::prelude::*;
 use glam::{Vec2, Vec3, Vec4};
-use nge_render2d::{Camera2d, DrawAt, Light2d, Parallax, Lighting2d, Masking, PostEffect, PostEffects, Shaders, SpriteShader, Transform2d, Unlit, drawn};
+use nge_render2d::{Camera2d, DrawAt, Light2d, Lighting2d, Masking, NormalMap, Occluder2d, Parallax, PostEffect, PostEffects, PostLayer, Shaders, SpriteImage, SpriteShader, Transform2d, Unlit, drawn};
 use serde::Deserialize;
 
 use crate::protocol::{Color, Scene, SpriteNode};
+use crate::resolve::SceneAssets;
 use crate::sync::{Declared, SceneId};
 
 /// 精灵的 `masked`：只画在遮罩里还是遮罩外。
@@ -39,6 +40,28 @@ pub struct Light2dNode {
     #[serde(default = "one")]
     pub intensity: f32,
     pub follow: Option<String>,
+    /// 离画面多高，只影响带法线图的精灵；默认半径的 0.25 倍。
+    pub height: Option<f32>,
+    /// 被挡光的精灵挡住。
+    #[serde(default)]
+    pub shadows: bool,
+}
+
+/// 精灵的 `occluder`：`true` 是精灵的矩形，数组是本地坐标的多边形。
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(untagged)]
+pub enum OccluderNode {
+    Rect(bool),
+    Polygon(Vec<[f32; 2]>),
+}
+
+/// 后处理用在整屏还是只给背景层。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PostLayerNode {
+    #[default]
+    Screen,
+    Back,
 }
 
 /// `scene.post` 的一项。
@@ -47,6 +70,8 @@ pub struct Light2dNode {
 pub struct PostNode {
     pub shader: String,
     pub params: Option<[f32; 4]>,
+    #[serde(default)]
+    pub layer: PostLayerNode,
 }
 
 fn one() -> f32 {
@@ -58,8 +83,8 @@ fn params(shader: &str, params: Option<[f32; 4]>) -> Vec4 {
     params.map_or_else(|| Shaders::default_params(shader), Vec4::from)
 }
 
-/// 精灵节点上的 `shader`、`params`、`mask`、`masked`、`unlit`。
-pub(crate) fn apply_sprite(entity: &mut EntityCommands, node: &SpriteNode) {
+/// 精灵节点上的 `shader`、`params`、`mask`、`masked`、`unlit`、`normal`、`occluder`。
+pub(crate) fn apply_sprite(entity: &mut EntityCommands, node: &SpriteNode, assets: &mut SceneAssets) {
     match &node.shader {
         Some(name) => entity.insert(SpriteShader { name: name.clone(), params: params(name, node.params) }),
         None => {
@@ -87,13 +112,46 @@ pub(crate) fn apply_sprite(entity: &mut EntityCommands, node: &SpriteNode) {
     } else {
         entity.remove::<Unlit>();
     }
+    let normal = node.normal.as_deref().and_then(|name| match assets.texture(&node.id, Some(name), None, 0) {
+        // 没注册、没找到时 texture 给的是白色：当没有法线图，不然整块会按 (1, 1, 1) 的法线算
+        SpriteImage::Texture(t) if t != nge_render2d::TextureId::WHITE => Some(NormalMap(t)),
+        SpriteImage::Texture(_) => None,
+        SpriteImage::Atlas(..) => {
+            log::warn!("节点 {:?} 的法线图 {name:?} 是图集：法线图要一整张图，当没有", node.id);
+            None
+        }
+    });
+    match normal {
+        Some(n) => entity.insert(n),
+        None => entity.remove::<NormalMap>(),
+    };
+    let occluder = match &node.occluder {
+        None | Some(OccluderNode::Rect(false)) => None,
+        Some(OccluderNode::Rect(true)) => Some(Occluder2d::default()),
+        Some(OccluderNode::Polygon(points)) if points.len() < 2 => {
+            log::warn!("节点 {:?} 的 occluder 不到两个点，不挡光", node.id);
+            None
+        }
+        Some(OccluderNode::Polygon(points)) => Some(Occluder2d::polygon(points.iter().map(|&p| Vec2::from(p)).collect::<Vec<_>>())),
+    };
+    match occluder {
+        Some(o) => entity.insert(o),
+        None => entity.remove::<Occluder2d>(),
+    };
 }
 
 /// `scene.shaders` 和 `scene.post`（场景变了才跑）。
 pub(crate) fn sync_effects(scene: Res<Scene>, mut shaders: ResMut<Shaders>, mut post: ResMut<PostEffects>) {
     // 一样的不算改，不会重新编译
     shaders.set(scene.shaders.clone());
-    let effects: Vec<PostEffect> = scene.post.iter().map(|p| PostEffect { shader: p.shader.clone(), params: params(&p.shader, p.params) }).collect();
+    let effects: Vec<PostEffect> = scene.post.iter().map(|p| PostEffect {
+            shader: p.shader.clone(),
+            params: params(&p.shader, p.params),
+            layer: match p.layer {
+                PostLayerNode::Screen => PostLayer::Screen,
+                PostLayerNode::Back => PostLayer::Back,
+            },
+        }).collect();
     if post.0 != effects {
         post.0 = effects;
     }
@@ -125,6 +183,8 @@ pub(crate) fn lighting(
                 radius: l.radius,
                 color: l.color.map_or(Vec3::ONE, |c| c.0.truncate()),
                 intensity: l.intensity,
+                height: l.height.unwrap_or(l.radius * 0.25),
+                shadows: l.shadows,
             }
         })
         .collect();
@@ -182,8 +242,8 @@ mod tests {
         assert_eq!(
             world.resource::<PostEffects>().0,
             vec![
-                PostEffect { shader: "vignette".into(), params: Shaders::default_params("vignette") },
-                PostEffect { shader: "plain".into(), params: Vec4::X },
+                PostEffect { shader: "vignette".into(), params: Shaders::default_params("vignette"), ..Default::default() },
+                PostEffect { shader: "plain".into(), params: Vec4::X, ..Default::default() },
             ]
         );
         // 别的东西变了、着色器没变：不算新一代（不重新编译）
@@ -211,8 +271,8 @@ mod tests {
         let lighting = app.world().resource::<Lighting2d>().clone();
         assert!(lighting.enabled);
         assert_eq!(lighting.ambient, Vec3::ZERO);
-        assert_eq!(lighting.lights[0], Light2d { position: Vec2::new(50.0, 30.0), radius: 80.0, color: Vec3::X, intensity: 2.0 }, "跟着精灵，x、y 是偏移");
-        assert_eq!(lighting.lights[1], Light2d { position: Vec2::new(5.0, 6.0), radius: 30.0, color: Vec3::ONE, intensity: 1.0 }, "默认白色、强度 1");
+        assert_eq!(lighting.lights[0], Light2d { position: Vec2::new(50.0, 30.0), radius: 80.0, color: Vec3::X, intensity: 2.0, height: 20.0, shadows: false }, "跟着精灵，x、y 是偏移；高度默认半径的 0.25");
+        assert_eq!(lighting.lights[1], Light2d { position: Vec2::new(5.0, 6.0), radius: 30.0, color: Vec3::ONE, intensity: 1.0, height: 7.5, shadows: false }, "默认白色、强度 1");
         // 精灵挪了，灯跟着
         app.world_mut().query::<&mut Transform2d>().iter_mut(app.world_mut()).next().unwrap().translation.x = 70.0;
         frame(&mut app, None);
@@ -229,6 +289,45 @@ mod tests {
         assert_eq!(app.world().resource::<Lighting2d>().lights[0].position, Vec2::new(0.0, 20.0), "精灵不存在时 x、y 当世界坐标");
         frame(&mut app, Some(json!({ "sprites": [{ "id": "hero", "w": 10 }] })));
         assert_eq!(*app.world().resource::<Lighting2d>(), Lighting2d::default(), "去掉 lighting 就关掉");
+    }
+
+    #[test]
+    fn normal_maps_occluders_light_heights_and_back_layer_post() {
+        let mut app = app();
+        frame(&mut app, Some(json!({
+            "sprites": [
+                { "id": "wall", "w": 10, "normal": "asset:/@g/wall_n.png", "occluder": true },
+                { "id": "post", "w": 10, "occluder": [[0, 0], [4, 0], [4, 8]] },
+                { "id": "line", "w": 10, "occluder": [[0, 0]] },
+                { "id": "typo", "w": 10, "normal": "no_such_texture" },
+            ],
+            "lighting": { "lights": [{ "radius": 40, "height": 3, "shadows": true }] },
+            "post": [{ "shader": "bloom" }, { "shader": "grayscale", "layer": "back" }],
+        })));
+        let world = app.world_mut();
+        let parts: Vec<(String, bool, Option<Occluder2d>)> = world
+            .query::<(&SceneId, Has<NormalMap>, Option<&Occluder2d>)>()
+            .iter(world)
+            .map(|(id, n, o)| (id.0.clone(), n, o.cloned()))
+            .collect();
+        let find = |id: &str| parts.iter().find(|p| p.0 == id).unwrap().clone();
+        assert_eq!(find("wall"), ("wall".into(), true, Some(Occluder2d::default())));
+        assert_eq!(find("post").2, Some(Occluder2d::polygon([Vec2::ZERO, Vec2::new(4.0, 0.0), Vec2::new(4.0, 8.0)])));
+        assert_eq!(find("line").2, None, "不到两个点不挡光");
+        assert!(!find("typo").1, "没注册的法线图当没有（不挂白色的）");
+        let light = app.world().resource::<Lighting2d>().lights[0];
+        assert_eq!((light.height, light.shadows), (3.0, true));
+        assert_eq!(
+            app.world().resource::<PostEffects>().0,
+            vec![
+                PostEffect { shader: "bloom".into(), params: Vec4::new(0.8, 1.0, 5.0, 0.0), layer: PostLayer::Screen },
+                PostEffect { shader: "grayscale".into(), params: Shaders::default_params("grayscale"), layer: PostLayer::Back },
+            ]
+        );
+        frame(&mut app, Some(json!({ "sprites": [{ "id": "wall", "w": 10, "occluder": false }] })));
+        let world = app.world_mut();
+        let (_, n, o) = world.query::<(&SceneId, Has<NormalMap>, Has<Occluder2d>)>().single(world).unwrap();
+        assert!(!n && !o, "去掉就拿掉");
     }
 
     #[test]

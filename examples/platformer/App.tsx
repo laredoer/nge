@@ -1,6 +1,6 @@
 import { batch, effect, mount, type NativeComponentRef, platform, signal, Text, View } from "nsh";
 import { floatText, gameView, KeyButton, push, saved, saveSlots, sound, tween, type Scene, type SpriteNode } from "../../ts/nge";
-import { COIN_SHADER, FLASH, FLASH_MS, levelAudio, night, portalOver, SHADERS } from "./effects";
+import { COIN_SHADER, FLASH, FLASH_MS, levelAudio, night, portalOver, POST, SHADERS, stonesNear } from "./effects";
 import { levelKey, otherLocale, strings } from "./strings";
 import { NEW_SAVE, nextSlot, SAVE_MIGRATIONS, SAVE_VERSION, saveDataOf, saveSummary, SLOTS } from "./savefile";
 import { hpBar, outOfHearts, TITLE_HOLD_MS, titleBubble } from "./hud";
@@ -172,6 +172,8 @@ function App() {
     background: LEVELS[level()].night ? "#0b0f1e" : "#1b2233",
     shaders: SHADERS,
     ...(LEVELS[level()].night ? night(now().goal) : {}),
+    // 夜里的压暗在前，bloom 和背景模糊每关都有
+    post: [...(LEVELS[level()].night ? night(now().goal).post : []), ...POST],
     audio: { preload: [COIN_SOUND, WIN_SOUND], ...levelAudio(LEVELS[level()].night ?? false) },
     physics: { gravity: [0, -1800] },
     camera: { follow: "player", y: 60, smooth: 0.15, bounds: { left: 0, right: now().right, bottom: -160, top: (ROWS - 1) * TILE } },
@@ -189,6 +191,7 @@ function App() {
     tilemaps: now().tilemaps,
     sprites: [
       ...BACKDROP,
+      ...(LEVELS[level()].night ? stonesNear(3 * TILE) : []),
       { id: "player", x: 3 * TILE, y: 16, w: 24, h: 32, z: 5, color: "#ff7a59", body: { kind: "character", friction: 0, collide: true }, ...(flashing() ? FLASH : {}) },
       // 金币自己发光，夜里也不暗
       ...now().coins.filter((c) => !taken().includes(c.id)).map(
