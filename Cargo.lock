@@ -2266,11 +2266,17 @@ dependencies = [
 name = "nge-net"
 version = "0.1.0"
 dependencies = [
+ "bevy_ecs",
  "futures-util",
+ "glam 0.34.2",
  "js-sys",
  "log",
+ "nge-core",
+ "nge-ecs",
+ "nge-render2d",
  "postcard",
  "serde",
+ "serde_json",
  "tokio",
  "tokio-tungstenite",
  "wasm-bindgen",
@@ -2417,6 +2423,7 @@ dependencies = [
  "nge-audio",
  "nge-core",
  "nge-ecs",
+ "nge-net",
  "nge-particles",
  "nge-physics2d",
  "nge-physics3d",

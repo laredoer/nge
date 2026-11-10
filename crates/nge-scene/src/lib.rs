@@ -10,12 +10,13 @@ mod attach;
 mod audio;
 mod behave;
 mod camera;
-#[cfg(not(all(feature = "physics3d", feature = "ai")))]
+#[cfg(not(all(feature = "physics3d", feature = "ai", feature = "net")))]
 mod disabled;
 mod effects;
 mod joints;
 mod level;
 mod match2d;
+mod net;
 mod particles3d;
 mod nodes;
 mod physics;
@@ -48,6 +49,7 @@ pub use effects::{Light2dNode, LightingNode, MaskedNode, PostNode};
 pub use joints::{JointKindName, JointNode, MotorNode};
 pub use level::{LEVEL_START, LevelStart};
 pub use nodes::{AmbientNode, AnchorName, BURST, Burst, Camera3dNode, EmitterNode, FLOAT_TEXT, FloatText, LightKind, LightNode, ModelNode, Particles, TextNode};
+pub use net::{NetNode, REMOTE_PREFIX, parse_remote};
 pub use physics::{BodyKind, BodyNode, COLLIDE, Collide, PUSH, PhysicsNode, Push, ShapeName};
 pub use physics3d::{Body3dKind, ModelBody, Physics3dNode, Shape3dName};
 pub use protocol::{Bounds, CameraNode, Color, SCENE, Scene, SpriteNode, TAP, Tap};
@@ -128,7 +130,9 @@ impl Plugin for ScenePlugin {
         physics3d::register(app);
         #[cfg(feature = "ai")]
         ai::register(app);
-        #[cfg(not(all(feature = "physics3d", feature = "ai")))]
+        #[cfg(feature = "net")]
+        net::register(app);
+        #[cfg(not(all(feature = "physics3d", feature = "ai", feature = "net")))]
         app.add_systems(PreUpdate, disabled::warn_disabled.run_if(resource_changed::<Scene>));
         if !app.is_plugin_added::<AudioPlugin>() {
             app.add_plugins(AudioPlugin::default());
@@ -207,6 +211,18 @@ pub(crate) mod testing {
 
     /// 4×2 的图集，每格 8×8。
     pub fn app() -> App {
+        build(|_| {})
+    }
+
+    /// 先加 `plugin`（比如带假连接的联网插件）再加场景插件。
+    #[allow(dead_code)]
+    pub fn app_with(plugin: impl nge_ecs::Plugin) -> App {
+        build(move |app| {
+            app.add_plugins(plugin);
+        })
+    }
+
+    fn build(extra: impl FnOnce(&mut App)) -> App {
         let mut png = Vec::new();
         image::RgbaImage::new(32, 16).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
         let source = nge_assets::MemorySource::default().with(BEEP, nge_audio::testing::wav(1.0));
@@ -214,8 +230,9 @@ pub(crate) mod testing {
         app.add_plugins(nge_assets::AssetPlugin::new().source(std::sync::Arc::new(source)))
             .add_plugins(nge_audio::AudioPlugin::mock())
             .add_plugins(Render3dPlugin)
-            .add_plugins(Render2dPlugin)
-            .add_plugins(ScenePlugin::new().texture("plain", &png).atlas("grid", &png, Grid { cols: 4, rows: 2 }));
+            .add_plugins(Render2dPlugin);
+        extra(&mut app);
+        app.add_plugins(ScenePlugin::new().texture("plain", &png).atlas("grid", &png, Grid { cols: 4, rows: 2 }));
         app
     }
 

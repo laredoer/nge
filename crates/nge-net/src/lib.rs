@@ -2,12 +2,21 @@
 
 pub mod backoff;
 pub mod client;
+pub mod interp;
 pub mod limit;
 pub mod link;
+#[cfg(feature = "ecs")]
+mod plugin;
 pub mod proto;
+#[cfg(feature = "ecs")]
+mod sync;
 #[doc(hidden)]
 pub mod testing;
 
 pub use client::{ClientEvent, NetClient, SendError, Status, Target};
 pub use link::{Connector, Frame, Link, LinkEvent};
+#[cfg(feature = "ecs")]
+pub use plugin::{DEFAULT_URL, NET, NET_SEND, Net, NetEvent, NetPlugin, NetSend, NetSet, NetWire};
 pub use proto::{Peer, PeerId};
+#[cfg(feature = "ecs")]
+pub use sync::{KeepOnLeave, NetSync, Remote, Remotes};

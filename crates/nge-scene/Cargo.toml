@@ -18,6 +18,7 @@ nge-particles.workspace = true
 nge-physics2d.workspace = true
 nge-physics3d.workspace = true
 nge-audio.workspace = true
+nge-net = { workspace = true, optional = true, features = ["ecs"] }
 bevy_ecs.workspace = true
 glam.workspace = true
 serde.workspace = true
@@ -25,11 +26,14 @@ serde_json.workspace = true
 log.workspace = true
 
 [features]
-default = ["physics3d", "ai"]
+default = ["physics3d", "ai", "net"]
 # 3D 物理（rapier3d）和追击（寻路）的系统；不用的游戏关掉，浏览器上的包能小一些（见 docs/web.md）
 physics3d = []
 ai = []
+# 联网（场景的 net，见 docs/networking.md）
+net = ["dep:nge-net"]
 
 [dev-dependencies]
+nge-net = { workspace = true, features = ["ecs"] }
 image.workspace = true
 pollster.workspace = true

@@ -55,6 +55,8 @@ pub struct Scene {
     /// 关卡：换了值就整个重建场景（见 docs/levels.md）。数字和字符串都行。
     #[serde(deserialize_with = "crate::level::level_id")]
     pub level: Option<String>,
+    /// 联网（见 docs/networking.md）：写了就连中继。
+    pub net: Option<crate::net::NetNode>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
