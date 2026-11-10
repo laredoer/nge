@@ -7,6 +7,8 @@ export interface Command {
   apply(level: LevelFile): LevelFile;
   revert(level: LevelFile): LevelFile;
   merge?: string;
+  /** 和紧接着的同类命令合成一个（不是一层套一层，连着合并几万次也不会太深）；合不了返回 undefined。 */
+  combine?(next: Command): Command | undefined;
 }
 
 /** 历史里的一步：`serial` 每次执行（含合并）都是新的，保存时记下栈顶的，判断有没有改过。 */
@@ -54,8 +56,9 @@ export function execute(ed: Editor, cmd: Command, now = Date.now()): Editor {
   const h = ed.history;
   const last = h.done.at(-1);
   const level = cmd.apply(ed.level);
-  const merging = last !== undefined && cmd.merge !== undefined && last.cmd.merge === cmd.merge && now - last.at <= MERGE_MS;
-  const step: Step = merging ? { cmd: { ...chain(last.cmd.label, [last.cmd, cmd]), merge: cmd.merge }, serial: h.next, at: now } : { cmd, serial: h.next, at: now };
+  const combined = last !== undefined && cmd.merge !== undefined && last.cmd.merge === cmd.merge && now - last.at <= MERGE_MS ? last.cmd.combine?.(cmd) : undefined;
+  const merging = combined !== undefined;
+  const step: Step = { cmd: combined ?? cmd, serial: h.next, at: now };
   const kept = merging ? h.done.slice(0, -1) : h.done;
   const all = [...kept, step];
   const done = all.slice(-HISTORY_LIMIT);
@@ -80,8 +83,18 @@ export function redo(ed: Editor): Editor {
   return { level: next.cmd.apply(ed.level), history: { ...h, done: [...h.done, next], undone: h.undone.slice(0, -1) } };
 }
 
+/** 现在的位置（开始保存时记下，写完再 `markSavedAt`）。 */
+export function savePoint(ed: Editor): number {
+  return top(ed.history);
+}
+
+/** 记下保存时的位置是 `serial`：写盘时又改了的，写完还是脏的。 */
+export function markSavedAt(ed: Editor, serial: number): Editor {
+  return { ...ed, history: { ...ed.history, savedAt: serial } };
+}
+
 export function markSaved(ed: Editor): Editor {
-  return { ...ed, history: { ...ed.history, savedAt: top(ed.history) } };
+  return markSavedAt(ed, top(ed.history));
 }
 
 export function isDirty(ed: Editor): boolean {

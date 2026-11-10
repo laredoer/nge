@@ -176,3 +176,25 @@ test("单个属性的检查：数字范围、步长不限、布尔、选项", ()
   expect(checkProp(color, "#a0b1c2")).toBeNull();
   expect(checkProp(color, "红")).toContain("颜色");
 });
+
+test("属性名只能是字母开头的字母、数字、下划线，__proto__ 这种不收", () => {
+  const withProps = (props: unknown) => ({ ...sample(), entities: [{ id: "e1", type: "coin", x: 0, y: 0, props }] });
+  expect(errorsOf(withProps(JSON.parse('{"__proto__": 5}')))[0]).toMatch(/props/);
+  expect(errorsOf(formatLevel(sample()).replace('"type": "coin"', '"type": "coin", "props": { "__proto__": 5 }'))[0]).toMatch(/props/);
+  expect(errorsOf(withProps({ "a b": 1 }))[0]).toMatch(/props/);
+  expect(errorsOf(withProps({ ["k".repeat(40)]: 1 }))[0]).toMatch(/props/);
+  expect(parseLevel(withProps({ patrol_2: 1 })).ok).toBe(true);
+});
+
+test("瓦片层：最多 16 层，id 不重复；行数不对时不往下查每一格", () => {
+  const l = sample();
+  expect(errorsOf({ ...l, tiles: Array.from({ length: 17 }, (_, i) => ({ ...l.tiles[0], id: `t${i}` })) })[0]).toMatch(/最多 16 层/);
+  expect(errorsOf({ ...l, tiles: [l.tiles[0], l.tiles[0]] })[0]).toMatch(/重复/);
+  const wrong = { ...l, tiles: [{ ...l.tiles[0], rows: 2, data: [[1, 1, 1, "x"], [1], [1]] }] };
+  expect(errorsOf(wrong)).toEqual(["tiles[0].data 要有 2 行"]);
+});
+
+test("实体 id 只能有字母、数字、- 和 _", () => {
+  const l = sample();
+  for (const id of ["a:to", "a b", "中"]) expect(errorsOf({ ...l, entities: [{ id, type: "coin", x: 0, y: 0 }] })[0]).toMatch(/id/);
+});

@@ -143,3 +143,23 @@ test("存取：保存是格式化的文本，打开时校验，坏文件报错�
   expect(missing.ok).toBe(false);
   if (!missing.ok) expect(missing.errors[0]).toContain("nope.json");
 });
+
+test("拖动中被拖的实体没了：拖动作废，不抛错", () => {
+  const c = ctx();
+  const down = pointerDown(c, at(0, 0));
+  const moving = pointerMove({ ...c, selection: ["e1"] }, down.drag, at(30, 0)).drag;
+  expect(moving.kind).toBe("move");
+  const gone = { ...c, level: { ...c.level, entities: c.level.entities.filter((e) => e.id !== "e1") } };
+  expect(pointerMove(gone, moving, at(40, 0)).drag.kind).toBe("idle");
+  expect(pointerUp(gone, moving, at(40, 0)).command).toBe(undefined);
+});
+
+test("按下以后换了工具：松手按按下时的工具算", () => {
+  const c = ctx({ tool: "place", placeType: "coin" });
+  const down = pointerDown(c, at(50, 50));
+  const up = pointerUp({ ...c, tool: "select" }, down.drag, at(50, 50));
+  expect(up.command).not.toBe(undefined);
+  const sel = ctx();
+  const press = pointerDown(sel, at(300, 300));
+  expect(pointerUp({ ...sel, tool: "place", placeType: "coin" }, press.drag, at(300, 300)).command).toBe(undefined);
+});

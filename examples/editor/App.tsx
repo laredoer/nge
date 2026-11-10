@@ -38,7 +38,6 @@ function bindKeys(s: Store) {
       "mod+c": s.copy,
       "mod+v": s.paste,
       "mod+a": s.selectAll,
-      escape: () => (s.panel() !== null ? s.panel.set(null) : s.selection.set([])),
       "mod+s": () => void s.save(),
       "mod+shift+s": () => void s.refreshFiles().then(() => s.panel.set("saveAs")),
       "mod+o": () => void s.refreshFiles().then(() => s.panel.set("open")),
@@ -55,6 +54,8 @@ function bindKeys(s: Store) {
     },
     { when: "notEditing" },
   );
+  // Esc 在文件名输入框里也要能关掉文件面板
+  keymap.bind("escape", () => (s.panel() !== null ? s.panel.set(null) : s.selection.set([])), { when: "always" });
   // 方向键微移一点，加 shift 挪一格；没选中时平移视图
   keymap.bind(
     {

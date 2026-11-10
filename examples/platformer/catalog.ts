@@ -1,5 +1,5 @@
 // 平台跳跃关卡文件里的实体类型（见 docs/editor.md）：名字、默认尺寸、属性。只有数据，编辑器和 `fromFile` 都用它。
-import type { Entity, PropSpec, PropValue, TypeSpec } from "../../ts/level";
+import { checkProp, type Entity, type PropSpec, type PropValue, type TypeSpec } from "../../ts/level";
 
 export interface EntityType extends TypeSpec {
   label: string;
@@ -9,8 +9,8 @@ export interface EntityType extends TypeSpec {
   color: string;
   /** 站在地上的东西：y 固定在这里（包围盒的中心），拖动只改 x。 */
   fixedY?: number;
-  /** 能在属性面板里改宽高。 */
-  resizable?: boolean;
+  /** 能在属性面板里改的尺寸：`"w"` 只能改宽（移动平台的高在游戏里固定是 16），`"wh"` 宽高都能改。 */
+  resizable?: "w" | "wh";
 }
 
 const MODELS = ["crate.glb", "flag.glb", "jelly.glb"];
@@ -24,7 +24,7 @@ export const TYPES: Record<string, EntityType> = {
     label: "移动平台",
     size: [64, 16],
     color: "#c08552",
-    resizable: true,
+    resizable: "w",
     props: [
       { key: "dx", label: "横向距离", kind: "number", min: -2000, max: 2000, default: 128 },
       { key: "dy", label: "纵向距离", kind: "number", min: -2000, max: 2000, default: 0 },
@@ -34,7 +34,7 @@ export const TYPES: Record<string, EntityType> = {
   crate: { label: "3D 箱子", size: [40, 40], color: "#a0703c", props: [], min: 1, max: 1 },
   swing: { label: "铁链", size: [20, 92], color: "#8a8f9c", props: [], max: 1 },
   goal: { label: "终点", size: [16, 80], color: "#6bcb77", props: [], min: 1, max: 1 },
-  ramp: { label: "斜坡", size: [96, 32], color: "#8a6f4e", resizable: true, props: [{ key: "down", label: "往右下降", kind: "bool", default: false }] },
+  ramp: { label: "斜坡", size: [96, 32], color: "#8a6f4e", resizable: "wh", props: [{ key: "down", label: "往右下降", kind: "bool", default: false }] },
   tower: { label: "箱子堆", size: [48, 44], color: "#d9a066", fixedY: 22, props: [], max: 1 },
   jelly: { label: "果冻", size: [48, 30], color: "#7fd1c7", fixedY: 15, props: [], max: 1 },
   light: {
@@ -79,10 +79,12 @@ export const TILESET = {
   ],
 };
 
-/** 实体的宽高：自己写了用自己的，不然用类型的默认值（不认识的类型按 16 × 16）。 */
+/** 实体的宽高：能改的用自己写的，不然用类型的默认值（不认识的类型按 16 × 16）。和游戏里一样：不能改的写了也不算。 */
 export function sizeOf(e: Entity): [number, number] {
-  const [w, h] = TYPES[e.type]?.size ?? [16, 16];
-  return [e.w ?? w, e.h ?? h];
+  const spec = TYPES[e.type];
+  const [w, h] = spec?.size ?? [16, 16];
+  const r = spec?.resizable;
+  return [r !== undefined ? (e.w ?? w) : w, r === "wh" ? (e.h ?? h) : h];
 }
 
 /** 包围盒。 */
@@ -96,10 +98,11 @@ export function propSpec(type: string, key: string): PropSpec | undefined {
   return TYPES[type]?.props.find((p) => p.key === key);
 }
 
-/** 属性值：没写用默认值。 */
+/** 属性值：没写或不合规（类型不对、超范围、不在选项里）用默认值。 */
 export function propOf<T extends PropValue>(e: Entity, key: string): T {
+  const spec = propSpec(e.type, key);
   const v = e.props?.[key];
-  return (v !== undefined ? v : propSpec(e.type, key)?.default) as T;
+  return (v !== undefined && (spec === undefined || checkProp(spec, v) === null) ? v : spec?.default) as T;
 }
 
 /** 放到 (x, y)：站在地上的类型 y 固定。 */

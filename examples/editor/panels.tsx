@@ -180,7 +180,7 @@ function EntityPanel(p: { store: Store; id: string }) {
       <Field id="field-x" label="x" value={num("x")} commit={(t) => s.setField(p.id, "x", t)} />
       <Field id="field-y" label="y" value={num("y")} commit={(t) => s.setField(p.id, "y", t)} disabled={spec()?.fixedY !== undefined} />
       {spec()?.resizable ? <Field id="field-w" label="宽" value={num("w")} commit={(t) => s.setField(p.id, "w", t)} /> : null}
-      {spec()?.resizable ? <Field id="field-h" label="高" value={num("h")} commit={(t) => s.setField(p.id, "h", t)} /> : null}
+      {spec()?.resizable === "wh" ? <Field id="field-h" label="高" value={num("h")} commit={(t) => s.setField(p.id, "h", t)} /> : null}
       {(spec()?.props ?? []).map((prop) => {
         const { key, label } = prop;
         const value = () => (e() === undefined ? "" : String(propOf(e()!, key)));

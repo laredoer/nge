@@ -32,6 +32,8 @@ export interface Ctx {
   /** 画哪一层瓦片。 */
   layer: number;
   boundsOf: BoundsOf;
+  /** 画的先后（点选时深的先命中）；不给按列表顺序。 */
+  depthOf?: (e: Entity, index: number) => number;
   sizeOf(e: Entity): [number, number];
   /** 放到 (x, y)（站在地上的类型 y 固定）。 */
   place(e: Entity, x: number, y: number): Entity;
@@ -41,7 +43,7 @@ export interface Ctx {
 type Pos = { id: string; x: number; y: number };
 export type Drag =
   | { kind: "idle" }
-  | { kind: "press"; start: [number, number]; hit: string | null }
+  | { kind: "press"; start: [number, number]; hit: string | null; tool: ToolName }
   | { kind: "move"; start: [number, number]; lead: string; origins: Pos[]; targets: Pos[] }
   | { kind: "box"; start: [number, number]; end: [number, number] }
   | { kind: "pan"; start: [number, number]; view: CameraView }
@@ -77,12 +79,12 @@ export function pointerDown(c: Ctx, p: [number, number]): Out {
     case "erase":
       return { drag: paint(c, { kind: "paint", last: null, stroke: NEW_STROKE }, p) };
     case "place":
-      return { drag: { kind: "press", start: p, hit: null } };
+      return { drag: { kind: "press", start: p, hit: null, tool: "place" } };
     case "select": {
-      const hit = hitTest(c.level.entities, c.boundsOf, world(c, p), PICK_SLOP / c.view.zoom);
+      const hit = hitTest(c.level.entities, c.boundsOf, world(c, p), PICK_SLOP / c.view.zoom, c.depthOf);
       // 按在没选中的东西上：先只选中它（接着拖就是拖它）
       const selection = hit !== null && !c.selection.includes(hit) ? [hit] : undefined;
-      return { drag: { kind: "press", start: p, hit }, selection };
+      return { drag: { kind: "press", start: p, hit, tool: "select" }, selection };
     }
   }
 }
@@ -91,14 +93,17 @@ export function pointerDown(c: Ctx, p: [number, number]): Out {
 function moved(c: Ctx, drag: Extract<Drag, { kind: "move" }>, p: [number, number]): Drag {
   const [sx, sy] = world(c, drag.start);
   const [wx, wy] = world(c, p);
-  const lead = drag.origins.find((o) => o.id === drag.lead)!;
-  const leadEntity = c.level.entities.find((e) => e.id === drag.lead)!;
+  const lead = drag.origins.find((o) => o.id === drag.lead);
+  const leadEntity = c.level.entities.find((e) => e.id === drag.lead);
+  // 拖着的东西没了（被删掉、撤销了）：拖动作废
+  if (lead === undefined || leadEntity === undefined) return IDLE;
   const [tx, ty] = snapPoint([lead.x + wx - sx, lead.y + wy - sy], c.grid, c.sizeOf(leadEntity));
   const [dx, dy] = [tx - lead.x, ty - lead.y];
-  const targets = drag.origins.map((o) => {
-    const e = c.level.entities.find((x) => x.id === o.id)!;
+  const targets = drag.origins.flatMap((o) => {
+    const e = c.level.entities.find((x) => x.id === o.id);
+    if (e === undefined) return [];
     const placed = c.place(e, o.x + dx, o.y + dy);
-    return { id: o.id, x: placed.x, y: placed.y };
+    return [{ id: o.id, x: placed.x, y: placed.y }];
   });
   return { ...drag, targets };
 }
@@ -114,7 +119,7 @@ export function pointerMove(c: Ctx, drag: Drag, p: [number, number]): Out {
     case "move":
       return { drag: moved(c, drag, p) };
     case "press": {
-      if (c.tool !== "select" || !far(drag.start, p)) return { drag };
+      if (drag.tool !== "select" || !far(drag.start, p)) return { drag };
       if (drag.hit === null) return { drag: { kind: "box", start: world(c, drag.start), end: world(c, p) } };
       const ids = c.selection.includes(drag.hit) ? c.selection : [drag.hit];
       const origins = c.level.entities.filter((e) => ids.includes(e.id)).map((e) => ({ id: e.id, x: e.x, y: e.y }));
@@ -135,11 +140,14 @@ export function pointerUp(c: Ctx, drag: Drag, p: [number, number]): Out {
     case "box":
       return { drag: IDLE, selection: boxSelect(c.level.entities, c.boundsOf, last.start, last.end) };
     case "move": {
-      const changed = last.targets.some((t, i) => t.x !== last.origins[i].x || t.y !== last.origins[i].y);
+      const changed = last.targets.some((t) => {
+        const o = last.origins.find((x) => x.id === t.id);
+        return o === undefined || t.x !== o.x || t.y !== o.y;
+      });
       return { drag: IDLE, command: changed ? moveTo(c.level, last.targets) : undefined };
     }
     case "press": {
-      if (c.tool === "place") {
+      if (last.tool === "place") {
         if (c.placeType === null) return { drag: IDLE };
         const id = nextId(c.level);
         const draft = c.make(c.placeType, id, 0, 0);

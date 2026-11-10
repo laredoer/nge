@@ -18,6 +18,23 @@ const empty = (): Preview => ({ sprites: [], models: [], lights: [] });
 /** 预览节点的 id：带上实体的 id，一个实体可能有好几个节点。 */
 export const previewId = (e: Entity, part = "") => `ed:${e.id}${part === "" ? "" : `:${part}`}`;
 
+/** 场景树里每往后一个，精灵的 z 多这么多：同一种东西靠后的画在上面，5000 个加起来也不到 1，不会盖过别的类型（类型之间差 1）。 */
+export const ORDER_STEP = 1 / 8192;
+/** 只有 3D 模型的实体点选时算多深（模型和精灵按深度混排，这里取中间）。 */
+const MODEL_DEPTH = 3;
+
+/** 实体在场景树第 `index` 个时的预览：精灵的 z 按顺序错开一点。 */
+export function previewAt(e: Entity, index: number): Preview {
+  const p = previewOf(e);
+  return index === 0 ? p : { ...p, sprites: p.sprites.map((s) => ({ ...s, z: (s.z ?? 0) + index * ORDER_STEP })) };
+}
+
+/** 点选用的深度：画在最上面的那个精灵的 z（只有模型的按 3），加上场景树里的顺序。 */
+export function depthOf(e: Entity, index: number): number {
+  const zs = previewOf(e).sprites.map((s) => s.z ?? 0);
+  return (zs.length === 0 ? MODEL_DEPTH : Math.max(...zs)) + index * ORDER_STEP;
+}
+
 export function previewOf(e: Entity): Preview {
   const id = previewId(e);
   const [w, h] = sizeOf(e);

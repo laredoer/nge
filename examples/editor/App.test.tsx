@@ -115,3 +115,11 @@ test("不能试玩的关卡不进试玩：删掉终点，状态栏说原因", as
   expect(app.shows("tree-e1")).toBe(true);
   expect(has(app.texts(), "终点要有 1 个")).toBe(true);
 });
+
+test("文件名输入框有焦点时 Esc 也能关掉文件面板", async () => {
+  const app = await start();
+  await app.press("saveAs");
+  await app.type("file-name", "abc");
+  await app.keyboard.press("escape");
+  expect(app.shows("file-name")).toBe(false);
+});

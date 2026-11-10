@@ -19,12 +19,18 @@ export function parseInteger(text: string, min: number, max: number): Parsed<num
   return r.ok && !Number.isInteger(r.value) ? { ok: false, error: "要是整数" } : r;
 }
 
+/** 名字（实体的、关卡的）：不超过 256 个字，没有控制字符；合规返回 null。 */
+export function nameError(text: string): string | null {
+  return text.length > 256 || /[\u0000-\u001f\u007f]/.test(text) ? "名字太长或有控制字符" : null;
+}
+
 /** 属性面板上一个输入框的改动：`field` 是 name、x、y、w、h，或 `prop:<属性名>`。 */
 export function fieldPatch(e: Entity, field: string, text: string): Parsed<Partial<Entity>> {
   const spec = TYPES[e.type];
   switch (field) {
     case "name": {
-      if (text.length > 256 || /[\u0000-\u001f\u007f]/.test(text)) return { ok: false, error: "名字太长或有控制字符" };
+      const why = nameError(text);
+      if (why !== null) return { ok: false, error: why };
       return { ok: true, value: { name: text.trim() === "" ? undefined : text } };
     }
     case "x":
@@ -35,7 +41,7 @@ export function fieldPatch(e: Entity, field: string, text: string): Parsed<Parti
     }
     case "w":
     case "h": {
-      if (!spec?.resizable) return { ok: false, error: "这种东西的大小是固定的" };
+      if (spec?.resizable === undefined || (field === "h" && spec.resizable !== "wh")) return { ok: false, error: field === "h" && spec?.resizable === "w" ? "这种东西的高是固定的" : "这种东西的大小是固定的" };
       const r = parseNumber(text, 1, MAX_COORD);
       return r.ok ? { ok: true, value: { [field]: r.value } } : r;
     }
@@ -58,7 +64,11 @@ export function fieldPatch(e: Entity, field: string, text: string): Parsed<Parti
   return why !== null ? { ok: false, error: why } : { ok: true, value: { props: { ...e.props, [key]: value } } };
 }
 
+/** 编辑器里瓦片层最多多大（比文件格式的上限小：每次拖动都要重建场景）。 */
+export const EDIT_MAX_COLS = Math.min(1000, MAX_COLS);
+export const EDIT_MAX_ROWS = Math.min(200, MAX_ROWS);
+
 /** 关卡设置里瓦片层的列数、行数。 */
 export function parseSize(text: string, rows: boolean): Parsed<number> {
-  return parseInteger(text, 1, rows ? MAX_ROWS : MAX_COLS);
+  return parseInteger(text, 1, rows ? EDIT_MAX_ROWS : EDIT_MAX_COLS);
 }

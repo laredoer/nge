@@ -1,9 +1,9 @@
 // 编辑时游戏视图里的场景（docs/editor.md）：实体按游戏的样子画，加上网格、选中框、框选框；不动、没有刚体。
-import { toTilemap, type LevelFile } from "../../ts/level";
-import type { CameraView, LightNode, ModelNode, Scene, SpriteNode } from "../../ts/nge";
+import { toTilemap, type LevelFile, type TileLayer } from "../../ts/level";
+import type { CameraView, LightNode, ModelNode, Scene, SpriteNode, TilemapNode } from "../../ts/nge";
 import { boundsOf } from "../platformer/catalog";
 import { night, SHADERS } from "../platformer/effects";
-import { previewId, previewOf } from "../platformer/preview";
+import { previewAt, previewId } from "../platformer/preview";
 
 /** 网格线一个方向最多画几条：再多就太密，不画。 */
 export const MAX_GRID_LINES = 160;
@@ -42,12 +42,24 @@ export function gridLines(view: CameraView, size: [number, number], grid: number
   return out;
 }
 
+/** 瓦片层 → 引擎的瓦片地图：按层对象缓存，拖动实体时瓦片层没变，不用每次都摊平一遍。 */
+const tilemaps = new WeakMap<TileLayer, TilemapNode>();
+function tilemapOf(t: TileLayer): TilemapNode {
+  let node = tilemaps.get(t);
+  if (node === undefined) {
+    // 瓦片不要碰撞体：编辑时用不上
+    node = { ...toTilemap(t), solid: [] };
+    tilemaps.set(t, node);
+  }
+  return node;
+}
+
 export function editorScene(s: SceneInput): Scene {
   const sprites: SpriteNode[] = [];
   const models: ModelNode[] = [];
   const lights: LightNode[] = [SUN];
-  for (const e of s.level.entities) {
-    const p = previewOf(e);
+  for (const [i, e] of s.level.entities.entries()) {
+    const p = previewAt(e, i);
     sprites.push(...p.sprites);
     models.push(...p.models);
     lights.push(...p.lights);
@@ -80,8 +92,7 @@ export function editorScene(s: SceneInput): Scene {
     camera3d: { match2d: true, interleave: true },
     lights,
     ambient: { brightness: 0.35 },
-    // 瓦片不要碰撞体：编辑时用不上
-    tilemaps: s.level.tiles.map((t) => ({ ...toTilemap(t), solid: [] })),
+    tilemaps: s.level.tiles.map(tilemapOf),
     sprites,
     models,
     ...(lighting === undefined ? {} : { lighting, post: dark!.post }),

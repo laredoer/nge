@@ -9,16 +9,20 @@ export interface Box {
 }
 export type BoundsOf = (e: Entity) => Box;
 
-/** 点中的实体：从最上面（列表靠后）往下找第一个包围盒含这个点的；`minHalf` 是最小可点的半宽（太小的东西也点得到）。 */
-export function hitTest(entities: Entity[], boundsOf: BoundsOf, [x, y]: [number, number], minHalf = 0): string | null {
+/** 点中的实体：包围盒含这个点的里面画在最上面的（`depth` 最大的，一样大时列表靠后的）；`minHalf` 是最小可点的半宽（太小的东西也点得到）。 */
+export function hitTest(entities: Entity[], boundsOf: BoundsOf, [x, y]: [number, number], minHalf = 0, depth: (e: Entity, index: number) => number = (_, i) => i): string | null {
+  let best: { id: string; d: number } | null = null;
   for (let i = entities.length - 1; i >= 0; i--) {
     const b = boundsOf(entities[i]);
     const [cx, cy] = [(b.left + b.right) / 2, (b.bottom + b.top) / 2];
     const hw = Math.max((b.right - b.left) / 2, minHalf);
     const hh = Math.max((b.top - b.bottom) / 2, minHalf);
-    if (Math.abs(x - cx) <= hw && Math.abs(y - cy) <= hh) return entities[i].id;
+    if (Math.abs(x - cx) > hw || Math.abs(y - cy) > hh) continue;
+    // 从后往前找：一样深时先找到的（列表里靠后的）留着
+    const d = depth(entities[i], i);
+    if (best === null || d > best.d) best = { id: entities[i].id, d };
   }
-  return null;
+  return best?.id ?? null;
 }
 
 /** 框选：包围盒和 a、b 两个角围成的框相交的，按列表顺序。 */

@@ -41,14 +41,36 @@ export function removeEntities(level: LevelFile, ids: string[]): Command {
 
 /** 把一组实体放到新位置。`merge` 给了时相邻的同类移动合成一步（方向键微移）。 */
 export function moveTo(level: LevelFile, targets: { id: string; x: number; y: number }[], merge?: string): Command {
-  const to = new Map(targets.map((t) => [t.id, t]));
+  const to = new Map(targets.map((t) => [t.id, { x: t.x, y: t.y }]));
   const from = new Map(level.entities.filter((e) => to.has(e.id)).map((e) => [e.id, { x: e.x, y: e.y }]));
-  const place = (pos: Map<string, { x: number; y: number }>) => (l: LevelFile) =>
+  return moves(from, to, merge);
+}
+
+type Positions = Map<string, { x: number; y: number }>;
+const MOVES = Symbol("moves");
+type MoveCommand = Command & { [MOVES]: { from: Positions; to: Positions } };
+
+/** 移动命令：`from` 是撤回去的位置，`to` 是挪到的位置；合并时 from 留最早的、to 用最新的。 */
+function moves(from: Positions, to: Positions, merge?: string): MoveCommand {
+  const place = (pos: Positions) => (l: LevelFile) =>
     mapEntities(l, (e) => {
       const p = pos.get(e.id);
       return p === undefined || !from.has(e.id) ? e : { ...e, x: p.x, y: p.y };
     });
-  return { label: "移动", apply: place(to), revert: place(from), merge };
+  return {
+    label: "移动",
+    apply: place(to),
+    revert: place(from),
+    merge,
+    [MOVES]: { from, to },
+    combine: (next) => {
+      const n = (next as Partial<MoveCommand>)[MOVES];
+      if (n === undefined) return undefined;
+      const f = new Map(from);
+      for (const [id, p] of n.from) if (!f.has(id)) f.set(id, p);
+      return moves(f, new Map([...to, ...n.to]), merge);
+    },
+  };
 }
 
 /** 改一个实体的字段（名字、尺寸、属性……）；值是 undefined 的字段去掉。 */

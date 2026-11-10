@@ -2,7 +2,7 @@
 import { expect, test } from "nsh/test";
 import { parseLevel } from "../../ts/level";
 import { memoryStore } from "./files";
-import { blankLevel, createStore, type Ask } from "./store";
+import { blankLevel, createStore, EDIT_MAX_COLS, EDIT_MAX_ROWS, type Ask } from "./store";
 
 const setup = (answers: (string | null)[] = [], files: Record<string, string> = {}) => {
   const disk = memoryStore(files);
@@ -118,7 +118,7 @@ test("关卡设置：改名、夜里、宽高（不合规的不改）", () => {
   store.setLevelField("name", "试一关");
   store.setLevelField("night", "true");
   expect([store.level().name, store.level().night]).toEqual(["试一关", true]);
-  expect(store.setLevelField("cols", "0")).toBe("要在 1 到 2000 之间");
+  expect(store.setLevelField("cols", "0")).toBe(`要在 1 到 ${EDIT_MAX_COLS} 之间`);
   expect(store.setLevelField("rows", "20")).toBe(null);
   expect([store.level().tiles[0].cols, store.level().tiles[0].rows]).toEqual([60, 20]);
   store.undo();
@@ -233,7 +233,7 @@ test("画布：刷子画一笔是一步，框选框画在场景里", () => {
   expect(store.sceneInput().box).toBe(null);
 });
 
-test("属性：站在地上的不能改高度，固定大小的不能改宽高，名字去掉控制字符", () => {
+test("属性：站在地上的不能改高度，固定大小的不能改宽高，名字带控制字符的不改", () => {
   const { store } = setup();
   store.addAtCenter("tower");
   const [id] = store.selection();
@@ -244,4 +244,146 @@ test("属性：站在地上的不能改高度，固定大小的不能改宽高�
   expect(store.setField(lift, "w", "96")).toBe(null);
   expect(store.entity(lift)!.w).toBe(96);
   expect(store.setField(lift, "w", "0")).toBe("要在 1 到 1000000 之间");
+});
+
+test("关卡名太长、带控制字符的不改；存不回来的关卡不保存", async () => {
+  const { store, disk } = setup();
+  expect(store.setLevelField("name", "x".repeat(300))).toBe("名字太长或有控制字符");
+  expect(store.setLevelField("name", "a\nb")).toBe("名字太长或有控制字符");
+  expect(store.level().name).toBe("新关卡");
+  // 绕过界面塞进一个坏名字：保存前读一遍，不通过就不写
+  store.editor.set({ ...store.editor(), level: { ...store.level(), name: "坏\u0007" } });
+  expect(await store.saveAs("bad")).toBe(false);
+  expect(disk.files["bad.json"]).toBe(undefined);
+  expect(store.status().startsWith("不能保存")).toBe(true);
+});
+
+test("连着微移上万次，撤销一步回到原处，不爆栈", () => {
+  let t = 0;
+  const store = createStore({ files: async () => memoryStore(), ask: async () => null, now: () => (t += 10) });
+  store.selection.set(["e2"]);
+  const x = store.entity("e2")!.x;
+  for (let i = 0; i < 20000; i++) store.nudge(1, 0);
+  expect(store.entity("e2")!.x).toBe(x + 20000);
+  store.undo();
+  expect(store.entity("e2")!.x).toBe(x);
+  store.redo();
+  expect(store.entity("e2")!.x).toBe(x + 20000);
+});
+
+test("写盘时又改了：写完还是脏的；撤销回保存时的样子不脏", async () => {
+  const disk = memoryStore();
+  let release = () => {};
+  const slow = { ...disk, write: (n: string, text: string) => new Promise<void>((res) => (release = () => ((disk.files[n] = text), res()))) };
+  let t = 0;
+  const store = createStore({ files: async () => slow, ask: async () => null, now: () => (t += 1000) });
+  store.selection.set(["e2"]);
+  const saving = store.saveAs("race");
+  await new Promise((r) => setTimeout(r, 10));
+  store.remove();
+  release();
+  expect(await saving).toBe(true);
+  expect(disk.files["race.json"].includes('"id": "e2"')).toBe(true);
+  expect(store.dirty()).toBe(true);
+  store.undo();
+  expect(store.dirty()).toBe(false);
+});
+
+test("拖动中删掉、撤销：拖动作废，不抛错", () => {
+  const { store } = setup();
+  store.size.set([800, 600]);
+  store.view.set({ x: 96, y: 16, zoom: 1 });
+  store.pointer("down", [400, 300]);
+  store.pointer("move", [420, 300]);
+  expect(store.drag().kind).toBe("move");
+  store.remove();
+  expect(store.drag().kind).toBe("idle");
+  store.pointer("move", [440, 300]);
+  store.pointer("up", [440, 300]);
+  store.undo();
+  expect(store.entity("e1")!.x).toBe(96);
+  // 刷子画到一半撤销
+  store.tool.set("brush");
+  store.view.set({ x: 0, y: 448, zoom: 1 });
+  store.pointer("down", [416, 316]);
+  store.undo();
+  expect(store.drag().kind).toBe("idle");
+});
+
+test("另存为：只差大小写的也算重名，覆盖时写回原来的文件名；列不出文件时不写", async () => {
+  const { store, disk, asked } = setup(["cancel", "overwrite"], { "Stairs.json": "旧" });
+  expect(await store.saveAs("stairs")).toBe(false);
+  expect(Object.keys(disk.files)).toEqual(["Stairs.json"]);
+  expect(await store.saveAs("stairs")).toBe(true);
+  expect(Object.keys(disk.files)).toEqual(["Stairs.json"]);
+  expect(store.file()).toBe("Stairs.json");
+  expect(asked.length).toBe(2);
+  const broken = { ...memoryStore(), list: () => Promise.reject(new Error("坏了")) };
+  const s2 = createStore({ files: async () => broken, ask: async () => "overwrite" });
+  expect(await s2.saveAs("x")).toBe(false);
+  expect(broken.files["x.json"]).toBe(undefined);
+});
+
+test("⌘D 不动剪贴板", () => {
+  const { store } = setup();
+  store.selection.set(["e1"]);
+  store.copy();
+  store.selection.set(["e2"]);
+  store.duplicate();
+  store.paste();
+  expect(store.entity(store.selection()[0])!.type).toBe("spawn");
+});
+
+test("没变化的操作不进历史、不标脏", () => {
+  const { store } = setup();
+  store.setLevelField("night", "false");
+  store.selection.set(["e1"]);
+  store.reorderBy("e1", -1);
+  const last = store.level().entities.at(-1)!.id;
+  store.reorderBy(last, 1);
+  expect(store.dirty()).toBe(false);
+  expect(store.editor().history.done.length).toBe(0);
+  // 站在地上的按上下没变化
+  store.addAtCenter("tower");
+  store.nudge(0, 1);
+  store.nudge(0, -1);
+  expect(store.editor().history.done.length).toBe(1);
+});
+
+test("出生点、终点在地图外面的不进试玩", () => {
+  const { store } = setup();
+  store.setField("e3", "x", "-500");
+  store.play();
+  expect(store.playing()).toBe(null);
+  expect(store.status().includes("终点在地图外面")).toBe(true);
+  store.undo();
+  store.setField("e1", "y", "5000");
+  store.play();
+  expect(store.status().includes("出生点在地图外面")).toBe(true);
+});
+
+test("编辑器里瓦片层不能超过编辑器的上限", () => {
+  const { store } = setup();
+  expect(store.setLevelField("cols", "1500")).toBe(`要在 1 到 ${EDIT_MAX_COLS} 之间`);
+  expect(store.setLevelField("rows", "400")).toBe(`要在 1 到 ${EDIT_MAX_ROWS} 之间`);
+});
+
+test("叠在一起的：点中画在上面的；同种东西下移以后点中另一个，敌人总在金币上面", () => {
+  const { store } = setup();
+  store.view.set({ x: 500, y: 210, zoom: 1 });
+  store.size.set([800, 600]);
+  store.addAtCenter("coin");
+  store.addAtCenter("coin");
+  const click = () => {
+    store.pointer("down", [400, 300]);
+    store.pointer("up", [400, 300]);
+    return store.selection()[0];
+  };
+  expect(click()).toBe("e5");
+  store.reorderBy("e5", -1);
+  expect(click()).toBe("e4");
+  // 敌人画在金币上面：后放的金币也点不中，点中的是敌人
+  store.addAtCenter("enemy");
+  store.reorderBy("e6", -10);
+  expect(click()).toBe("e6");
 });

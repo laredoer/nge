@@ -124,3 +124,31 @@ test("复制按场景树的顺序深拷贝；粘贴换新 id、名字加副本�
   expect(level.entities[1].props).toEqual({ patrol: 2 });
   expect(clip[1].props).toEqual({ patrol: 2 });
 });
+
+test("新 id 一定是没用过的：编号到了 2^53 附近也不重", () => {
+  const base = emptyLevel({ name: "", cols: 1, rows: 1, tile: 32, texture: "t", grid: [1, 1], solid: [] });
+  const big: LevelFile = { ...base, entities: [{ id: "e9007199254740992", type: "coin", x: 0, y: 0 }, { id: "e9007199254740991", type: "coin", x: 0, y: 0 }, { id: "e1", type: "coin", x: 0, y: 0 }] };
+  const id = nextId(big);
+  expect(big.entities.some((e) => e.id === id)).toBe(false);
+  const ids = pasted(big, big.entities, [0, 0]).map((e) => e.id);
+  expect(new Set(ids).size).toBe(3);
+  expect(ids.some((i) => big.entities.some((e) => e.id === i))).toBe(false);
+});
+
+test("预览瓦片：一笔里的格子超出现在的瓦片层时跳过", () => {
+  const t = emptyLevel({ name: "", cols: 2, rows: 2, tile: 32, texture: "t", grid: [3, 1], solid: [] }).tiles[0];
+  const out = layerWith(t, { changes: [{ r: 5, c: 0, before: -1, after: 1 }, { r: 0, c: 1, before: -1, after: 2 }] });
+  expect(out.data).toEqual([[-1, 2], [-1, -1]]);
+});
+
+test("点选按画的先后：深度大的先命中，一样深时列表里靠后的先命中", () => {
+  const es: Entity[] = [
+    { id: "low", type: "coin", x: 0, y: 0 },
+    { id: "high", type: "coin", x: 0, y: 0 },
+    { id: "mid", type: "coin", x: 0, y: 0 },
+  ];
+  const b = (e: Entity) => ({ left: e.x - 5, right: e.x + 5, bottom: e.y - 5, top: e.y + 5 });
+  const depth = (e: Entity) => (e.id === "high" ? 3 : e.id === "mid" ? 2 : 2);
+  expect(hitTest(es, b, [0, 0], 0, depth)).toBe("high");
+  expect(hitTest(es.filter((e) => e.id !== "high"), b, [0, 0], 0, depth)).toBe("mid");
+});

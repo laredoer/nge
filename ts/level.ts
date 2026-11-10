@@ -9,6 +9,11 @@ export const MAX_COORD = 1e6;
 export const MAX_COLS = 2000;
 export const MAX_ROWS = 500;
 export const MAX_ENTITIES = 5000;
+export const MAX_LAYERS = 16;
+/** 实体 id：字母、数字、- 和 _（编辑器的预览节点用 `ed:<id>:<部件>`，id 里不能有冒号）。 */
+const ID = /^[A-Za-z0-9_-]{1,64}$/;
+/** 属性名：字母开头的字母、数字、下划线（`__proto__` 这种进不来）。 */
+const PROP_KEY = /^[A-Za-z][A-Za-z0-9_]{0,31}$/;
 const MAX_TEXT = 256;
 const MAX_ID = 64;
 const MAX_ERRORS = 20;
@@ -134,12 +139,19 @@ function layerOf(raw: unknown, path: string, errors: Errors): TileLayer {
   const cols = int(o.cols, `${path}.cols`, errors, 1, MAX_COLS);
   const rows = int(o.rows, `${path}.rows`, errors, 1, MAX_ROWS);
   const rowsRaw = list(o.data, `${path}.data`, errors);
-  if (rowsRaw.length !== rows) errors.add(`${path}.data 要有 ${rows} 行`);
-  const data = rowsRaw.map((row, r) => {
-    const cells = list(row, `${path}.data[${r}]`, errors);
-    if (cells.length !== cols) errors.add(`${path}.data[${r}] 要有 ${cols} 格`);
-    return cells.map((c, i) => int(c, `${path}.data[${r}][${i}]`, errors, -1, frames - 1));
-  });
+  // 行数、格数对不上就不往下查每一格（坏文件可能很大）
+  const shapeOk = rowsRaw.length === rows;
+  if (!shapeOk) errors.add(`${path}.data 要有 ${rows} 行`);
+  const data = !shapeOk
+    ? []
+    : rowsRaw.map((row, r) => {
+        const cells = list(row, `${path}.data[${r}]`, errors);
+        if (cells.length !== cols) {
+          errors.add(`${path}.data[${r}] 要有 ${cols} 格`);
+          return [];
+        }
+        return cells.map((c, i) => int(c, `${path}.data[${r}][${i}]`, errors, -1, frames - 1));
+      });
   const layer: TileLayer = {
     id: text(o.id, `${path}.id`, errors, { empty: false, max: MAX_ID }),
     texture: text(o.texture, `${path}.texture`, errors, { empty: false }),
@@ -171,10 +183,18 @@ function positiveOrZero(v: unknown, path: string, errors: Errors): number {
   return v;
 }
 
+function idOf(v: unknown, path: string, errors: Errors): string {
+  if (typeof v !== "string" || !ID.test(v)) {
+    errors.add(`${path} 要是 1 到 ${MAX_ID} 个字母、数字、- 或 _`);
+    return typeof v === "string" ? v : "";
+  }
+  return v;
+}
+
 function entityOf(raw: unknown, path: string, errors: Errors): Entity {
   const o = isObject(raw) ? raw : (errors.add(`${path} 要是对象`), {});
   const entity: Entity = {
-    id: text(o.id, `${path}.id`, errors, { empty: false, max: MAX_ID }),
+    id: idOf(o.id, `${path}.id`, errors),
     type: text(o.type, `${path}.type`, errors, { empty: false, max: MAX_ID }),
     x: coord(o.x, `${path}.x`, errors),
     y: coord(o.y, `${path}.y`, errors),
@@ -188,7 +208,8 @@ function entityOf(raw: unknown, path: string, errors: Errors): Entity {
       const props: Record<string, PropValue> = {};
       for (const [key, v] of Object.entries(o.props)) {
         const at = `${path}.props.${key}`;
-        if (typeof v === "boolean") props[key] = v;
+        if (!PROP_KEY.test(key)) errors.add(`${path}.props 的属性名 ${JSON.stringify(key.slice(0, 40))} 要是字母开头的字母、数字、下划线，不超过 32 个字`);
+        else if (typeof v === "boolean") props[key] = v;
         else if (typeof v === "string") props[key] = text(v, at, errors);
         else if (finite(v) && Math.abs(v) <= MAX_COORD) props[key] = v;
         else errors.add(`${at} 只能是有限的数、布尔或字符串`);
@@ -214,7 +235,15 @@ export function parseLevel(input: unknown): ParseResult {
   if (!Number.isInteger(raw.version) || (raw.version as number) < 1) return { ok: false, errors: ["version 要是正整数"] };
   if ((raw.version as number) > LEVEL_VERSION) return { ok: false, errors: [`version ${raw.version} 是更新的编辑器存的，这里只认到 ${LEVEL_VERSION}`] };
   const errors = new Errors();
-  const tiles = list(raw.tiles, "tiles", errors).map((t, i) => layerOf(t, `tiles[${i}]`, errors));
+  const tilesRaw = list(raw.tiles, "tiles", errors);
+  if (tilesRaw.length > MAX_LAYERS) return { ok: false, errors: [`tiles 最多 ${MAX_LAYERS} 层，这里有 ${tilesRaw.length} 层`] };
+  const tiles = tilesRaw.map((t, i) => layerOf(t, `tiles[${i}]`, errors));
+  const layerIds = new Map<string, number>();
+  tiles.forEach((t, i) => {
+    const first = layerIds.get(t.id);
+    if (first !== undefined) errors.add(`tiles[${i}].id 和 tiles[${first}] 重复：${t.id}`);
+    else layerIds.set(t.id, i);
+  });
   const entitiesRaw = list(raw.entities, "entities", errors);
   if (entitiesRaw.length > MAX_ENTITIES) return { ok: false, errors: [`entities 最多 ${MAX_ENTITIES} 个，这里有 ${entitiesRaw.length} 个`] };
   const entities = entitiesRaw.map((e, i) => entityOf(e, `entities[${i}]`, errors));

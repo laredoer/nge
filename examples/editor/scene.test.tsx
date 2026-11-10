@@ -78,3 +78,33 @@ test("第二关石阶的文件在编辑器里画得出来：每个实体都有�
   expect(scene.tilemaps![0].data.length).toBe(72 * 15);
   for (const e of r.level.entities) expect([...scene.sprites!, ...scene.models!].some((n) => n.id === `ed:${e.id}` || n.id.startsWith(`ed:${e.id}:`))).toBe(true);
 });
+
+test("同一种东西，场景树里靠后的画在上面；预览只用合规的属性", () => {
+  const base = toFile(MEADOW);
+  const level: LevelFile = { ...base, entities: [{ id: "a", type: "coin", x: 0, y: 0 }, { id: "b", type: "coin", x: 0, y: 0 }, { id: "m", type: "model", x: 0, y: 0, props: { model: "../secret.glb", scale: -3 } }] };
+  const scene = editorScene(input(level));
+  const z = (id: string) => scene.sprites!.find((s) => s.id === id)!.z!;
+  expect(z("ed:b")).toBeGreaterThan(z("ed:a"));
+  // 不跨到别的类型的层：金币 2，敌人 4
+  expect(z("ed:b")).toBeLessThan(3);
+  const model = scene.models!.find((m) => m.id === "ed:m")!;
+  expect(model.model).toBe("asset:/@platformer/crate.glb");
+  expect(model.scale).toBe(40);
+});
+
+test("移动平台只能改宽：文件里写了高也按 16 画、按 16 算包围盒", () => {
+  const base = toFile(MEADOW);
+  const lift = { id: "l", type: "lift", x: 0, y: 0, w: 96, h: 64 };
+  const level: LevelFile = { ...base, entities: [lift] };
+  const s = editorScene(input(level)).sprites!.find((n) => n.id === "ed:l")!;
+  expect([s.w, s.h]).toEqual([96, 16]);
+  const b = boundsOf(lift);
+  expect(b.top - b.bottom).toBe(16);
+});
+
+test("瓦片层没变时瓦片地图用同一份，不重新摊平", () => {
+  const level = toFile(MEADOW);
+  const a = editorScene(input(level)).tilemaps![0];
+  const moved = { ...level, entities: level.entities.map((e, i) => (i === 0 ? { ...e, x: e.x + 1 } : e)) };
+  expect(editorScene(input(moved)).tilemaps![0] === a).toBe(true);
+});

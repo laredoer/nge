@@ -60,6 +60,7 @@ export function strokeAdd(stroke: Stroke, t: TileLayer, cells: Cell[], frame: nu
 export function layerWith(t: TileLayer, stroke: Stroke): TileLayer {
   if (stroke.changes.length === 0) return t;
   const data = t.data.map((row) => [...row]);
-  for (const ch of stroke.changes) data[ch.r][ch.c] = ch.after;
+  // 一笔画到一半瓦片层变小了（撤销了改大小）：外面的格子跳过
+  for (const ch of stroke.changes) if (data[ch.r]?.[ch.c] !== undefined) data[ch.r][ch.c] = ch.after;
   return { ...t, data };
 }
