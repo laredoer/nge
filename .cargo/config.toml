@@ -68,6 +68,8 @@ opt-level = 1
 opt-level = 1
 [profile.dev.package.bounce]
 opt-level = 1
+[profile.dev.package.editor]
+opt-level = 1
 [profile.dev.package.dodge]
 opt-level = 1
 [profile.dev.package.effects]

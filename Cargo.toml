@@ -2,7 +2,7 @@
 resolver = "3"
 # vendor/ 里是打过补丁的第三方 crate（.cargo/config.toml 的 [patch.crates-io]），不是成员
 exclude = ["vendor"]
-members = ["crates/nge-ai", "crates/nge-assets", "crates/nge-audio", "crates/nge-core", "crates/nge-ecs", "crates/nge-net", "crates/nge-nsh", "crates/nge-particles", "crates/nge-physics2d", "crates/nge-physics3d", "crates/nge-platform", "crates/nge-render2d", "crates/nge-relay", "crates/nge-render3d", "crates/nge-scene", "crates/nge-text", "examples/bounce", "examples/sprites", "examples/dodge", "examples/scene", "examples/model", "examples/effects", "examples/scene3d", "examples/physics", "examples/platformer", "examples/sanguo"]
+members = ["crates/nge-ai", "crates/nge-assets", "crates/nge-audio", "crates/nge-core", "crates/nge-ecs", "crates/nge-net", "crates/nge-nsh", "crates/nge-particles", "crates/nge-physics2d", "crates/nge-physics3d", "crates/nge-platform", "crates/nge-render2d", "crates/nge-relay", "crates/nge-render3d", "crates/nge-scene", "crates/nge-text", "examples/bounce", "examples/sprites", "examples/dodge", "examples/scene", "examples/model", "examples/effects", "examples/scene3d", "examples/physics", "examples/platformer", "examples/sanguo", "examples/editor"]
 
 [workspace.package]
 version = "0.1.0"
