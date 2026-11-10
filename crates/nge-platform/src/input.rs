@@ -83,8 +83,25 @@ impl Decision {
     pub const PASS: Self = Self { forward: None, consume: false };
 }
 
+/// 修饰键：Shift、Control、Alt（Option）、Meta（⌘）。
+fn is_modifier(code: &str) -> bool {
+    ["Shift", "Control", "Alt", "Meta"].iter().any(|m| code.starts_with(m))
+}
+
+/// 松开 ⌘：浏览器（macOS）上按着 ⌘ 时别的键收不到 keyup，这时把按着的全部补发松开。
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+pub fn releases_all(f: &Facts) -> bool {
+    f.kind == Kind::Up && matches!(f.code, "MetaLeft" | "MetaRight")
+}
+
+/// 焦点在按钮、链接上时这些键是去按它的，不转给游戏。
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+pub fn activates_control(code: &str) -> bool {
+    matches!(code, "Enter" | "Space")
+}
+
 /// 一个按键事件该怎么处理。`held` 是转发过按下、还没松开的键。
-/// 松开只要按下时转发过就转发；按下只在 `eligible` 且没按着 ⌘ 时转发，`capture` 的不再往下传。
+/// 松开只要按下时转发过就转发；按下只在 `eligible` 且没按着 ⌘ 时转发（修饰键自己不看 ⌘），`capture` 的不再往下传。
 pub fn decide(held: &mut std::collections::BTreeSet<&'static str>, f: Facts) -> Decision {
     let pressed = match f.kind {
         Kind::Up => false,
@@ -95,13 +112,15 @@ pub fn decide(held: &mut std::collections::BTreeSet<&'static str>, f: Facts) -> 
         let forward = held.remove(f.code).then_some((false, false));
         return Decision { forward, consume: false };
     }
-    if !f.eligible || (f.kind == Kind::Down && f.cmd) {
+    if !f.eligible || (f.kind == Kind::Down && f.cmd && !is_modifier(f.code)) {
         return Decision::PASS;
     }
     let fresh = held.insert(f.code);
     match f.kind {
         // 修饰键别的位变了（另一个修饰键）时这一位还是按着，不重复转发
         Kind::Flags => Decision { forward: fresh.then_some((true, false)), consume: false },
+        // 浏览器上修饰键也是 keydown：转发但不吞（留给浏览器和 NSH 的快捷键）
+        _ if is_modifier(f.code) => Decision { forward: Some((true, f.repeat && !fresh)), consume: false },
         _ => Decision { forward: Some((true, f.repeat && !fresh)), consume: f.capture },
     }
 }
@@ -198,5 +217,30 @@ mod tests {
         assert_eq!(decide(&mut held, shift(true, true)), Decision::PASS, "另一个修饰键变了，Shift 还按着");
         assert_eq!(decide(&mut held, shift(false, true)).forward, Some((false, false)));
         assert!(held.is_empty());
+    }
+
+    #[test]
+    fn releasing_command_releases_everything() {
+        // macOS 的浏览器：按着 ⌘ 时别的键松开收不到 keyup
+        assert!(releases_all(&facts("MetaLeft", Kind::Up)) && releases_all(&facts("MetaRight", Kind::Up)));
+        assert!(!releases_all(&facts("MetaLeft", Kind::Down)));
+        assert!(!releases_all(&facts("ShiftLeft", Kind::Up)) && !releases_all(&facts("KeyA", Kind::Up)));
+    }
+
+    #[test]
+    fn modifier_keys_themselves_are_forwarded_even_with_command_down() {
+        // 浏览器上按下 Ctrl 时 ctrlKey 已经是 true；修饰键自己的按下照样转发（macOS 上走 Flags，本来就不看 ⌘）
+        let mut held = BTreeSet::new();
+        let ctrl = decide(&mut held, Facts { cmd: true, ..facts("ControlLeft", Kind::Down) });
+        assert_eq!(ctrl.forward, Some((true, false)));
+        assert!(!ctrl.consume, "修饰键不吞");
+        assert_eq!(decide(&mut held, Facts { cmd: true, ..facts("KeyC", Kind::Down) }), Decision::PASS, "Ctrl+C 留给浏览器");
+        assert_eq!(decide(&mut held, Facts { cmd: true, ..facts("ControlLeft", Kind::Up) }).forward, Some((false, false)));
+    }
+
+    #[test]
+    fn enter_and_space_on_a_focused_control_are_left_to_it() {
+        assert!(activates_control("Enter") && activates_control("Space"));
+        assert!(!activates_control("KeyJ") && !activates_control("ArrowLeft"));
     }
 }

@@ -27,3 +27,5 @@ pub mod ios;
 mod loading;
 #[cfg(target_arch = "wasm32")]
 pub mod web;
+#[cfg(target_arch = "wasm32")]
+mod web_audio;

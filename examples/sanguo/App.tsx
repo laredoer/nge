@@ -3,6 +3,7 @@ import { burst, floatText, gameView, shake, sound } from "../../ts/nge";
 import { footY, zOf } from "./belt";
 import { newGame, step, type Game, type GameEvent } from "./game";
 import { hudOf } from "./hud";
+import { pace } from "./pace";
 import { DT, NO_INPUT, type Input } from "./player";
 import { strings } from "./strings";
 import { sceneOf, SOUNDS } from "./view";
@@ -13,9 +14,6 @@ const GameView = gameView();
 /** 文案跟系统语言（见 docs/localization.md）。 */
 const lang = strings();
 const t = lang.t;
-
-/** 一帧最多补几步（卡了一下时不一口气跑太多）。 */
-const MAX_STEPS = 5;
 
 const LEFT = ["ArrowLeft", "KeyA", "GamepadLeft", "GamepadLeftStickLeft"];
 const RIGHT = ["ArrowRight", "KeyD", "GamepadRight", "GamepadLeftStickRight"];
@@ -42,6 +40,8 @@ function App() {
   let game: NativeComponentRef | undefined;
   const state = signal<Game>(newGame());
   const paused = signal(false);
+  /** 引擎画出了第一帧（web 上加载完了）：之前不推进游戏。 */
+  let ready = false;
   /** 第几局：重开时换值，场景整个重建。 */
   const round = signal(1);
   const held = new Set<string>();
@@ -62,16 +62,16 @@ function App() {
 
   // 固定步长推进：显示一帧补上该走的步数
   const tick = (now: number) => {
-    if (last !== undefined && !paused()) {
-      acc = Math.min(acc + (now - last) / 1000, DT * MAX_STEPS);
+    if (last !== undefined) {
+      const r = pace(acc, (now - last) / 1000, { ready, paused: paused() });
+      acc = r.acc;
       let g = state();
       const events: GameEvent[] = [];
-      while (acc >= DT) {
-        const r = step(g, inputOf(held, pressed), DT);
+      for (let i = 0; i < r.steps; i++) {
+        const out = step(g, inputOf(held, pressed), DT);
         pressed.clear();
-        g = r.game;
-        events.push(...r.events);
-        acc -= DT;
+        g = out.game;
+        events.push(...out.events);
       }
       if (g !== state()) state.set(g);
       play(events);
@@ -97,6 +97,7 @@ function App() {
         class="flex-1"
         ref={(n: NativeComponentRef) => (game = n)}
         scene={sceneOf(state(), paused(), round())}
+        onReady={() => (ready = true)}
         onKey={(e) => {
           if (!e.down) return held.delete(e.code);
           if (e.repeat) return;
