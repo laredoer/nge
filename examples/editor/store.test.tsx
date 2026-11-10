@@ -36,7 +36,11 @@ test("删除、撤销、重做，选中跟着走", () => {
   store.undo();
   expect(store.entity("e2")?.type).toBe("crate");
   store.redo();
-  expect(store.entity("e2")).toBe(undefined);
+  expect(store.entity("e2")).toBe(undefined);  // 撤销了添加：选中的跟着去掉
+  store.addAtCenter("coin");
+  expect(store.selection()).toEqual(["e4"]);
+  store.undo();
+  expect(store.selection()).toEqual([]);
 });
 
 test("复制一份：错开一格，选中新的，名字带副本", () => {
@@ -227,4 +231,17 @@ test("画布：刷子画一笔是一步，框选框画在场景里", () => {
   expect(store.sceneInput().box).not.toBe(null);
   store.pointer("cancel", [60, 60]);
   expect(store.sceneInput().box).toBe(null);
+});
+
+test("属性：站在地上的不能改高度，固定大小的不能改宽高，名字去掉控制字符", () => {
+  const { store } = setup();
+  store.addAtCenter("tower");
+  const [id] = store.selection();
+  expect(store.setField(id, "y", "100")).toBe("站在地上的东西不能改高度");
+  expect(store.setField(id, "name", "a\u0007")).toBe("名字太长或有控制字符");
+  store.addAtCenter("lift");
+  const [lift] = store.selection();
+  expect(store.setField(lift, "w", "96")).toBe(null);
+  expect(store.entity(lift)!.w).toBe(96);
+  expect(store.setField(lift, "w", "0")).toBe("要在 1 到 1000000 之间");
 });
