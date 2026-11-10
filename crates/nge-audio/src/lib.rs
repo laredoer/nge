@@ -9,6 +9,7 @@ pub use audio::{Audio, Bus, DEFAULT_RANGE, MAX_STARTS_PER_FRAME, MAX_VOICES, Pla
 
 use std::io::Cursor;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use bevy_ecs::prelude::*;
 use kira::backend::mock::MockBackend;
@@ -64,30 +65,45 @@ impl AudioPlugin {
 
 /// [`unlock`] 建好、等 [`Audio`] 下一帧接过去的音频设备。
 static UNLOCKED: Mutex<Option<Manager>> = Mutex::new(None);
+/// 接上了解锁来的设备、还活着的 [`Audio`] 有几个：都没了（游戏视图重建）时下一次手势再建。
+pub(crate) static LIVE: AtomicUsize = AtomicUsize::new(0);
 
 pub(crate) fn take_unlocked() -> Option<Manager> {
     UNLOCKED.lock().unwrap_or_else(|e| e.into_inner()).take()
 }
 
-/// 浏览器：在用户按键、点按的事件回调里（同步）调用，建音频设备（WebAudio 只能在这时候开始出声）。
-/// 只有第一次有用，之后是空操作。
-#[cfg(target_arch = "wasm32")]
-pub fn unlock() {
-    use std::sync::atomic::{AtomicBool, Ordering};
-    static TRIED: AtomicBool = AtomicBool::new(false);
-    if TRIED.swap(true, Ordering::Relaxed) {
+/// 没有活着的、也没有等着接的设备时用 `make` 建一个。
+#[cfg_attr(not(any(target_arch = "wasm32", test)), allow(dead_code))]
+pub(crate) fn unlock_with(make: impl FnOnce() -> Option<Manager>) {
+    if LIVE.load(Ordering::SeqCst) > 0 {
         return;
     }
-    match AudioManager::<DefaultBackend>::new(AudioManagerSettings::default()) {
-        Ok(m) => *UNLOCKED.lock().unwrap_or_else(|e| e.into_inner()) = Some(Manager::Device(m)),
-        Err(e) => log::warn!("没有可用的音频设备，声音关掉: {e}"),
+    let mut slot = UNLOCKED.lock().unwrap_or_else(|e| e.into_inner());
+    if slot.is_none() {
+        *slot = make();
     }
 }
 
+/// 浏览器：在用户按键、点按的事件回调里（同步）调用，建音频设备（WebAudio 只能在这时候开始出声）。
+/// 已经有设备时什么都不做；游戏视图重建（旧的 [`Audio`] 没了）后的下一次手势再建。
+/// 设备建好以后浏览器把它挂起了（切走标签页、系统打断）由平台层恢复。
+#[cfg(target_arch = "wasm32")]
+pub fn unlock() {
+    static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    unlock_with(|| match AudioManager::<DefaultBackend>::new(AudioManagerSettings::default()) {
+        Ok(m) => Some(Manager::Device(m)),
+        Err(e) => {
+            if !WARNED.swap(true, Ordering::Relaxed) {
+                log::warn!("没有可用的音频设备，声音关掉: {e}");
+            }
+            None
+        }
+    });
+}
+
 #[cfg(test)]
-pub(crate) fn hand_over_mock() {
-    let m = AudioManager::<MockBackend>::new(AudioManagerSettings::default()).expect("mock 后端");
-    *UNLOCKED.lock().unwrap_or_else(|e| e.into_inner()) = Some(Manager::Mock(m));
+pub(crate) fn mock_manager() -> Manager {
+    Manager::Mock(AudioManager::<MockBackend>::new(AudioManagerSettings::default()).expect("mock 后端"))
 }
 
 impl Plugin for AudioPlugin {

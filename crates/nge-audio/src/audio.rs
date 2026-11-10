@@ -142,6 +142,8 @@ pub struct Audio {
     range: f32,
     /// 等解锁（浏览器）：还没有音频设备，[`crate::unlock`] 之后接上。
     locked: bool,
+    /// 接上了解锁来的设备（算在 [`crate::LIVE`] 里）。
+    unlocked: bool,
 }
 
 impl Audio {
@@ -159,17 +161,22 @@ impl Audio {
             listener: Vec2::ZERO,
             range: DEFAULT_RANGE,
             locked: false,
+            unlocked: false,
         }
     }
 
     pub(crate) fn locked() -> Self {
-        Self { locked: true, ..Self::new(None) }
+        let mut audio = Self::new(None);
+        audio.locked = true;
+        audio
     }
 
     /// 解锁了：接上音频设备，之前设的音量、分组设置补上去。
     fn attach(&mut self, manager: Manager) {
         self.manager = Some(Mutex::new(manager));
         self.locked = false;
+        self.unlocked = true;
+        crate::LIVE.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.add_buses();
         self.apply_master();
         for bus in Bus::ALL {
@@ -386,6 +393,14 @@ impl Audio {
                 m.backend_mut().on_start_processing();
                 m.backend_mut().process();
             }
+        }
+    }
+}
+
+impl Drop for Audio {
+    fn drop(&mut self) {
+        if self.unlocked {
+            crate::LIVE.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
         }
     }
 }

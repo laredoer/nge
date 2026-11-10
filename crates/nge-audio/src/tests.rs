@@ -276,11 +276,30 @@ fn moving_does_not_cut_a_long_fade_short_and_nan_volumes_are_silent() {
     assert_eq!(spatial(1.0, f32::NAN, Vec2::ZERO, Vec2::ZERO, 100.0), (1.0, 0.0));
 }
 
-#[test]
-fn locked_until_unlocked_then_music_starts_and_settings_carry_over() {
+/// 用到全局解锁状态的测试一个一个跑。
+static UNLOCK_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn locked_app() -> App {
     let source = MemorySource::default().with(BEEP, wav(2.5)).with(BOOP, wav(0.1));
     let mut app = App::new();
     app.add_plugins(AssetPlugin::new().source(Arc::new(source))).add_plugins(AudioPlugin::locked_mock());
+    app
+}
+
+/// 模拟一次用户手势：返回这次有没有新建音频设备。
+fn gesture() -> bool {
+    let mut made = false;
+    crate::unlock_with(|| {
+        made = true;
+        Some(crate::mock_manager())
+    });
+    made
+}
+
+#[test]
+fn locked_until_unlocked_then_music_starts_and_settings_carry_over() {
+    let _serial = UNLOCK_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut app = locked_app();
     let (beep, boop) = (load(&mut app, BEEP), load(&mut app, BOOP));
     let music = audio(&mut app).play(beep, Play { bus: Bus::Music, ..Play::looped() });
     let hit = audio(&mut app).play(boop, Play::default());
@@ -292,11 +311,51 @@ fn locked_until_unlocked_then_music_starts_and_settings_carry_over() {
     assert_eq!(audio(&mut app).voices(), 0, "没解锁不出声");
     assert!(audio(&mut app).is_playing(music));
 
-    crate::hand_over_mock();
+    assert!(gesture());
     settle(&mut app);
     let audio = audio(&mut app);
     assert!(audio.enabled());
     assert!(audio.mix(music).is_some(), "解锁后音乐开始");
     assert_eq!(audio.bus_volume(Bus::Music), 0.5);
     assert_eq!(audio.bus_sounds(Bus::Music), 1, "进了音乐分组的轨道");
+}
+
+#[test]
+fn later_gestures_do_not_make_another_device() {
+    let _serial = UNLOCK_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut app = locked_app();
+    assert!(gesture());
+    assert!(!gesture(), "还没接上：不再建");
+    settle(&mut app);
+    assert!(audio(&mut app).enabled());
+    assert!(!gesture(), "接上以后也不再建");
+}
+
+#[test]
+fn a_new_audio_after_the_old_one_is_gone_can_unlock_again() {
+    let _serial = UNLOCK_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut first = locked_app();
+    assert!(gesture());
+    settle(&mut first);
+    drop(first);
+    let mut second = locked_app();
+    let beep = load(&mut second, BEEP);
+    let music = audio(&mut second).play(beep, Play::looped());
+    assert!(gesture(), "旧的设备跟着旧的 Audio 没了，新的要重新建");
+    settle(&mut second);
+    assert!(audio(&mut second).enabled());
+    assert!(audio(&mut second).mix(music).is_some());
+}
+
+#[test]
+fn music_stopped_before_unlocking_never_starts() {
+    let _serial = UNLOCK_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut app = locked_app();
+    let beep = load(&mut app, BEEP);
+    let music = audio(&mut app).play(beep, Play::looped());
+    audio(&mut app).stop(music, 0.0);
+    assert!(!audio(&mut app).is_playing(music));
+    assert!(gesture());
+    settle(&mut app);
+    assert_eq!(audio(&mut app).voices(), 0);
 }
