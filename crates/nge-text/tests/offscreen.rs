@@ -11,7 +11,7 @@ use nge_text::prelude::*;
 
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 const SIZE: u32 = 128;
-const INTER: &[u8] = include_bytes!("data/Inter-Bold.ttf");
+const INTER: &[u8] = include_bytes!("../fonts/Inter-Bold.ttf");
 const FONT_URI: &str = "asset:/@t/inter.ttf";
 
 struct Offscreen {

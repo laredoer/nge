@@ -112,7 +112,7 @@ mod tests {
     #[test]
     fn only_font_files_decode() {
         let source = MemorySource::default()
-            .with("asset:/@t/a.ttf", include_bytes!("../tests/data/Inter-Bold.ttf").as_slice())
+            .with("asset:/@t/a.ttf", include_bytes!("../fonts/Inter-Bold.ttf").as_slice())
             .with("asset:/@t/b.ttf", b"<html>not found</html>".as_slice());
         let mut app = App::new();
         app.add_plugins(AssetPlugin::new().source(Arc::new(source))).add_plugins(TextPlugin);

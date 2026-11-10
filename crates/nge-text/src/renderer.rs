@@ -72,28 +72,51 @@ pub(crate) struct TextRenderer {
 
 impl Default for TextRenderer {
     fn default() -> Self {
-        // 扫描系统字体在 Mac 上要几百毫秒：一开始就放到后台线程，不卡渲染线程
-        let (tx, rx) = std::sync::mpsc::channel();
-        let spawned = std::thread::Builder::new().name("nge-system-fonts".into()).spawn(move || {
-            let mut db = fontdb::Database::new();
-            load_system_fonts(&mut db);
-            let _ = tx.send(db.faces().cloned().collect());
-        });
-        let system_fonts = match spawned {
-            Ok(_) => Some(rx),
-            Err(e) => {
-                log::warn!("起不了扫描系统字体的线程，不指定字体的文字不会画出来: {e}");
-                None
-            }
-        };
+        let (db, system_fonts) = default_fonts();
         Self {
             gpu: None,
-            fonts: FontSystem::new_with_locale_and_db("en-US".into(), fontdb::Database::new()),
+            fonts: FontSystem::new_with_locale_and_db("en-US".into(), db),
             faces: HashMap::new(),
             system_fonts,
             shaped: HashMap::new(),
         }
     }
+}
+
+/// 一开始的字体库和后台扫描中的系统字体。
+#[cfg(not(target_arch = "wasm32"))]
+fn default_fonts() -> (fontdb::Database, Option<Receiver<Vec<fontdb::FaceInfo>>>) {
+    // 扫描系统字体在 Mac 上要几百毫秒：一开始就放到后台线程，不卡渲染线程
+    let (tx, rx) = std::sync::mpsc::channel();
+    let spawned = std::thread::Builder::new().name("nge-system-fonts".into()).spawn(move || {
+        let mut db = fontdb::Database::new();
+        load_system_fonts(&mut db);
+        let _ = tx.send(db.faces().cloned().collect());
+    });
+    let system_fonts = match spawned {
+        Ok(_) => Some(rx),
+        Err(e) => {
+            log::warn!("起不了扫描系统字体的线程，不指定字体的文字不会画出来: {e}");
+            None
+        }
+    };
+    (fontdb::Database::new(), system_fonts)
+}
+
+/// 浏览器读不到系统字体：用内置的。
+#[cfg(target_arch = "wasm32")]
+fn default_fonts() -> (fontdb::Database, Option<Receiver<Vec<fontdb::FaceInfo>>>) {
+    (builtin_fonts(), None)
+}
+
+/// 内置的 Inter Bold 当 sans-serif：只有拉丁字母、数字和符号，够画数字、「!」和性能数字；
+/// 中文的界面用页面上的文字（见 docs/web.md）。
+#[cfg(any(target_arch = "wasm32", test))]
+fn builtin_fonts() -> fontdb::Database {
+    let mut db = fontdb::Database::new();
+    db.load_font_data(include_bytes!("../fonts/Inter-Bold.ttf").to_vec());
+    db.set_sans_serif_family("Inter");
+    db
 }
 
 /// 这一帧要画的一段文字。
@@ -273,6 +296,7 @@ fn first_family<'a>(db: &fontdb::Database, families: &[&'a str]) -> Option<&'a s
 }
 
 /// fontdb 在 iOS 上按 Linux 找字体目录，一个也找不到；iOS 的系统字体在 `/System/Library/Fonts` 的各个子目录里，应用能读。
+#[cfg(not(target_arch = "wasm32"))]
 fn load_system_fonts(db: &mut fontdb::Database) {
     #[cfg(target_os = "ios")]
     db.load_fonts_dir("/System/Library/Fonts");
@@ -313,7 +337,7 @@ mod tests {
     #[test]
     fn faces_remember_weight_so_families_can_share_a_name() {
         let mut fonts = Assets::<Font>::default();
-        let bold = fonts.add(Font(std::sync::Arc::new(include_bytes!("../tests/data/Inter-Bold.ttf").to_vec())));
+        let bold = fonts.add(Font(std::sync::Arc::new(include_bytes!("../fonts/Inter-Bold.ttf").to_vec())));
         let broken = fonts.add(Font(std::sync::Arc::new(b"true but not a font".to_vec())));
         let mut renderer = TextRenderer::default();
         renderer.register_fonts(&fonts);
@@ -358,7 +382,7 @@ mod tests {
     #[test]
     fn default_font_text_waits_for_system_fonts() {
         let mut fonts = Assets::<Font>::default();
-        let bold = fonts.add(Font(std::sync::Arc::new(include_bytes!("../tests/data/Inter-Bold.ttf").to_vec())));
+        let bold = fonts.add(Font(std::sync::Arc::new(include_bytes!("../fonts/Inter-Bold.ttf").to_vec())));
         let mut renderer = TextRenderer::default();
         renderer.register_fonts(&fonts);
         assert_eq!(renderer.face_for(None, false), None, "系统字体没扫完");
@@ -368,7 +392,7 @@ mod tests {
 
     fn inter() -> (TextRenderer, Face) {
         let mut fonts = Assets::<Font>::default();
-        let bold = fonts.add(Font(std::sync::Arc::new(include_bytes!("../tests/data/Inter-Bold.ttf").to_vec())));
+        let bold = fonts.add(Font(std::sync::Arc::new(include_bytes!("../fonts/Inter-Bold.ttf").to_vec())));
         let mut renderer = TextRenderer::default();
         renderer.register_fonts(&fonts);
         let face = renderer.faces[&bold].clone().unwrap();
@@ -404,9 +428,20 @@ mod tests {
     }
 
     #[test]
+    fn builtin_font_draws_default_text() {
+        let mut fonts = FontSystem::new_with_locale_and_db("en-US".into(), builtin_fonts());
+        let shaped = shape(&mut fonts, Key { text: "!16.6 ms".into(), face: None, px: 16.0, width: None, visible: None });
+        let glyphs: Vec<_> = shaped.buffer.layout_runs().flat_map(|run| run.glyphs.iter().map(|g| g.glyph_id)).collect();
+        assert_eq!(glyphs.len(), 8);
+        assert!(glyphs.iter().all(|&id| id != 0), "每个字都有字形，没有落到 .notdef");
+        let renderer = TextRenderer { fonts, system_fonts: None, ..TextRenderer::default() };
+        assert_eq!(renderer.face_for(None, true), Some(None), "不指定字体的文字用它画");
+    }
+
+    #[test]
     fn sans_serif_falls_to_the_first_family_that_exists() {
         let mut db = fontdb::Database::new();
-        db.load_font_data(include_bytes!("../tests/data/Inter-Bold.ttf").to_vec());
+        db.load_font_data(include_bytes!("../fonts/Inter-Bold.ttf").to_vec());
         assert_eq!(first_family(&db, &["PingFang SC", "Inter", "Helvetica"]), Some("Inter"));
         assert_eq!(first_family(&db, &["PingFang SC"]), None);
     }
