@@ -7,4 +7,4 @@ pub mod scores;
 pub mod server;
 
 pub use hub::{Config, Hub};
-pub use server::{serve, spawn};
+pub use server::{Live, Running, serve, serve_on, spawn};

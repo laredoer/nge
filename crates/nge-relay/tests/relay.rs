@@ -8,8 +8,7 @@ use nge_net::{ClientEvent, NetClient, Peer, Status, Target};
 use nge_relay::Config;
 
 fn relay() -> String {
-    let addr = nge_relay::spawn("127.0.0.1:0", Config::default()).unwrap();
-    addr.to_string()
+    nge_relay::spawn("127.0.0.1:0", Config::default()).unwrap().addr.to_string()
 }
 
 fn client(addr: &str, room: &str, name: &str) -> NetClient {

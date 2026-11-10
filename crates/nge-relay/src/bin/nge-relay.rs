@@ -2,7 +2,7 @@
 
 use nge_relay::Config;
 
-const USAGE: &str = "用法: nge-relay [--addr 127.0.0.1:9100] [--room-size 8] [--max-frame 8192] [--rate 60]";
+const USAGE: &str = "用法: nge-relay [--addr 127.0.0.1:9100] [--room-size 8] [--max-frame 8192] [--rate 60] [--max-conns 1024]";
 
 fn main() {
     let mut addr = "127.0.0.1:9100".to_owned();
@@ -18,6 +18,7 @@ fn main() {
             ("--room-size", Some(v)) => v.parse().map(|n: usize| config.room_size = n.clamp(1, 256)).is_ok(),
             ("--max-frame", Some(v)) => v.parse().map(|n: usize| config.max_frame = n.clamp(64, 60 * 1024)).is_ok(),
             ("--rate", Some(v)) => v.parse().map(|r: f64| (config.rate, config.burst) = (r.max(1.0), r.max(1.0) * 2.0)).is_ok(),
+            ("--max-conns", Some(v)) => v.parse().map(|n: usize| config.max_conns = n.clamp(1, 1 << 20)).is_ok(),
             _ => false,
         };
         if !ok {

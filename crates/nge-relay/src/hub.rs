@@ -23,11 +23,15 @@ pub struct Config {
     pub idle_timeout: f64,
     /// 连上以后多久之内要发 `Hello`。
     pub hello_timeout: f64,
+    /// 同时最多几条连接（WebSocket 和 HTTP 一起算），超出的直接关。
+    pub max_conns: usize,
+    /// 每条连接最多排几帧待发：排满了当慢客户端踢掉。
+    pub outbox: usize,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Self { room_size: 8, max_frame: 8 * 1024, rate: 60.0, burst: 120.0, max_dropped: 600, idle_timeout: 10.0, hello_timeout: 5.0 }
+        Self { room_size: 8, max_frame: 8 * 1024, rate: 60.0, burst: 120.0, max_dropped: 600, idle_timeout: 10.0, hello_timeout: 5.0, max_conns: 1024, outbox: 256 }
     }
 }
 
@@ -65,16 +69,24 @@ impl Hub {
         self.conns.insert(id, Conn { room: None, name: String::new(), opened: now, last: now, bucket, dropped: 0 });
     }
 
-    /// 收到一个二进制帧。
-    pub fn frame(&mut self, id: ConnId, bytes: &[u8], now: f64) -> Vec<Out> {
+    /// 过频率限制（二进制帧和文本帧共用一个令牌桶）：`Err` 里是要发的（超频的丢掉不回，连续超出太多踢出）。
+    fn admit(&mut self, id: ConnId, now: f64) -> Result<(), Vec<Out>> {
         let max_dropped = self.config.max_dropped;
-        let Some(conn) = self.conns.get_mut(&id) else { return vec![] };
+        let Some(conn) = self.conns.get_mut(&id) else { return Err(vec![]) };
         conn.last = now;
         if !conn.bucket.take(now) {
             conn.dropped += 1;
-            return if conn.dropped > max_dropped { self.kick(id, ErrorCode::RateLimited) } else { vec![] };
+            return Err(if conn.dropped > max_dropped { self.kick(id, ErrorCode::RateLimited) } else { vec![] });
         }
         conn.dropped = 0;
+        Ok(())
+    }
+
+    /// 收到一个二进制帧。
+    pub fn frame(&mut self, id: ConnId, bytes: &[u8], now: f64) -> Vec<Out> {
+        if let Err(out) = self.admit(id, now) {
+            return out;
+        }
         if bytes.len() > self.config.max_frame {
             return vec![reply(id, &RelayMsg::Error(ErrorCode::TooLarge))];
         }
@@ -88,8 +100,9 @@ impl Hub {
 
     /// 收到一个文本帧：协议只用二进制。
     pub fn text(&mut self, id: ConnId, now: f64) -> Vec<Out> {
-        let Some(conn) = self.conns.get_mut(&id) else { return vec![] };
-        conn.last = now;
+        if let Err(out) = self.admit(id, now) {
+            return out;
+        }
         vec![reply(id, &RelayMsg::Error(ErrorCode::BadFrame))]
     }
 
@@ -154,6 +167,7 @@ impl Hub {
         if members.len() >= self.config.room_size {
             return self.kick(id, ErrorCode::RoomFull);
         }
+        let name = self.unique_name(&members, name);
         let peers = members.iter().filter_map(|m| self.conns.get(m).map(|c| Peer { id: *m, name: c.name.clone() })).collect();
         let max = u16::try_from(self.config.room_size).unwrap_or(u16::MAX);
         let mut out = vec![reply(id, &RelayMsg::Welcome { you: id, peers, max })];
@@ -165,6 +179,22 @@ impl Hub {
         }
         self.rooms.entry(room).or_default().push(id);
         out
+    }
+
+    /// 房间里有人叫这个名字时加编号（`a#2`、`a#3`……），截短了让总长不超过上限。
+    fn unique_name(&self, members: &[ConnId], name: String) -> String {
+        let taken = |n: &str| members.iter().any(|m| self.conns.get(m).is_some_and(|c| c.name == n));
+        if !taken(&name) {
+            return name;
+        }
+        (2..)
+            .map(|n| {
+                let suffix = format!("#{n}");
+                let base: String = name.chars().take(MAX_NAME.saturating_sub(suffix.chars().count())).collect();
+                base + &suffix
+            })
+            .find(|candidate| !taken(candidate))
+            .unwrap_or(name)
     }
 
     fn forward(&mut self, id: ConnId, to: Option<PeerId>, body: Vec<u8>) -> Vec<Out> {
@@ -344,5 +374,43 @@ mod tests {
         assert_eq!(decoded(h.tick(10.1)), vec![(1, Some(RelayMsg::Error(ErrorCode::Timeout))), (1, None), (2, Some(RelayMsg::Left(1)))]);
         assert_eq!(decoded(h.tick(18.1)).len(), 2, "2 号 8 秒时说过话，18 秒后踢");
         assert_eq!(h.room_count(), 0);
+    }
+
+    #[test]
+    fn text_frames_share_the_rate_limit_and_a_text_flood_is_kicked() {
+        let mut h = hub();
+        join(&mut h, 1, "r", "a");
+        join(&mut h, 2, "r", "b");
+        // 和二进制帧同一个令牌桶：攒的 4 个用完以后只丢不回
+        let replies = (0..10).map(|_| h.text(1, 0.0).len()).sum::<usize>();
+        assert_eq!(replies, 4);
+        assert_eq!(h.frame(1, &data(None, b"x"), 0.0), vec![], "文本把令牌用光了，二进制也要等");
+        let mut last = vec![];
+        for _ in 0..30 {
+            last = decoded(h.text(1, 0.0));
+            if !last.is_empty() {
+                break;
+            }
+        }
+        assert_eq!(last, vec![(1, Some(RelayMsg::Error(ErrorCode::RateLimited))), (1, None), (2, Some(RelayMsg::Left(1)))]);
+    }
+
+    #[test]
+    fn same_names_in_a_room_get_a_number() {
+        let mut h = Hub::new(Config { room_size: 8, ..Config::default() });
+        join(&mut h, 1, "r", "a");
+        assert_eq!(join(&mut h, 2, "r", "a")[1], (1, Some(RelayMsg::Joined(peer(2, "a#2")))));
+        assert_eq!(join(&mut h, 3, "r", "a")[1].1, Some(RelayMsg::Joined(peer(3, "a#3"))));
+        // 别的房间不算重名
+        assert_eq!(join(&mut h, 4, "x", "a"), vec![(4, Some(RelayMsg::Welcome { you: 4, peers: vec![], max: 8 }))]);
+        // 长名字截短了再加编号，不超过上限
+        let long = "长".repeat(MAX_NAME);
+        join(&mut h, 5, "r", &long);
+        let got = join(&mut h, 6, "r", &long);
+        let Some(RelayMsg::Joined(p)) = &got[1].1 else { panic!("{got:?}") };
+        assert_eq!(p.name, format!("{}#2", "长".repeat(MAX_NAME - 2)));
+        // 走了的名字空出来
+        h.close(2);
+        assert_eq!(join(&mut h, 7, "r", "a")[1].1, Some(RelayMsg::Joined(peer(7, "a#2"))));
     }
 }
