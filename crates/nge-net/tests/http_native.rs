@@ -4,7 +4,7 @@ use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::time::{Duration, Instant};
 
-use nge_net::http::{HttpBackend, HttpDone, HttpRequest, MAX_RESPONSE, backend};
+use nge_net::http::{HttpDone, HttpRequest, MAX_RESPONSE, backend};
 
 /// 起一个服务：读完请求头，回 `head` 加 `body`。返回地址。
 fn serve_once(head: String, body: Vec<u8>) -> String {

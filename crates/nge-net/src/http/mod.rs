@@ -104,6 +104,7 @@ impl HttpRequest {
 }
 
 /// 响应体超过上限时的错误（原生和浏览器一样）。
+#[cfg(feature = "client")]
 pub(crate) fn too_large() -> String {
     format!("响应超过 {MAX_RESPONSE} 字节")
 }
