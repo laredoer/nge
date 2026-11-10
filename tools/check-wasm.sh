@@ -13,3 +13,5 @@ for dir in crates/nge-*; do
   packages="$packages -p $(basename "$dir")"
 done
 cargo check --target wasm32-unknown-unknown $packages -p sanguo "$@"
+# 单独编示例：只开它自己选的 nge-scene 功能（和上面一起编时功能会合并，看不出缺了什么）
+cargo check --target wasm32-unknown-unknown -p sanguo "$@"
