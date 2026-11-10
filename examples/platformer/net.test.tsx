@@ -76,3 +76,11 @@ test("中继地址换成同一台服务器的 HTTP 地址", () => {
   expect(relayHttp("WS://Host:1/")).toBe("http://Host:1");
   for (const bad of [null, "", "http://x", "ws://", "ftp://x"]) expect(relayHttp(bad)).toBe(null);
 });
+
+test("status 里的成员只在在线时算，自己不算", () => {
+  const room = netRoom();
+  room.handle({ kind: "status", status: "online", url: "ws://r", me: 1, peers: [bob, { id: 1, name: "我" }] });
+  expect(room.peers()).toEqual([bob]);
+  room.handle({ kind: "status", status: "connecting", url: "ws://r", me: null, peers: [bob] });
+  expect(room.peers()).toEqual([]);
+});

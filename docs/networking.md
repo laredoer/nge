@@ -81,14 +81,16 @@ pub fn connect(url: &str) -> Box<dyn Link>;
   - `NetSync { key }`：每秒 `rate`（默认 20）次把它的 `Transform2d`（位置、角度）放进快照广播。
   - `Remote { peer, key }`：按收到的快照插值，写它的 `Transform2d`。
   - `KeepOnLeave`：场景声明的远端实体带它，对方离开时不在 Rust 这边删，交给场景（TSX 会把它从场景里去掉）。没有它的 `Remote` 实体在对方离开、自己断线时被删掉。
-- 消息 `NetEvent`：`Status`、`Joined`、`Left`、`Message`。同时发给 TSX 的 `net` 事件。
-- TSX 的 command：`netSend { type, data, to? }`、`http { id, method, url, headers, body, timeout }`；事件：`net`、`http`。
+- 消息 `NetEvent`：`Status`、`Joined`、`Left`、`Message`、`Error`。同时发给 TSX 的 `net` 事件（`kind` 是 `status` / `join` / `leave` / `message` / `error`）；`status` 带着在连的中继地址 `url`（断开时是 null）和成员列表。
+- TSX 的 command：`netSend { type, data, to? }`、`http { id, method, url, headers, body, timeout }`；事件：`net`、`http { id, ok, status, body, error }`。
+- HTTP 是单独的 `HttpPlugin`（`Http` 资源、`HttpDone` 消息、`http` command 和事件）；场景开了 feature `net` 时两个插件都加上。
 - 系统：`PreUpdate` 收（更新状态、喂缓冲、发事件），`PostUpdate`（物理之后、相机之前）给 `Remote` 写插值后的位置、到点了广播快照。
 
 ### 插值（`InterpBuffer`）
 
 - 每个远端每个 `key` 一个缓冲，按发送方时间戳 `t`（毫秒）排好，最多 32 个；同一个 `seq` 的重复包、比已经播过的还旧的包丢掉，乱序的插到该在的位置。
-- 时钟：每收到一个包算 `本地时间 − t`，取最小的那次（路上最快的那个）当偏移，之后缓慢往上跟（应对两边时钟走得不一样快）。要画的时间 = 本地时间 − 偏移 − 延迟（默认 100 ms）。
+- 时钟：每收到一个包算 `本地时间 − t`，取最小的那次（路上最快的那个）当偏移，之后按 2% 的速度往上跟（应对两边时钟走得不一样快）。
+- 一下跳得太远（超过 300，比如对方重生回起点）直接跳过去，不在中间拖一条线。要画的时间 = 本地时间 − 偏移 − 延迟（默认 100 ms）。
 - 要画的时间落在两个包之间：按时间线性插值位置，角度走短的那边。比最新的还新：按最后两个包的速度外推，最多 100 ms，之后停在那里。比最旧的还旧：用最旧的。
 - 角度、位置不是有限的数时整包丢掉（解码时已经校验过一次）。
 
@@ -99,10 +101,10 @@ pub struct HttpRequest { pub method: Method, pub url: String, pub headers: Vec<(
 pub struct HttpDone { pub id: u64, pub status: u16, pub body: String, pub error: Option<String> }
 ```
 
-- `HttpRequest::get(url)` / `post(url, body)`，`header`、`timeout` 链式加；`validate` 只放过 `http://` / `https://`、合法的头名、`GET` 不带体、超时在 (0, 60] 秒。不合规的直接回一个带 `error` 的 `HttpDone`，不发出去。
+- `HttpRequest::get(url)` / `post(url, body)`，`header`、`timeout` 链式加（默认 10 秒）；`validate` 只放过 `http://` / `https://`、地址不超过 2048 字节且没有空白和控制字符、最多 32 个头且头名合法、`GET` 不带体、请求体不超过 64 KiB、超时在 (0, 60] 秒。不合规的直接回一个带 `error` 的 `HttpDone`，不发出去。
 - `Http` 资源：`send(req) -> id`；每帧收已经完成的请求，变成 `HttpDone` 消息，TSX 发的再变成 `http` 事件（带 TSX 自己的 id）。同时最多 8 个在路上，多的排队。响应体最多 1 MiB，超出算出错。每个请求一定有且只有一个 `HttpDone`。
 - 原生：每个请求一个线程跑 `ureq`（阻塞调用在那个线程里，不在引擎线程上）。web：`fetch`（`wasm_bindgen_futures::spawn_local`），超时用 `AbortController`。
-- TSX：`const http = httpClient(() => game)`，`<GameView onHttp={http.handle}>`，`await http.get(url)`、`await http.post(url, body)`，结果是 `{ ok, status, body, error? }`；`json()` 帮忙解析。
+- TSX（`ts/http.ts`）：`const http = httpClient(() => game)`，`<GameView onHttp={http.handle}>`，`await http.get(url, { headers, timeout })`、`await http.post(url, body)`，结果是 `{ ok, status, body, error? }`；`post` 的 `body` 不是字符串时编成 JSON，默认 `Content-Type: text/plain`（浏览器跨域不用预检）；游戏视图还没建好时直接以 `error` 结束；`json(result)` 只解 2xx 的合法 JSON。
 
 ### 场景和 TSX
 
@@ -112,15 +114,17 @@ scene.net = { url?: string, room: string, name?: string, sync?: string[], rate?:
 
 - 写了 `net` 就连，去掉就断，`url` / `room` / `name` 变了重连。`url` 不写时用环境变量 `NGE_RELAY`（原生），再没有就是 `ws://127.0.0.1:9100`。
 - `sync` 里的精灵 id 带上 `NetSync { key: id }`。
-- id 是 `net:<peer>:<key>` 的精灵（`remoteId(peer, key)`）带上 `Remote` 和 `KeepOnLeave`：TSX 按成员列表声明它们长什么样（颜色、大小、头顶的名字是 `texts` 里 `follow` 它的文字），位置归插值管。
-- `netRoom()`：从 `net` 事件维护 `status()`、`self()`、`peers()` 的 signal，`onMessage(type, fn)` 订阅消息；`netSend(game, type, data, to?)` 发消息。断线时 `peers()` 清空，远端的精灵跟着从场景里去掉。
+- id 是 `net:<peer>:<key>` 的精灵（`remoteId(peer, key)`）带上 `Remote` 和 `KeepOnLeave`：TSX 按成员列表声明它们长什么样（颜色、大小、头顶的名字是 `bubbles` 里 `follow` 它的气泡），位置归插值管。场景没变的节点不动，插值写的位置不会被场景盖掉。
+- `netRoom()`：从 `net` 事件维护 `status()`、`url()`、`me()`、`peers()`、`error()` 的 signal，`onMessage(type, fn)` 订阅消息（不在房间里的人发的不要）；`netSend(game, type, data, to?)` 发消息。断线时 `peers()` 清空，远端的精灵跟着从场景里去掉。
+- `relayHttp(url)`：中继地址换成同一台服务器的 HTTP 地址（`ws://h:p/…` → `http://h:p`，`wss` → `https`），排行榜用它。
 
 ### 平台跳跃
 
-- 按 N 开关联机（记在设备上），房间是 `platformer-<关卡号>`：同一关的人互相看得见，换关就换房间。
-- 远端的角色是半透明的同色方块，头顶是对方的名字，没有刚体（碰不到、不会被踩）。
-- HUD 加一段：「离线」「连接中…」「在线 N 人」。
-- 通关时 `POST` 成绩到中继的排行榜，每关开始时 `GET` 一次第一名显示在 HUD 上；中继没起来时不显示，不影响游戏。
+- 联网默认开着，按 N 开关（`saved("net")`，记在设备上）；房间是 `platformer-<关卡号>`：同一关的人互相看得见，换关就换房间。名字是随机的 `P100`–`P999`。
+- 远端的角色是半透明的蓝色方块（`#5dade280`），头顶是对方的名字，没有刚体（碰不到、不会被踩）。
+- HUD 加一段：关着时「离线」，连着（包括中继连不上、一直在重试）时「连接中…」，连上了「在线 N 人」（算上自己）。
+- 通关时 `POST` 成绩到中继的排行榜，每关开始、连上中继、交完成绩后 `GET` 一次第一名显示在 HUD 上（「榜首 P123 12.3 秒」）；排行榜的地址从 `net` 事件里的中继地址推出来；中继没起来时不显示，不影响游戏。对面给的榜单只认类型对、分数是有限非负数的，名字截到 32 个字。
+- 代码在 `examples/platformer/online.ts`（纯函数，`online.test.tsx` 测）和 `App.tsx`。
 
 ## 不做
 
@@ -137,6 +141,47 @@ scene.net = { url?: string, room: string, name?: string, sync?: string[], rate?:
 - 单元测试：编解码（往返、长度上限、坏数据、NaN、越界、超长字符串）、插值（顺序、乱序、重复、丢包、外推上限、时钟偏移）、退避（翻倍、上限、抖动范围、归零）、客户端（握手、断线发 Left、重连按退避、心跳超时、换房间、发送频率）、房间（加入、离开通知、人数上限、心跳超时、大小上限、频率限制、Hello 前发数据）、HTTP（请求构造和校验、并发上限排队、回调按 id 分发、不合规的立即回错）。
 - 集成测试：测试里起中继（随机端口），两个原生客户端连同一房间，互相收到快照和离开通知；原生连接收发文本和二进制帧；排行榜的 HTTP。
 - 变异验证：见下面的表。
+
+### 本机试联网
+
+```sh
+cargo run -p nge-relay                      # 起中继，默认 127.0.0.1:9100
+cd examples/platformer && nsh run           # 开两个（第二个在另一个终端里再 nsh run）
+NGE_RELAY=ws://192.168.1.10:9100 nsh run    # 中继在别的机器上（原生读环境变量）
+curl 'http://127.0.0.1:9100/scores?board=platformer-1'   # 看排行榜
+```
+
+两个窗口在同一关时互相看得见；关掉中继后 HUD 变成「连接中…」，照样能玩，中继再起来后自动连回去。
+
+### 变异验证
+
+临时改坏关键逻辑，确认有测试报错，再改回来：
+
+| 改坏的地方 | 报错的测试 |
+|---|---|
+| 插值不丢重复的 `seq` | `interp::duplicates_and_already_played_samples_are_dropped` |
+| 外推不封顶 | `interp::extrapolates_at_most_the_cap_then_holds`、`sync::remotes_are_interpolated_a_hundred_ms_behind` |
+| 跳得远也插值（不瞬移） | `interp::teleports_are_not_smeared` |
+| 退避不封顶 | `backoff::jitter_stays_within_twenty_percent_and_varies` 等 3 个 |
+| 断线不给成员发 `Left` | `client::a_dropped_connection_reports_everyone_left_and_reconnects_with_backoff` 等 2 个 |
+| 不判 10 秒静默 | `client::pings_every_two_seconds_and_gives_up_after_ten_silent_seconds` 等 2 个 |
+| 房间不限人数 | `hub::a_full_room_turns_you_away` |
+| 不限帧大小 | `hub::oversized_frames_are_refused_but_the_connection_stays` |
+| 刷屏不踢 | `hub::floods_are_dropped_and_a_long_flood_is_kicked` |
+| 心跳超时不踢 | `hub::silent_members_and_never_joining_connections_time_out` |
+| 快照不查 NaN / 不查越界 | `proto::non_finite_and_out_of_range_coordinates_are_rejected` |
+| HTTP 不限并发 | `http::at_most_eight_in_flight_and_the_rest_wait` |
+| HTTP 不查协议 | `http::bad_requests_are_refused` 等 3 个 |
+| 忽略 `KeepOnLeave` / 对方走了不删 | `sync::remotes_of_a_peer_who_left_are_removed_unless_the_scene_keeps_them`、`sync::going_offline_removes_remotes` |
+| TSX：结果交回后不删 id | `http.test.tsx` 的「结果按 id 交回……」 |
+| TSX：`status` 里的成员不过滤自己、不在线也算 | `net.test.tsx` 的「status 里的成员只在在线时算，自己不算」（原来的测试没抓到，补的） |
+| TSX：榜首不查名字类型 | `online.test.tsx` 的「榜首：……不信对面的数据」 |
+
+## 修过的问题
+
+- 排行榜的请求体太大时，中继没读完请求就回 413、关连接，客户端收到的是连接被重置：改成先读完请求头再回。
+- 百分号解码按字符串切片，碰到多字节字符会 panic：改成按字节解析十六进制。
+- 场景写了 `net` 的那一帧还没连：连接的系统排到收消息之前。
 
 ## 还没手测
 

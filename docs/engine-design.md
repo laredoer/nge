@@ -97,6 +97,7 @@
 | **2D 渲染补齐** | `NormalMap`：法线图让受光的精灵按表面朝向明暗（灯有 `height`）；`Occluder2d`：精灵的矩形或多边形挡住开了 `shadows` 的灯，硬阴影；后处理里的 `bloom` 是内置的多遍效果；`PostEffect.layer` 可以只给 z < 0 的背景层；见 [render2d-more.md](render2d-more.md) | 平台跳跃每关有 bloom 和远景模糊，夜里的石碑有凹凸、挡住角色的灯 |
 | **3D 渲染补齐** | 材质 `blend` 的半透明网格按到相机的距离由远到近画；`SpotLight` 聚光灯；聚光灯、点光源（六面）能投影子，方向光可以分 2–4 段级联；`Animator::play(clip, fade)` 淡入淡出；glTF 的变形（morph target）和 `weights` 动画；见 [render3d-more.md](render3d-more.md) | 平台跳跃第一关有照着箱子堆、投影子的聚光灯，一只半透明的果冻靠近时从 idle 淡到 squish |
 | **Web** | `wasm32` 上浏览器主线程用 `requestAnimationFrame` 驱动引擎，只用 WebGPU；仓库里改过的 `nsh-platform-web` 支持原生组件；资源启动前取进内存，键盘、声音（第一次按键后出声）；见 [web.md](web.md) | `nsh package --target web` 打出的长坂坡在浏览器里能玩 |
+| **联网** | `nge-net`：WebSocket 连接（原生 tokio-tungstenite 在单独线程、浏览器 `WebSocket`），断线指数退避重连；postcard 协议；`NetSync` 每秒 20 次广播位置，`Remote` 缓冲 100 ms 插值、容忍乱序丢包；`Http` 的 GET / POST（原生 ureq、浏览器 fetch）；`nge-relay` 中继（房间、进出通知、心跳、人数 / 大小 / 频率上限，顺带排行榜）；场景的 `net`、TSX 的 `netRoom()` / `httpClient()`；见 [networking.md](networking.md) | 平台跳跃两个窗口同一关互相看见（半透明、头顶名字），N 开关，中继连不上照常单机，通关成绩进排行榜 |
 | **M6 Android** | SurfaceView 和 Vulkan，JNI 胶水层 | 示例游戏在 Android 真机上能跑 |
 
 ## 待定
