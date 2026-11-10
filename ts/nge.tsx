@@ -591,6 +591,31 @@ export interface FloatText {
   rise?: number;
 }
 
+/** 2D 相机（不转）：中心对准 (x, y)，`zoom` 2 是放大两倍。 */
+export interface CameraView {
+  x: number;
+  y: number;
+  zoom: number;
+}
+
+/** 和引擎的 zoom 下限一样，免得除零。 */
+const MIN_CAMERA_ZOOM = 1e-4;
+
+/**
+ * 游戏视图里的点（左上角原点，y 朝下，point）换成世界坐标（y 朝上）；`size` 是游戏视图的宽高。
+ * 和引擎 `Camera2d::screen_to_world` 一样（不算视差、震屏），编辑器拾取用。
+ */
+export function screenToWorld(camera: CameraView, size: [number, number], [sx, sy]: [number, number]): [number, number] {
+  const zoom = Math.max(camera.zoom, MIN_CAMERA_ZOOM);
+  return [camera.x + (sx - size[0] / 2) / zoom, camera.y - (sy - size[1] / 2) / zoom];
+}
+
+/** `screenToWorld` 反过来。 */
+export function worldToScreen(camera: CameraView, size: [number, number], [wx, wy]: [number, number]): [number, number] {
+  const zoom = Math.max(camera.zoom, MIN_CAMERA_ZOOM);
+  return [(wx - camera.x) * zoom + size[0] / 2, size[1] / 2 - (wy - camera.y) * zoom];
+}
+
 /** 炸一团粒子。`game` 是 `<GameView ref>` 拿到的节点。 */
 export function burst(game: NativeComponentRef | undefined, args: Burst) {
   game?.command("burst", args);
