@@ -1,4 +1,4 @@
-//! 平台跳跃：关卡（瓦片地图）、金币、终点和相机都在 `App.tsx` 里声明；
+//! 平台跳跃：关卡（瓦片地图）、金币、终点和相机都在 `game.tsx` 里声明；
 //! Rust 只管每帧的角色控制：读键盘、看脚下有没有地、设速度，踩敌人、被敌人撞或掉下去了送回起点，按 R 重新开始；
 //! 起跳、踩敌人和掉坑的音效也在这里放。
 
@@ -19,7 +19,7 @@ use nge_scene::{LevelStart, SceneId, ScenePlugin};
 use nsh_core::prelude::assets;
 use serde::Serialize;
 
-/// 角色精灵的 id（`App.tsx` 里声明）。
+/// 角色精灵的 id（`game.tsx` 里声明）。
 pub const PLAYER: &str = "player";
 /// 掉出关卡、被送回起点时发给 TSX。
 pub const RESPAWN: EventKey<Respawn> = EventKey::new("respawn");
@@ -537,14 +537,14 @@ mod tests {
         assert!(run(&mut app, 5).iter().all(|(n, _)| n != "restart"), "暂停时不重来");
     }
 
-    /// App.tsx 里用到的声音都在打包的资源里。
+    /// game.tsx 里用到的声音都在打包的资源里。
     #[test]
     fn sounds_are_bundled() {
         let uris: Vec<_> = assets!().iter().map(|f| f.uri).collect();
         for name in ["jump", "fall", "stomp", "coin", "win"] {
             assert!(uris.contains(&format!("asset:/@platformer/{name}.wav").as_str()), "{name} 不在 {uris:?}");
         }
-        let tsx = [include_str!("../App.tsx"), include_str!("../levels.ts")].concat();
+        let tsx = [include_str!("../game.tsx"), include_str!("../levels.ts")].concat();
         assert!(tsx.contains("asset:/@platformer/coin.wav") && tsx.contains("asset:/@platformer/win.wav"));
         assert!(tsx.contains(&format!("id: `{ENEMY}${{i}}`")), "levels.ts 的敌人 id 用 {ENEMY} 开头");
         assert!(uris.contains(&"asset:/@platformer/crate.glb") && tsx.contains("asset:/@platformer/crate.glb"), "2.5D 的箱子");
@@ -787,7 +787,7 @@ mod tests {
         assert!(overlays(&mut app).is_empty(), "再按一次关掉");
     }
 
-    /// App.tsx 的金币是 sensor、角色开了 collide：走过去时发 collide，金币不挡路。
+    /// game.tsx 的金币是 sensor、角色开了 collide：走过去时发 collide，金币不挡路。
     #[test]
     fn walking_through_a_coin_reports_it() {
         let mut app = app();
@@ -901,7 +901,7 @@ mod tests {
         use nge_render3d::{Animator, Assets3d, Image, Model3d, Pose, Transform3d};
 
         let uris: Vec<_> = assets!().iter().map(|f| f.uri).collect();
-        let ts = [include_str!("../App.tsx"), include_str!("../levels.ts")].concat();
+        let ts = [include_str!("../game.tsx"), include_str!("../levels.ts")].concat();
         assert!(uris.contains(&"asset:/@platformer/jelly.glb") && ts.contains("asset:/@platformer/jelly.glb"));
         let mut app = App::new();
         app.add_plugins(Render3dPlugin);

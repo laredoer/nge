@@ -137,7 +137,7 @@ scene.net = { url?: string, room: string, name?: string, sync?: string[], rate?:
 - 远端的角色是半透明的蓝色方块（`#5dade280`），头顶是对方的名字，没有刚体（碰不到、不会被踩）。
 - HUD 加一段：关着（包括开关还没读出来）时「离线」，连着（包括中继连不上、一直在重试）时「连接中…」，房间满了「房间满了，稍后再试」，连上了「在线 N 人」（算上自己）。
 - 通关时 `POST` 成绩到中继的排行榜，每关开始、连上中继、交完成绩后 `GET` 一次第一名显示在 HUD 上（「榜首 P123 12.3 秒」）；排行榜的地址从 `net` 事件里的中继地址推出来；中继没起来时不显示，不影响游戏。对面给的榜单只认类型对、分数是有限非负数的，名字截到 32 个字。
-- 代码在 `examples/platformer/online.ts`（纯函数，`online.test.tsx` 测）和 `App.tsx`。
+- 代码在 `examples/platformer/online.ts`（纯函数，`online.test.tsx` 测）和 `game.tsx`。
 
 ## 不做
 
