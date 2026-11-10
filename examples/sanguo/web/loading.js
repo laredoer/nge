@@ -1,27 +1,44 @@
 // 长坂坡 web 版的加载页（nsh.json 的 web.host，nsh package 原样带上，见 docs/web.md）。
 // 页面一开始就盖在最上面：先显示下载引擎（wasm）的进度（nsh.js 发的 nsh-load-progress），
-// 再显示取游戏资源的进度（引擎发的 nge-progress），游戏画出第一帧（nge-ready）后淡出。
-// 起不来时（nge-error，或者页面自己的错误框）显示原因和「重试」。
+// 再显示取游戏资源的进度（引擎发的 nge-progress），游戏画出第一帧（nge-ready）后淡出、藏起来。
+// 起不来或者跑起来以后出错（nge-error，或者页面自己的错误框）时显示原因和「重试」。
 
 /** 引擎占进度条的多少，剩下的是资源。 */
 const ENGINE_SHARE = 0.85;
 /** 压缩传输时 Content-Length 是压缩后的大小，按常见的压缩比估原始大小。 */
 const RATIO = { br: 3.7, gzip: 2.7, deflate: 2.7 };
+/** 不认识的编码按这个比估：估大一些，进度条宁可慢、不冲到头。 */
+const UNKNOWN_RATIO = 4;
 /** 拿不到大小时按这么大估（字节），进度条慢慢逼近但不到头。 */
 const GUESS = 12e6;
 
 const MB = (bytes) => (bytes / 1e6).toFixed(1);
 
-/** 引擎下载了多少（0–1）和要显示的字。 */
-export function engineProgress({ loaded = 0, length = 0, encoding = "", done = false } = {}) {
-  if (done) return { part: 1, text: `下载引擎 ${MB(loaded)} MB` };
-  const ratio = encoding ? RATIO[encoding.toLowerCase()] : 1;
-  const total = length && ratio ? length * ratio : 0;
-  if (total && loaded <= total) {
-    return { part: Math.min(loaded / total, 0.99), text: `下载引擎 ${MB(loaded)} / ${MB(total)} MB` };
+/** 编码对应的压缩比：没有编码或 identity 是 1。 */
+function ratioOf(encoding = "") {
+  const e = encoding.trim().toLowerCase();
+  if (!e || e === "identity") return 1;
+  return RATIO[e] ?? UNKNOWN_RATIO;
+}
+
+/**
+ * 引擎下载了多少（`part`，0–1）、估的原始总大小（`total`）和要显示的字。
+ * `prev` 是上一次的结果：进度只增不减，收到的超过估计时把总数往上调，不换算法。
+ */
+export function engineProgress({ loaded = 0, length = 0, encoding = "", done = false } = {}, prev = { part: 0, total: 0 }) {
+  if (done) return { part: 1, total: loaded, text: `下载引擎 ${MB(loaded)} MB` };
+  let total = Math.max(length * ratioOf(encoding), prev.total || 0);
+  let part;
+  if (total) {
+    if (loaded > total) total = loaded * 1.05;
+    part = Math.min(loaded / total, 0.99);
+  } else {
+    // 大小不知道：按收到的字节慢慢逼近
+    part = Math.min(1 - Math.exp(-loaded / GUESS), 0.95);
   }
-  // 大小不知道或者对不上：按收到的字节慢慢逼近
-  return { part: Math.min(1 - Math.exp(-loaded / Math.max(total, GUESS)), 0.95), text: `下载引擎 ${MB(loaded)} MB` };
+  part = Math.max(part, prev.part || 0);
+  const text = total ? `下载引擎 ${MB(loaded)} / ${MB(total)} MB` : `下载引擎 ${MB(loaded)} MB`;
+  return { part, total, text };
 }
 
 const style = `
@@ -30,6 +47,7 @@ const style = `
   background: radial-gradient(ellipse at 50% 40%, #2a1d16 0%, #120c09 70%); color: #f3e3c3;
   font: 14px/1.5 system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; transition: opacity .45s ease; }
 #nge-loading.gone { opacity: 0; pointer-events: none; }
+#nge-loading[hidden] { display: none; }
 #nge-loading h1 { margin: 0; font-size: clamp(32px, 9vw, 56px); letter-spacing: .3em; padding-left: .3em;
   font-weight: 700; color: #e9c46a; text-shadow: 0 2px 18px rgba(233, 140, 40, .35); }
 #nge-loading .bar { width: min(340px, 78vw); height: 8px; border-radius: 4px; background: rgba(243, 227, 195, .12); overflow: hidden; }
@@ -51,7 +69,7 @@ function mountOverlay() {
   document.body.appendChild(root);
   const fill = root.querySelector(".fill");
   const text = root.querySelector(".text");
-  let engine = { part: 0 };
+  let engine = { part: 0, total: 0 };
   let failed = false;
 
   const show = (part, label) => {
@@ -60,12 +78,15 @@ function mountOverlay() {
     text.textContent = label;
   };
   const onEngine = (detail) => {
-    engine = engineProgress(detail);
+    engine = engineProgress(detail, engine);
     show(engine.part * ENGINE_SHARE, detail?.done ? "启动引擎…" : engine.text);
   };
   const fail = (message) => {
     if (failed) return;
     failed = true;
+    // 游戏跑起来以后才出的错：把淡出的加载页叫回来显示
+    root.classList.remove("gone");
+    root.hidden = false;
     root.setAttribute("role", "alert");
     const error = document.createElement("div");
     error.className = "error";
@@ -87,7 +108,8 @@ function mountOverlay() {
   addEventListener("nge-ready", () => {
     show(1, "");
     root.classList.add("gone");
-    setTimeout(() => root.remove(), 600);
+    // 只藏起来不删：之后引擎出错（比如显卡丢了）还要用它显示
+    setTimeout(() => failed || (root.hidden = true), 600);
   });
   addEventListener("nge-error", (e) => fail(e.detail?.message));
   // 页面自己的错误框（下载失败、运行时起不来）

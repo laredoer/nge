@@ -75,11 +75,25 @@ path = "src/lib.rs"
 name = "text"
 path = "tests/text/main.rs"
 
+[[test]]
+name = "native"
+path = "tests/native/main.rs"
+
 [dev-dependencies.nsh-core]
 version = "0.4.0"
 
 [dev-dependencies.serde_json]
 version = "1"
+
+[dev-dependencies.log]
+version = "0.4"
+
+[dev-dependencies.nsh-engine]
+version = "0.4.0"
+default-features = false
+
+[dev-dependencies.rustc-hash]
+version = "2.1"
 
 [dev-dependencies.unicode-bidi]
 version = "0.3.18"

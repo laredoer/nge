@@ -522,6 +522,13 @@ pub unsafe extern "C" fn nsh_environment(ptr: *const u8, len: usize) -> f64 {
     })
 }
 
+/// 页面告诉这个实例它属于哪个播放器（根元素的 `data-nsh-player`）：原生
+/// 组件找容器时限在这个根里（本仓库加的）。
+#[unsafe(no_mangle)]
+pub extern "C" fn nsh_set_player(key: u32) {
+    native::set_player(key);
+}
+
 /// Starts the Rust app this module was built for ([`rust_app!`]) in a
 /// `width` × `height` surface: its root component, with no bundle. Returns
 /// the delay (ms) until [`nsh_pump`] is due, or -1 (no app is registered).

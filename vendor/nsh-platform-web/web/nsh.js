@@ -776,7 +776,6 @@ function frameViewport(frame, colorScheme) {
   return { rect, release: () => state.release() };
 }
 
-/** Loads the runtime and makes a player in `container`. */
 /**
  * 下载运行时 wasm 的进度（本仓库加的）：边收边在 window 上发 `nsh-load-progress`，
  * `detail` 是 `{ loaded, length, encoding, done }`（`length` 是 Content-Length，压缩传输时是压缩后的大小；
@@ -811,6 +810,7 @@ function counted(response) {
   return new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers });
 }
 
+/** Loads the runtime and makes a player in `container`. */
 export async function createPlayer(container, options = {}) {
   const player = new Player(container, options);
   await player.load(options.wasm ?? new URL("nsh.wasm", import.meta.url));
@@ -856,6 +856,8 @@ class Player {
     this.shaderViews = new Set();
     // Of the views' own style rules (`op_css`).
     this.classPrefix = `nsh-p${++players}-`;
+    // 原生组件找容器时限在这个根里（`nsh_set_player`，本仓库加的）。
+    this.root.dataset.nshPlayer = String(players);
     this.timer = 0;
     // The engine trapped: it takes no more calls (`call`).
     this.trapped = false;
@@ -1100,6 +1102,7 @@ class Player {
     this.wasm = this.browserHost ? this.browserHost.bind(instance.exports) : instance.exports;
     // What side modules import (`main`): the instance's own exports.
     this.mainExports = instance.exports;
+    this.wasm.nsh_set_player?.(Number(this.root.dataset.nshPlayer));
     this.sideLoads = new Map();
     // Side modules compiled ahead (`prefetchSides`), by name.
     this.sideModules = new Map();
