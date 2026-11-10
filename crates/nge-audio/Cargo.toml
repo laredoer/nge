@@ -12,6 +12,7 @@ nge-assets.workspace = true
 bevy_ecs.workspace = true
 glam.workspace = true
 log.workspace = true
+web-time.workspace = true
 kira = { version = "0.12.6", default-features = false, features = ["cpal", "ogg", "vorbis", "wav", "pcm", "mp3"] }
 
 [dev-dependencies]

@@ -275,3 +275,28 @@ fn moving_does_not_cut_a_long_fade_short_and_nan_volumes_are_silent() {
     assert!(fade > 1.5, "还剩将近 2 秒的淡出 {fade}");
     assert_eq!(spatial(1.0, f32::NAN, Vec2::ZERO, Vec2::ZERO, 100.0), (1.0, 0.0));
 }
+
+#[test]
+fn locked_until_unlocked_then_music_starts_and_settings_carry_over() {
+    let source = MemorySource::default().with(BEEP, wav(2.5)).with(BOOP, wav(0.1));
+    let mut app = App::new();
+    app.add_plugins(AssetPlugin::new().source(Arc::new(source))).add_plugins(AudioPlugin::locked_mock());
+    let (beep, boop) = (load(&mut app, BEEP), load(&mut app, BOOP));
+    let music = audio(&mut app).play(beep, Play { bus: Bus::Music, ..Play::looped() });
+    let hit = audio(&mut app).play(boop, Play::default());
+    audio(&mut app).set_bus_volume(Bus::Music, 0.5, 0.0);
+    assert!(!audio(&mut app).enabled());
+    assert!(audio(&mut app).is_playing(music), "音乐排着等解锁");
+    assert!(!audio(&mut app).is_playing(hit), "解锁前的音效直接丢掉");
+    settle(&mut app);
+    assert_eq!(audio(&mut app).voices(), 0, "没解锁不出声");
+    assert!(audio(&mut app).is_playing(music));
+
+    crate::hand_over_mock();
+    settle(&mut app);
+    let audio = audio(&mut app);
+    assert!(audio.enabled());
+    assert!(audio.mix(music).is_some(), "解锁后音乐开始");
+    assert_eq!(audio.bus_volume(Bus::Music), 0.5);
+    assert_eq!(audio.bus_sounds(Bus::Music), 1, "进了音乐分组的轨道");
+}

@@ -2211,6 +2211,7 @@ dependencies = [
  "nge-assets",
  "nge-core",
  "nge-ecs",
+ "web-time",
 ]
 
 [[package]]
@@ -2301,6 +2302,7 @@ dependencies = [
  "js-sys",
  "log",
  "nge-assets",
+ "nge-audio",
  "nge-core",
  "nsh-platform-ios",
  "nsh-platform-macos",

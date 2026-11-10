@@ -2,6 +2,7 @@
 //! 每个 `requestAnimationFrame` 采一次视口、让引擎跑一帧（见 docs/web.md）。
 //! 建游戏之前先把应用登记的资源全部取进内存，进度用页面事件告诉加载页（`loading.rs`）。
 //! 键盘在 window 的捕获阶段收 keydown / keyup，规则和 macOS 一样（`input.rs`，见 docs/keyboard.md）。
+//! 页面第一次被按键、点按时在事件回调里建音频设备（[`nge_audio::unlock`]），之前浏览器不让出声。
 
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
@@ -17,7 +18,7 @@ use serde_json::Value as JsonValue;
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
-use web_sys::{CustomEvent, CustomEventInit, Document, Element, HtmlCanvasElement, KeyboardEvent, Response, Window};
+use web_sys::{CustomEvent, CustomEventInit, Document, Element, HtmlCanvasElement, KeyboardEvent, PointerEvent, Response, Window};
 
 use crate::input::{self, CAPTURE_KEYS, capture_keys};
 use crate::loading::{self, ERROR, PROGRESS, READY};
@@ -130,7 +131,7 @@ pub struct GameView {
     shared: Rc<Shared>,
     document: Document,
     on_visibility: Option<Closure<dyn FnMut()>>,
-    /// window 上的 keydown、keyup（捕获阶段）和 blur：(事件名, 是否捕获, 回调)。
+    /// window 上的 keydown、keyup、pointerdown、pointerup（捕获阶段）和 blur：(事件名, 是否捕获, 回调)。
     on_window: Vec<(&'static str, bool, Listener)>,
 }
 
@@ -244,16 +245,30 @@ fn editing(event: &KeyboardEvent) -> bool {
     target.is_some_and(|el| el.closest("input, textarea, select, [contenteditable]:not([contenteditable=false]), .nsh-field, iframe").ok().flatten().is_some())
 }
 
-/// window 上的键盘（捕获阶段，比 NSH 自己的处理先拿到）和窗口失焦（补发松开；不捕获，元素失焦不算）。
+/// 浏览器算作用户激活、可以开始出声的事件：除 Esc 外的按键，鼠标按下，触摸、笔抬起。
+fn activates(event: &web_sys::Event) -> bool {
+    if let Some(key) = event.dyn_ref::<KeyboardEvent>() {
+        return key.type_() == "keydown" && key.code() != "Escape";
+    }
+    event.dyn_ref::<PointerEvent>().is_some_and(|p| (p.pointer_type() == "mouse") == (p.type_() == "pointerdown"))
+}
+
+/// window 上的键盘（捕获阶段，比 NSH 自己的处理先拿到）、点按（只用来解锁声音）
+/// 和窗口失焦（补发松开；不捕获，元素失焦不算）。
 fn window_listeners(shared: &Rc<Shared>) -> Vec<(&'static str, bool, Listener)> {
     let mut listeners = Vec::new();
-    for (name, capture) in [("keydown", true), ("keyup", true), ("blur", false)] {
+    let events = [("keydown", true), ("keyup", true), ("pointerdown", true), ("pointerup", true), ("blur", false)];
+    for (name, capture) in events {
         let weak = Rc::downgrade(shared);
         let listener = Listener::new(move |event: web_sys::Event| {
             let Some(shared) = weak.upgrade() else { return };
-            match event.dyn_ref::<KeyboardEvent>() {
-                Some(key) => shared.on_key(key),
-                None => shared.release_keys(),
+            if activates(&event) {
+                nge_audio::unlock();
+            }
+            if let Some(key) = event.dyn_ref::<KeyboardEvent>() {
+                shared.on_key(key);
+            } else if event.type_() == "blur" {
+                shared.release_keys();
             }
         });
         if shared.window.add_event_listener_with_callback_and_bool(name, listener.as_ref().unchecked_ref(), capture).is_ok() {

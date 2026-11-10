@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use bevy_ecs::prelude::*;
 use glam::Vec2;
@@ -11,6 +11,7 @@ use kira::sound::static_sound::{StaticSoundData, StaticSoundHandle};
 use kira::track::{MainTrackHandle, TrackBuilder, TrackHandle};
 use kira::{Decibels, Mix, Panning, Tween};
 use nge_assets::{Assets, Handle, LoadState};
+use web_time::Instant;
 
 use crate::{Manager, Sound};
 
@@ -139,6 +140,8 @@ pub struct Audio {
     buses: [BusState; 3],
     listener: Vec2,
     range: f32,
+    /// 等解锁（浏览器）：还没有音频设备，[`crate::unlock`] 之后接上。
+    locked: bool,
 }
 
 impl Audio {
@@ -155,6 +158,25 @@ impl Audio {
             buses: [BusState::default(); 3],
             listener: Vec2::ZERO,
             range: DEFAULT_RANGE,
+            locked: false,
+        }
+    }
+
+    pub(crate) fn locked() -> Self {
+        Self { locked: true, ..Self::new(None) }
+    }
+
+    /// 解锁了：接上音频设备，之前设的音量、分组设置补上去。
+    fn attach(&mut self, manager: Manager) {
+        self.manager = Some(Mutex::new(manager));
+        self.locked = false;
+        self.add_buses();
+        self.apply_master();
+        for bus in Bus::ALL {
+            let state = self.buses[bus.index()];
+            self.set_bus_volume(bus, state.volume, 0.0);
+            self.set_lowpass(bus, state.lowpass, 0.0);
+            self.set_reverb(bus, state.reverb, 0.0);
         }
     }
 
@@ -268,10 +290,11 @@ impl Audio {
     }
 
     /// 播放一个声音。还没加载完就先排队，加载完的那一帧开始；加载失败记 warn 丢掉。没有音频设备时什么都不做。
+    /// 等解锁时（浏览器）循环的排着，别的丢掉。
     pub fn play(&mut self, sound: Handle<Sound>, play: Play) -> Voice {
         let voice = Voice(self.next);
         self.next += 1;
-        if self.enabled() {
+        if self.enabled() || (self.locked && play.looped) {
             self.pending.push((voice, sound, play));
         }
         voice
@@ -409,6 +432,12 @@ fn settings(data: &StaticSoundData, play: &Play, (volume, pan): (f32, f32)) -> S
 /// 开始加载好了的声音（按上限丢掉多的），清理播完的。
 pub(crate) fn update(mut audio: ResMut<Audio>, sounds: Res<Assets<Sound>>) {
     let audio = &mut *audio;
+    if audio.locked {
+        match crate::take_unlocked() {
+            Some(manager) => audio.attach(manager),
+            None => return,
+        }
+    }
     audio.playing.retain(|_, p| p.handle.state() != PlaybackState::Stopped);
     // 按位置的声音：听的人或声音挪了就更新音量和声像
     let (listener, range) = (audio.listener, audio.range);

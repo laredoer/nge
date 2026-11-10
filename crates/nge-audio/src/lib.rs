@@ -1,5 +1,7 @@
 //! 音频（kira）：按 `asset:/` 加载 [`Sound`]（wav / ogg / mp3），用 [`Audio`] 播放、循环、调音量。
 //! 没有音频设备时所有调用都是空操作。
+//! 浏览器上页面被按过、点过之前不能出声：先不建音频设备，平台层在第一次按键 / 点按的回调里调 [`unlock`]，
+//! 下一帧接上；之前的音效丢掉，循环的（音乐）排着等（见 docs/web.md）。
 
 mod audio;
 
@@ -35,18 +37,68 @@ impl Asset for Sound {
 #[derive(Default)]
 pub struct AudioPlugin {
     mock: bool,
+    /// 测试用：像浏览器那样等解锁。
+    #[cfg(test)]
+    locked: bool,
 }
 
 impl AudioPlugin {
     /// 不出声的后端（测试用），可以数正在播的声音。
     pub fn mock() -> Self {
-        Self { mock: true }
+        Self { mock: true, ..Self::default() }
     }
+
+    #[cfg(test)]
+    pub(crate) fn locked_mock() -> Self {
+        Self { mock: true, locked: true }
+    }
+
+    fn locked(&self) -> bool {
+        #[cfg(test)]
+        if self.locked {
+            return true;
+        }
+        cfg!(target_arch = "wasm32") && !self.mock
+    }
+}
+
+/// [`unlock`] 建好、等 [`Audio`] 下一帧接过去的音频设备。
+static UNLOCKED: Mutex<Option<Manager>> = Mutex::new(None);
+
+pub(crate) fn take_unlocked() -> Option<Manager> {
+    UNLOCKED.lock().unwrap_or_else(|e| e.into_inner()).take()
+}
+
+/// 浏览器：在用户按键、点按的事件回调里（同步）调用，建音频设备（WebAudio 只能在这时候开始出声）。
+/// 只有第一次有用，之后是空操作。
+#[cfg(target_arch = "wasm32")]
+pub fn unlock() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static TRIED: AtomicBool = AtomicBool::new(false);
+    if TRIED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    match AudioManager::<DefaultBackend>::new(AudioManagerSettings::default()) {
+        Ok(m) => *UNLOCKED.lock().unwrap_or_else(|e| e.into_inner()) = Some(Manager::Device(m)),
+        Err(e) => log::warn!("没有可用的音频设备，声音关掉: {e}"),
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn hand_over_mock() {
+    let m = AudioManager::<MockBackend>::new(AudioManagerSettings::default()).expect("mock 后端");
+    *UNLOCKED.lock().unwrap_or_else(|e| e.into_inner()) = Some(Manager::Mock(m));
 }
 
 impl Plugin for AudioPlugin {
     fn build(&self, app: &mut App) {
         nge_assets::ensure_plugin(app);
+        if self.locked() {
+            app.init_asset::<Sound>()
+                .insert_resource(Audio::locked())
+                .add_systems(PostUpdate, audio::update.in_set(AudioUpdated));
+            return;
+        }
         let manager = if self.mock {
             AudioManager::<MockBackend>::new(AudioManagerSettings::default()).map(Manager::Mock).map_err(|()| "mock 后端创建失败".to_owned())
         } else {
