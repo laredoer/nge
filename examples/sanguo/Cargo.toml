@@ -12,6 +12,7 @@ nge-assets.workspace = true
 nge-audio.workspace = true
 nge-render2d.workspace = true
 nge-render3d.workspace = true
+# 不用 3D 物理和追击，关掉它们的系统（浏览器上的包小一些）
 nge-scene.workspace = true
 nge-text.workspace = true
 nge-platform.workspace = true

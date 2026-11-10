@@ -11,7 +11,7 @@ nge-ecs.workspace = true
 nge-assets.workspace = true
 nge-render2d.workspace = true
 nge-render3d.workspace = true
-nge-scene.workspace = true
+nge-scene = { workspace = true, features = ["physics3d", "ai"] }
 nge-platform.workspace = true
 nsh-core.workspace = true
 

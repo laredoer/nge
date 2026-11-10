@@ -24,6 +24,12 @@ serde.workspace = true
 serde_json.workspace = true
 log.workspace = true
 
+[features]
+default = ["physics3d", "ai"]
+# 3D 物理（rapier3d）和追击（寻路）的系统；不用的游戏关掉，浏览器上的包能小一些（见 docs/web.md）
+physics3d = []
+ai = []
+
 [dev-dependencies]
 image.workspace = true
 pollster.workspace = true

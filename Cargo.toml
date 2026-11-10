@@ -23,7 +23,7 @@ nge-nsh = { path = "crates/nge-nsh" }
 nge-particles = { path = "crates/nge-particles" }
 nge-physics2d = { path = "crates/nge-physics2d" }
 nge-physics3d = { path = "crates/nge-physics3d" }
-nge-scene = { path = "crates/nge-scene" }
+nge-scene = { path = "crates/nge-scene", default-features = false }
 nge-text = { path = "crates/nge-text" }
 bevy_ecs = { version = "0.20.1", default-features = false, features = ["std"] }
 glam = { version = "0.34", features = ["bytemuck"] }

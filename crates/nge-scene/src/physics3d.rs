@@ -13,8 +13,24 @@ use crate::protocol::Scene;
 use crate::sync::{Declared, SceneId};
 
 /// 场景用 point：重力默认往下 981，一米 100。
+#[cfg_attr(not(feature = "physics3d"), allow(dead_code))]
 pub(crate) const GRAVITY: Vec3 = Vec3::new(0.0, -981.0, 0.0);
+#[cfg_attr(not(feature = "physics3d"), allow(dead_code))]
 pub(crate) const LENGTH_UNIT: f32 = 100.0;
+
+/// 3D 物理插件和场景这边的系统（feature `physics3d`）。
+#[cfg(feature = "physics3d")]
+pub(crate) fn register(app: &mut nge_ecs::App) {
+    use nge_ecs::{PostUpdate, PreUpdate};
+    use nge_physics3d::{Physics3dPlugin, Physics3dStepped};
+    use nge_render2d::PointerWorld;
+    if !app.is_plugin_added::<Physics3dPlugin>() {
+        app.add_plugins(Physics3dPlugin { gravity: GRAVITY, length_unit: LENGTH_UNIT });
+    }
+    app.add_systems(PreUpdate, sync_gravity.run_if(resource_changed::<Scene>).after(crate::level::switch_level).before(PointerWorld))
+        .configure_sets(PostUpdate, nge_particles::Particles3dSimulated.after(Physics3dStepped))
+        .add_systems(PostUpdate, collide.after(Physics3dStepped));
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -118,6 +134,7 @@ fn collider(body: &ModelBody, scale: f32) -> Collider {
 }
 
 /// 两个都是模型节点时把 3D 碰撞转成 `collide` 事件。
+#[cfg_attr(not(feature = "physics3d"), allow(dead_code))]
 pub(crate) fn collide(mut reader: MessageReader<Collision3d>, ids: Query<&SceneId, With<Declared<ModelNode>>>, mut outbox: ResMut<Outbox>) {
     for c in reader.read() {
         if let (Ok(a), Ok(b)) = (ids.get(c.a), ids.get(c.b)) {
@@ -127,6 +144,7 @@ pub(crate) fn collide(mut reader: MessageReader<Collision3d>, ids: Query<&SceneI
 }
 
 /// `scene.physics3d.gravity`：变了才覆盖；不写时回到默认。
+#[cfg_attr(not(feature = "physics3d"), allow(dead_code))]
 pub(crate) fn sync_gravity(scene: Res<Scene>, mut physics: ResMut<Physics3d>, mut last: Local<Option<Option<[f32; 3]>>>) {
     let gravity = scene.physics3d.as_ref().and_then(|p| p.gravity);
     if last.as_ref() == Some(&gravity) {
@@ -136,7 +154,7 @@ pub(crate) fn sync_gravity(scene: Res<Scene>, mut physics: ResMut<Physics3d>, mu
     *last = Some(gravity);
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "physics3d"))]
 mod tests {
     use glam::Quat;
     use nge_physics3d::Shape;

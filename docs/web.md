@@ -18,7 +18,7 @@
 ### 工具链
 
 - `wasm32-unknown-unknown` target（`rustup target add`）。
-- `wasm-bindgen` 命令行，版本必须和锁文件里的 `wasm-bindgen` 一致。`nge-core` 在 wasm 下把它锁在 `=0.2.129`（nsh 0.4 的胶水按这个版本写），装法：`cargo install wasm-bindgen-cli --version 0.2.129 --locked`。
+- `wasm-bindgen` 命令行，版本必须和锁文件里的 `wasm-bindgen` 一致。`nge-platform` 在 wasm 下把它锁在 `=0.2.129`（nsh 0.4 的胶水按这个版本写），装法：`cargo install wasm-bindgen-cli --version 0.2.129 --locked`。
 - `llvm-ar`：`zstd-sys` 的构建脚本要用它打 wasm 的静态库，Apple 自带的工具链里没有。装 Homebrew 的 `llvm@20`，构建时把它的 `bin` 放进 `PATH`（只在这条命令里），或者设 `AR_wasm32_unknown_unknown` 指过去：
 
   ```sh
@@ -54,17 +54,34 @@ wasm32 上没有线程、`std::time::Instant::now` 会 panic、主线程不能�
 - `register(factory, assets)`：把游戏视图注册成 `nge.game` 组件。
 - 组件在容器里建一个 `<canvas>`（铺满、不吃指针事件），每帧按 `clientWidth / clientHeight × devicePixelRatio` 算视口，变了才发给引擎。
 - 页面隐藏（`visibilitychange`）时暂停，回来接着跑。
-- 资源：初始化时把应用登记的 `asset:/` 文件全部 `fetch` 进内存（`MemorySource`），再建游戏；取不到的发 `ENGINE_ERROR`。
-- 键盘：`window` 上监听 `keydown` / `keyup`，`KeyboardEvent.code` 就是引擎的键名；`captureKeys` 里的键 `preventDefault`；焦点在输入框里时不转发；失焦、页面隐藏时补发松开。按键判定和 macOS 共用。
-- 声音：浏览器不让页面在用户操作前出声。wasm 下 `nge-audio` 先不建混音器，平台层在第一次 `keydown` / `pointerdown` 的处理函数里同步通知引擎建（Safari 要求在手势的调用栈里）。之前要播的声音丢掉。
+- 资源：初始化时把应用登记的 `asset:/` 文件全部 `fetch` 进内存（`MemorySource`），再建游戏；取不到的发 `ENGINE_ERROR`。每取完一个在 `window` 上发 `nge-progress`（`{done, total}`），第一帧画出来发 `nge-ready`，出错发 `nge-error`（`{message}`），给加载页用。
+- 键盘：`window` 上在捕获阶段监听 `keydown` / `keyup`（比 NSH 自己的处理先拿到），`KeyboardEvent.code` 就是引擎的键名，只转发 macOS 也认识的那组键；游戏要的键（`captureKeys`，默认字母、数字、方向键、空格、回车）`preventDefault` 并不再往下传，所以方向键不滚页面；焦点在输入框、可编辑区域、NSH 的输入框或 iframe 里，或者按着 ⌘ / Ctrl、正在输入法组字时不转发；窗口失焦、页面隐藏时补发松开。判定逻辑（`input.rs`）和 macOS 共用。
+- 声音：浏览器不让页面在用户操作前出声。wasm 下 `nge-audio` 先不建混音器，平台层在第一次算作用户激活的事件（除 Esc 外的 `keydown`、鼠标的 `pointerdown`、触摸和笔的 `pointerup`）的处理函数里同步调 `nge_audio::unlock()` 建（Safari 要求在手势的调用栈里），引擎下一帧接上，之前设的音量和分组设置补上去。解锁前的音效丢掉，循环的（音乐）排着，解锁后开始。
 
 ### 文字和字体
 
-长坂坡的 HUD、标题、提示都是 NSH 的 `<Text>`，web 上是 DOM 文字，用浏览器的字体，中文不用打包字体。引擎里画的文字只有预警的「!」和性能面板的数字；wasm 下 `nge-text` 不扫系统字体，用仓库里已有的字体当默认字体。
+长坂坡的 HUD、标题、提示都是 NSH 的 `<Text>`，web 上是 DOM 文字，用浏览器的字体，中文不用打包字体。引擎里画的文字只有预警的「!」和性能面板的数字；wasm 下 `nge-text` 不扫系统字体，不指定字体的文字用仓库里已有的 Inter Bold（`crates/nge-text/fonts`，SIL OFL 1.1）。它没有中文：性能面板的中文标签在 web 上画成方框，数字正常。
+
+### 加载页
+
+`nsh.json` 的 `web.host` 指向 `examples/sanguo/web/loading.js`：nsh 打包时原样带上，和 NSH 运行时一起最早加载。它一开始就盖住整个页面（深色底、「长坂坡」、暖金色进度条），手机宽度下照样排得开：
+
+- 下载引擎：改过的 `nsh.js` 用 `ReadableStream` 数 wasm 收到的字节，发 `nsh-load-progress`（`{loaded, length, encoding, done}`）。压缩传输时 `Content-Length` 是压缩后的大小，按常见压缩比估原始大小；拿不到大小时按收到的字节慢慢逼近，不到头。显示「下载引擎 5.6 / 18.0 MB」，占进度条的 85%。
+- 加载资源：引擎的 `nge-progress`，显示「加载资源 12 / 18」。
+- 第一帧画出来（`nge-ready`）后淡出、删掉。
+- 失败（`nge-error`，或 NSH 页面自己的错误框）：显示原因和「重试」按钮（重新加载页面）。
+
+### 包体
+
+- `nsh package --target web` 用生成的工作区里的 `profile.web`：`opt-level = "z"`、`lto = "fat"`、`codegen-units = 1`、`strip = true`、`panic = "abort"`，调试信息和符号都去掉了。nsh 0.4 不跑 `wasm-opt`，也没有开关。
+- `nge-scene` 加了 `physics3d`、`ai` 两个 feature（默认开）：关掉时不加 3D 物理和追击的插件、系统，链接时 rapier3d 和寻路的代码就去掉了（wasm 原始少 1.0 MB，brotli 少约 0.26 MB）；场景里还声明了它们时记一次 warn。工作区里 `nge-scene` 默认不带 feature，用到的示例（`platformer`、`scene`、`physics`、`scene3d`）自己开；长坂坡不用，不开。
+- 长坂坡的包（2026 年 11 月）：wasm 原始 17.95 MB、gzip 6.55 MB、brotli 4.73 MB；首屏要下的（wasm、JS、资源）原始 18.64 MB、gzip 7.07 MB、brotli 5.24 MB，其中资源 0.44 MB（wav、png、glb，nsh 不预压缩）；整个目录原始 19.9 MB、brotli 6.3 MB（含长坂坡用不到的 `nsh-syntaxes`、`nsh-math` 数据，不会被下载）。
+- 试过、没做的：wasm 下跳过 `naga` 校验自定义着色器只少约 37 KB（brotli），还会丢掉友好的报错；`nge-audio` 只留 wav 解码器少约 100 KB（brotli），要给依赖它的每个 crate 加 feature，以后真要压时再做。剩下的大头是 NSH 运行时本身（QuickJS、布局、语法高亮、zstd、它自己的 naga 等），不在这个仓库里。
 
 ### 示例
 
 - `sanguo` 的 `#[native_module]` 在 wasm 下调 `nge_platform::web::register`，`App.tsx` 加 `import "sanguo/native"`（打包时才保留注册函数）。
+- 本地看：`tools/nsh-web.sh package --target web -o out examples/sanguo`，然后在 `out/sanguo` 里起任意静态服务器（比如 `python3 -m http.server`），用新版 Chrome 或 Edge 打开。线上部署时让服务器按 `Accept-Encoding` 发打包时生成的 `.br` / `.gz`。
 
 ## 不做
 
@@ -79,10 +96,11 @@ wasm32 上没有线程、`std::time::Instant::now` 会 panic、主线程不能�
 
 - `tools/check-wasm.sh`：引擎全部 crate 和 `sanguo` 能编成 wasm。
 - `cargo test --workspace`、`nsh test`、`nsh check`、iOS 的 `cargo check` 不回归。
-- 纯逻辑的单元测试：资源清单、按键判定。
-- `nsh package --target web` 成功；用静态服务器起起来，无头 Chrome（开 WebGPU）能出画面、控制台没有 panic。
+- 纯逻辑的单元测试：资源清单和进度、按键判定和键名、`captureKeys` 解析、声音解锁前后（mock 后端）、内置字体排得出「!」和数字、`nge-scene` 的 feature 关掉时不加插件。
+- `nsh package --target web` 成功；用静态服务器起起来，无头 Chrome（开 WebGPU）：出完整场景、改大小画布跟着变；按住 → 角色走、J 出招，游戏用的键不再往下传，焦点在输入框里时按键照常给输入框；第一次按键后建了 WebAudio 并且有非零的采样；不指定字体的「!」和性能数字画得出来；限速时加载页显示下载进度，下载失败显示「重试」，手机宽度（375）不横向滚动。
 
 ## 还没手测
 
-- Safari、Firefox；手机浏览器。
-- 有声音、按键手感、掉帧时 WebAudio 爆不爆音。
+- Safari、Firefox；手机浏览器（触屏没有按钮，玩不了）。
+- 真机上听声音、按键手感、掉帧时 WebAudio 爆不爆音。
+- 切走标签页再回来（无头浏览器里没测）。

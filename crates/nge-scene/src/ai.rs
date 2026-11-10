@@ -14,6 +14,16 @@ use crate::sync::SceneId;
 
 pub const CHASE: EventKey<ChaseEvent> = EventKey::new("chase");
 
+/// 追击插件和场景这边的系统（feature `ai`）。
+#[cfg(feature = "ai")]
+pub(crate) fn register(app: &mut nge_ecs::App) {
+    use nge_ecs::Update;
+    if !app.is_plugin_added::<nge_ai::AiPlugin>() {
+        app.add_plugins(nge_ai::AiPlugin);
+    }
+    app.add_systems(Update, resolve_targets.before(nge_ai::chase)).add_systems(Update, send_changes.after(nge_ai::chase));
+}
+
 /// `chase`：追哪个节点（id），每秒多少像素，多远能看见，离出发点多远就不追了。
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct ChaseNode {
@@ -86,6 +96,7 @@ pub(crate) fn apply_chase(entity: &mut EntityCommands, before: Option<&SpriteNod
 }
 
 /// 按场景 id 找目标实体（目标重建了也跟得上）；找不到就是没有目标。
+#[cfg_attr(not(feature = "ai"), allow(dead_code))]
 pub(crate) fn resolve_targets(ids: Query<(Entity, &SceneId)>, mut chasers: Query<(&ChaseTarget, &mut Chaser)>) {
     if chasers.is_empty() {
         return;
@@ -99,6 +110,7 @@ pub(crate) fn resolve_targets(ids: Query<(Entity, &SceneId)>, mut chasers: Query
     }
 }
 
+#[cfg_attr(not(feature = "ai"), allow(dead_code))]
 pub(crate) fn send_changes(mut reader: MessageReader<ChaseChanged>, ids: Query<&SceneId>, mut outbox: ResMut<Outbox>) {
     for m in reader.read() {
         let Ok(id) = ids.get(m.entity) else { continue };
@@ -111,7 +123,7 @@ pub(crate) fn send_changes(mut reader: MessageReader<ChaseChanged>, ids: Query<&
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "ai"))]
 mod tests {
     use nge_ai::NavGrid;
     use nge_render2d::Transform2d;

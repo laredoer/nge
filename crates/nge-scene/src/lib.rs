@@ -10,6 +10,8 @@ mod attach;
 mod audio;
 mod behave;
 mod camera;
+#[cfg(not(all(feature = "physics3d", feature = "ai")))]
+mod disabled;
 mod effects;
 mod joints;
 mod level;
@@ -122,12 +124,12 @@ impl Plugin for ScenePlugin {
         if !app.is_plugin_added::<PhysicsPlugin>() {
             app.add_plugins(PhysicsPlugin::default());
         }
-        if !app.is_plugin_added::<nge_physics3d::Physics3dPlugin>() {
-            app.add_plugins(nge_physics3d::Physics3dPlugin { gravity: physics3d::GRAVITY, length_unit: physics3d::LENGTH_UNIT });
-        }
-        if !app.is_plugin_added::<nge_ai::AiPlugin>() {
-            app.add_plugins(nge_ai::AiPlugin);
-        }
+        #[cfg(feature = "physics3d")]
+        physics3d::register(app);
+        #[cfg(feature = "ai")]
+        ai::register(app);
+        #[cfg(not(all(feature = "physics3d", feature = "ai")))]
+        app.add_systems(PreUpdate, disabled::warn_disabled.run_if(resource_changed::<Scene>));
         if !app.is_plugin_added::<AudioPlugin>() {
             app.add_plugins(AudioPlugin::default());
         }
@@ -144,7 +146,6 @@ impl Plugin for ScenePlugin {
             sync_nodes::sync_lights,
             sync_nodes::sync_camera3d,
             physics::sync_gravity,
-            physics3d::sync_gravity,
             joints::sync_joints,
             audio::sync_audio,
             effects::sync_effects,
@@ -171,8 +172,6 @@ impl Plugin for ScenePlugin {
             .add_systems(Update, world_ui::type_text)
             // 跟随插值过的位置；屏幕气泡用这一帧的相机
             .add_systems(PostUpdate, (world_ui::place_bars, world_ui::place_bubbles).after(PhysicsStepped).after(camera::camera_rig))
-            .add_systems(Update, ai::resolve_targets.before(nge_ai::chase))
-            .add_systems(Update, ai::send_changes.after(nge_ai::chase))
             .add_message::<LevelStart>()
             .add_systems(PreUpdate, level::switch_level.run_if(resource_changed::<Scene>).before(sync::sync_sprites))
             .add_systems(PreUpdate, synced.run_if(resource_changed::<Scene>).after(level::switch_level).before(PointerWorld))
@@ -186,10 +185,10 @@ impl Plugin for ScenePlugin {
             // 拖尾读这一帧最后的位置：物理、跟随都改完以后
             .configure_sets(
                 PostUpdate,
-                nge_particles::Particles3dSimulated.after(PhysicsStepped).after(nge_physics3d::Physics3dStepped).after(attach::attach).after(behave::follow),
+                nge_particles::Particles3dSimulated.after(PhysicsStepped).after(attach::attach).after(behave::follow),
             )
             .add_systems(PostUpdate, effects::lighting.after(PhysicsStepped).after(behave::follow).after(camera::camera_rig))
-            .add_systems(PostUpdate, (behave::follow, physics::collide.after(PhysicsStepped), audio::listen.after(camera::camera_rig).before(nge_audio::AudioUpdated), physics3d::collide.after(nge_physics3d::Physics3dStepped), camera::camera_rig.after(PhysicsStepped), match2d::match_2d.after(camera::camera_rig)));
+            .add_systems(PostUpdate, (behave::follow, physics::collide.after(PhysicsStepped), audio::listen.after(camera::camera_rig).before(nge_audio::AudioUpdated), camera::camera_rig.after(PhysicsStepped), match2d::match_2d.after(camera::camera_rig)));
     }
 }
 
