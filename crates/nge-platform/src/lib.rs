@@ -10,6 +10,8 @@ pub use shared::STALL_ENV;
 mod hid;
 #[cfg(target_os = "macos")]
 mod keys;
+#[cfg(any(target_os = "macos", target_arch = "wasm32", test))]
+mod input;
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 mod pad;
 #[cfg(any(target_os = "macos", target_os = "ios"))]

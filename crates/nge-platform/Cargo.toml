@@ -34,4 +34,4 @@ nge-assets.workspace = true
 wasm-bindgen.workspace = true
 wasm-bindgen-futures.workspace = true
 js-sys.workspace = true
-web-sys = { workspace = true, features = ["Window", "Document", "Element", "HtmlCanvasElement", "Navigator", "EventTarget", "Event", "CustomEvent", "CustomEventInit", "Response"] }
+web-sys = { workspace = true, features = ["Window", "Document", "Element", "HtmlCanvasElement", "Navigator", "EventTarget", "Event", "CustomEvent", "CustomEventInit", "Response", "KeyboardEvent"] }

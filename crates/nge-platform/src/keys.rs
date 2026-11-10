@@ -105,12 +105,6 @@ pub fn modifier_down(code: &str, flags: usize) -> bool {
     flags & coarse != 0
 }
 
-/// 游戏没用 `captureKeys` 指定时吞掉的键：字母、数字、方向键、空格、回车。
-/// Tab、Esc、Home / End 等留给 NSH（焦点切换、返回、滚动）。
-pub fn default_capture(code: &str) -> bool {
-    code.starts_with("Key") || code.starts_with("Digit") || code.starts_with("Arrow") || matches!(code, "Space" | "Enter")
-}
-
 /// 修饰键在 `modifierFlags` 里区分左右的那一位。
 pub fn modifier_mask(code: &str) -> Option<usize> {
     Some(match code {
@@ -126,68 +120,9 @@ pub fn modifier_mask(code: &str) -> Option<usize> {
     })
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Kind {
-    Down,
-    Up,
-    /// flagsChanged（修饰键）。
-    Flags,
-}
-
-/// 从一个按键事件里取出来的、做决定要用的事实。
-#[derive(Debug, Clone, Copy)]
-pub struct Facts {
-    pub code: &'static str,
-    pub kind: Kind,
-    /// 按着 ⌘。
-    pub cmd: bool,
-    pub repeat: bool,
-    /// `Flags` 时：这个修饰键现在按着（看 `modifierFlags` 里它那一位）。
-    pub modifier_down: bool,
-    /// 游戏视图可以收：事件是它所在的 key window 的、视图看得见、没在输入框里打字。
-    pub eligible: bool,
-    /// 游戏要这个键：转发的按下不再往下传（NSH 不处理时 AppKit 会「咚」一声）。
-    pub capture: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Decision {
-    /// 转发给游戏：(down, repeat)。
-    pub forward: Option<(bool, bool)>,
-    /// 不再往下传。
-    pub consume: bool,
-}
-
-impl Decision {
-    pub const PASS: Self = Self { forward: None, consume: false };
-}
-
-/// 一个按键事件该怎么处理。`held` 是转发过按下、还没松开的键。
-/// 松开只要按下时转发过就转发；按下只在 `eligible` 且没按着 ⌘ 时转发，`capture` 的不再往下传。
-pub fn decide(held: &mut std::collections::BTreeSet<&'static str>, f: Facts) -> Decision {
-    let pressed = match f.kind {
-        Kind::Up => false,
-        Kind::Flags => f.modifier_down,
-        Kind::Down => true,
-    };
-    if !pressed {
-        let forward = held.remove(f.code).then_some((false, false));
-        return Decision { forward, consume: false };
-    }
-    if !f.eligible || (f.kind == Kind::Down && f.cmd) {
-        return Decision::PASS;
-    }
-    let fresh = held.insert(f.code);
-    match f.kind {
-        // 修饰键别的位变了（另一个修饰键）时这一位还是按着，不重复转发
-        Kind::Flags => Decision { forward: fresh.then_some((true, false)), consume: false },
-        _ => Decision { forward: Some((true, f.repeat && !fresh)), consume: f.capture },
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeSet, HashSet};
+    use std::collections::HashSet;
 
     use super::*;
 
@@ -222,20 +157,6 @@ mod tests {
         assert_eq!(code(57), None, "CapsLock 是锁定状态，不当成按着的键");
     }
 
-    fn facts(code: &'static str, kind: Kind) -> Facts {
-        Facts { code, kind, cmd: false, repeat: false, modifier_down: false, eligible: true, capture: default_capture(code) }
-    }
-
-    #[test]
-    fn default_capture_covers_game_keys_but_not_navigation() {
-        for c in ["KeyA", "Digit1", "ArrowLeft", "ArrowUp", "Space", "Enter"] {
-            assert!(default_capture(c), "{c}");
-        }
-        for c in ["Tab", "Escape", "Home", "PageDown", "Backspace", "F1"] {
-            assert!(!default_capture(c), "{c}");
-        }
-    }
-
     #[test]
     fn modifier_down_falls_back_to_the_coarse_bits() {
         const SHIFT: usize = 1 << 17;
@@ -245,50 +166,5 @@ mod tests {
         assert!(!modifier_down("ShiftLeft", 0));
         assert!(modifier_down("MetaRight", 1 << 20) && modifier_down("AltLeft", 1 << 19) && modifier_down("ControlRight", 1 << 18));
         assert!(!modifier_down("KeyA", SHIFT));
-    }
-
-    #[test]
-    fn down_up_and_what_gets_swallowed() {
-        let mut held = BTreeSet::new();
-        assert_eq!(decide(&mut held, facts("KeyA", Kind::Down)), Decision { forward: Some((true, false)), consume: true });
-        assert_eq!(decide(&mut held, Facts { repeat: true, ..facts("KeyA", Kind::Down) }), Decision { forward: Some((true, true)), consume: true });
-        assert_eq!(decide(&mut held, facts("KeyA", Kind::Up)), Decision { forward: Some((false, false)), consume: false });
-        assert_eq!(decide(&mut held, facts("KeyA", Kind::Up)), Decision::PASS, "没按下过的松开不转发");
-        let tab = decide(&mut held, facts("Tab", Kind::Down));
-        assert_eq!(tab, Decision { forward: Some((true, false)), consume: false }, "不在吞键名单里的照常给 NSH");
-        let arrow = decide(&mut held, Facts { capture: false, ..facts("ArrowLeft", Kind::Down) });
-        assert_eq!(arrow.consume, false, "游戏没要的键不吞");
-        assert!(held.contains("ArrowLeft"));
-    }
-
-    #[test]
-    fn not_eligible_or_command_is_passed_through_but_release_still_forwarded() {
-        let mut held = BTreeSet::new();
-        assert_eq!(decide(&mut held, Facts { eligible: false, ..facts("KeyW", Kind::Down) }), Decision::PASS);
-        assert_eq!(decide(&mut held, Facts { cmd: true, ..facts("KeyQ", Kind::Down) }), Decision::PASS);
-        decide(&mut held, facts("KeyW", Kind::Down));
-        let up = decide(&mut held, Facts { eligible: false, ..facts("KeyW", Kind::Up) });
-        assert_eq!(up.forward, Some((false, false)), "按下时转发过，松开不管焦点都转发");
-    }
-
-    #[test]
-    fn repeat_without_a_forwarded_press_counts_as_a_press() {
-        // ⌘A 按下（不转发），松开 ⌘ 后 A 的自动重复不带 ⌘
-        let mut held = BTreeSet::new();
-        let d = decide(&mut held, Facts { repeat: true, ..facts("KeyA", Kind::Down) });
-        assert_eq!(d.forward, Some((true, false)));
-    }
-
-    #[test]
-    fn modifiers_follow_the_flag_bits_not_a_toggle() {
-        let mut held = BTreeSet::new();
-        let shift = |down, eligible| Facts { modifier_down: down, eligible, ..facts("ShiftLeft", Kind::Flags) };
-        // 窗口还不是 key window 时按下的 Shift：不转发；激活后松开也不会被当成按下
-        assert_eq!(decide(&mut held, shift(true, false)), Decision::PASS);
-        assert_eq!(decide(&mut held, shift(false, true)), Decision::PASS);
-        assert_eq!(decide(&mut held, shift(true, true)).forward, Some((true, false)));
-        assert_eq!(decide(&mut held, shift(true, true)), Decision::PASS, "另一个修饰键变了，Shift 还按着");
-        assert_eq!(decide(&mut held, shift(false, true)).forward, Some((false, false)));
-        assert!(held.is_empty());
     }
 }
