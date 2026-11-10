@@ -218,3 +218,11 @@ test("幽灵果冻在第一关的地面上，半透明模型；靠近时从 idle
   expect(far.zone.w!).toBeGreaterThan(far.model.scale!);
   expect(near.zone).toEqual(far.zone);
 });
+
+test("HUD 上有联网状态：默认开着（连接中），存过关掉的是离线", async () => {
+  const on = await open(".", { platform: "macos", locale: "zh-CN" });
+  await on.waitUntil(() => hud(on).includes("连接中"), { timeout: 1000 });
+  const off = await open(".", { platform: "macos", locale: "zh-CN", storage: { "nge:net": "false" } });
+  await off.waitUntil(() => hud(off).includes("离线"), { timeout: 1000 });
+  expect(hud(off)).not.toContain("连接中");
+});

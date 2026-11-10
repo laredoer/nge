@@ -829,7 +829,7 @@ export function gameView<P extends object = {}, E extends object = {}>(
 // 本地化见 docs/localization.md
 export { i18n, missing, plural, resolveLocale, type I18n, type I18nOptions, type Message, type Messages, type Params, type PluralCategory } from "./i18n";
 // 联网见 docs/networking.md
-export { netRoom, netSend, remoteId, type NetEvent, type NetNode, type NetPeer, type NetRoom, type NetStatus } from "./net";
+export { netRoom, netSend, relayHttp, remoteId, type NetEvent, type NetNode, type NetPeer, type NetRoom, type NetStatus } from "./net";
 export { httpClient, json, type HttpClient, type HttpOptions, type HttpReply, type HttpResult } from "./http";
 // 存档槽见 docs/saves.md
 export { saveSlots, type LoadResult, type SaveSlots, type SaveSlotsOptions, type SaveStore, type SlotInfo } from "./saves";

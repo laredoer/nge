@@ -291,6 +291,26 @@ mod tests {
     }
 
     #[test]
+    fn networking_never_blocks_and_remote_players_are_not_the_player() {
+        let mut app = app();
+        let mut scene = level(None);
+        // 连不上的中继：照常单机玩，状态是连接中
+        scene["net"] = json!({ "url": "ws://127.0.0.1:1", "room": "platformer-1", "name": "P100", "sync": [PLAYER] });
+        scene["sprites"].as_array_mut().unwrap().push(json!({ "id": "net:7:player", "x": 100, "y": 16, "w": 24, "h": 32, "color": "#5dade280" }));
+        app.prop("scene", Some(&scene));
+        let started = std::time::Instant::now();
+        let events = run(&mut app, 20);
+        key(&mut app, "ArrowRight", true);
+        run(&mut app, 30);
+        assert!(started.elapsed().as_secs_f32() < 2.0, "联网不卡主循环");
+        assert!(events.iter().any(|(name, e)| name == "net" && e["status"] == "connecting"), "{events:?}");
+        assert!(player(&mut app).1.x > 0.0, "自己照常走");
+        let world = app.world_mut();
+        let (_, t) = world.query::<(&SceneId, &Transform2d)>().iter(world).find(|(id, _)| id.0 == "net:7:player").unwrap();
+        assert_eq!(t.translation, Vec2::new(100.0, 16.0), "没收到数据的远端角色不动，也不受控制");
+    }
+
+    #[test]
     fn walks_with_the_arrows_and_stops() {
         let mut app = app();
         app.prop("scene", Some(&level(None)));

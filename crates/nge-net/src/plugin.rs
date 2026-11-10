@@ -54,7 +54,8 @@ pub enum NetEvent {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum NetWire {
-    Status { status: &'static str, me: Option<PeerId>, peers: Vec<Peer> },
+    /// `url` 是在连的中继地址（断开时是 null）：TSX 拿它推出同一台服务器的 HTTP 地址。
+    Status { status: &'static str, url: Option<String>, me: Option<PeerId>, peers: Vec<Peer> },
     Join { peer: Peer },
     Leave { peer: Peer },
     Message { from: PeerId, #[serde(rename = "type")] kind: String, data: Value },
@@ -176,7 +177,7 @@ fn receive(mut net: ResMut<Net>, mut remotes: ResMut<Remotes>, mut events: Messa
                 if status != Status::Online {
                     remotes.clear();
                 }
-                (NetEvent::Status(status), NetWire::Status { status: status_name(status), me: net.me(), peers: net.peers() })
+                (NetEvent::Status(status), NetWire::Status { status: status_name(status), url: net.target().map(|t| t.url.clone()), me: net.me(), peers: net.peers() })
             }
             ClientEvent::Joined(peer) => (NetEvent::Joined(peer.clone()), NetWire::Join { peer }),
             ClientEvent::Left(peer) => {
@@ -276,8 +277,8 @@ pub(crate) mod tests {
         assert_eq!(
             nets(&events),
             vec![
-                json!({ "kind": "status", "status": "connecting", "me": null, "peers": [] }),
-                json!({ "kind": "status", "status": "online", "me": 1, "peers": [{ "id": 2, "name": "bob" }] }),
+                json!({ "kind": "status", "status": "connecting", "url": "ws://relay", "me": null, "peers": [] }),
+                json!({ "kind": "status", "status": "online", "url": "ws://relay", "me": 1, "peers": [{ "id": 2, "name": "bob" }] }),
                 json!({ "kind": "join", "peer": { "id": 2, "name": "bob" } }),
             ]
         );
@@ -320,7 +321,7 @@ pub(crate) mod tests {
             nets(&events),
             vec![
                 json!({ "kind": "leave", "peer": { "id": 2, "name": "bob" } }),
-                json!({ "kind": "status", "status": "offline", "me": null, "peers": [] }),
+                json!({ "kind": "status", "status": "offline", "url": null, "me": null, "peers": [] }),
             ]
         );
         assert!(fake.dropped(0));

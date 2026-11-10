@@ -1,9 +1,10 @@
 import { batch, effect, mount, type NativeComponentRef, platform, signal, Text, View } from "nsh";
-import { floatText, gameView, KeyButton, push, saved, saveSlots, sound, tween, type Scene, type SpriteNode } from "../../ts/nge";
+import { floatText, gameView, httpClient, KeyButton, netRoom, push, saved, saveSlots, sound, tween, type Scene, type SpriteNode } from "../../ts/nge";
 import { COIN_SHADER, FLASH, FLASH_MS, levelAudio, night, portalOver, POST, SHADERS, stonesNear } from "./effects";
 import { levelKey, otherLocale, strings } from "./strings";
 import { NEW_SAVE, nextSlot, SAVE_MIGRATIONS, SAVE_VERSION, saveDataOf, saveSummary, SLOTS } from "./savefile";
 import { hpBar, outOfHearts, TITLE_HOLD_MS, titleBubble } from "./hud";
+import { boardOf, leaderOf, nameTags, NET_KEY, netLabel, netNode, playerName, remotePlayers, scoresUrl, submitUrl, type Leader } from "./online";
 import { campfireAt, finish, flagOn, JELLY_ZONE, jellyAt, LEVELS, ROWS, TILE, TOWER_TRIGGER, towerAt, towerSpot, type Progress } from "./levels";
 
 /** Rust 发的事件：掉出关卡或被敌人撞到送回起点、按 R 重新开始、踩到敌人。 */
@@ -99,6 +100,26 @@ function App() {
   /** 换关后、新关卡建好（`levelStart`）之前：路上的事件是上一关的，不算。 */
   let switching = true;
   const now = () => LEVELS[level()].built;
+  /** 联网（见 docs/networking.md）：按 N 开关，记在设备上；中继连不上时一直重试，照样单机玩。 */
+  const online = saved("net", true);
+  const room = netRoom();
+  const http = httpClient(() => game);
+  const name = playerName();
+  /** 这关的榜首：每关开始、连上中继、通关后去拿；晚到的上一关的不要。 */
+  const leader = signal<Leader | null>(null);
+  const fetchLeader = () => {
+    const url = scoresUrl(room.url(), level());
+    const wanted = level();
+    if (url === null) return;
+    http.get(url, { timeout: 5 }).then((r) => {
+      if (level() === wanted) leader.set(leaderOf(r));
+    });
+  };
+  const submitScore = (seconds: number) => {
+    const url = submitUrl(room.url());
+    if (url === null) return;
+    http.post(url, { board: boardOf(level()), name, score: seconds }, { timeout: 5 }).then(fetchLeader);
+  };
 
   // 在 levelStart 里发：平台、敌人已经建出来了
   const startTweens = () => {
@@ -127,6 +148,7 @@ function App() {
       clearTimeout(titleEnd);
       title.set(null);
       current.set({ index, round: current().round + 1 });
+      leader.set(null);
     });
   };
 
@@ -194,12 +216,14 @@ function App() {
     models: [now().crate.model, flagOn(now().goal), ...(tower()?.models ?? []), ...(jelly() === null ? [] : [jelly()!.model])],
     emitters3d: now().tower === null ? [] : [campfireAt(now().tower!)],
     bars: [hpBar(falls())],
-    bubbles: title() === null ? [] : [titleBubble(t(levelKey(title()!)))],
+    bubbles: [...(title() === null ? [] : [titleBubble(t(levelKey(title()!)))]), ...nameTags(room.peers())],
+    net: netNode(online(), level(), name),
     joints: now().swing.joints,
     tilemaps: now().tilemaps,
     sprites: [
       ...BACKDROP,
       ...(LEVELS[level()].night ? stonesNear(3 * TILE) : []),
+      ...remotePlayers(room.peers()),
       { id: "player", x: 3 * TILE, y: 16, w: 24, h: 32, z: 5, color: "#ff7a59", body: { kind: "character", friction: 0, collide: true }, ...(flashing() ? FLASH : {}) },
       // 金币自己发光，夜里也不暗
       ...now().coins.filter((c) => !taken().includes(c.id)).map(
@@ -244,6 +268,9 @@ function App() {
         {t("falls", { count: falls() })}
         {best() === undefined ? "" : t("best", { seconds: best()! })}
         {won() === null ? "" : t("won", { seconds: won()! })}
+        {leader() === null ? "" : t("leader", { ...leader()! })}
+        {" · "}
+        {netLabel(t, online(), room.status(), room.peers().length)}
       </Text>
       <GameView
         class="flex-1"
@@ -256,6 +283,7 @@ function App() {
           startTweens();
           clearTimeout(titleEnd);
           title.set(level());
+          fetchLeader();
           // 换关时记下打到第几关；坏了的存档位不覆盖
           if (!brokenSlot()) persist();
         }}
@@ -276,6 +304,7 @@ function App() {
             won.set(seconds);
             progress.set(finish(progress(), level(), seconds));
             persist();
+            submitScore(seconds);
             sound(game, { src: WIN_SOUND, volume: 0.6 });
             // 最后一关之后回到第一关
             next = setTimeout(() => play((level() + 1) % LEVELS.length), NEXT_DELAY);
@@ -284,6 +313,7 @@ function App() {
         onKey={(e) => {
           if (e.down && !e.repeat && e.code === "KeyS") return pick(nextSlot(target));
           if (e.down && !e.repeat && e.code === "KeyL") return chosenLang.set(otherLocale(lang.locale()));
+          if (e.down && !e.repeat && e.code === NET_KEY) return online.set(!online());
           // Digit1 … Digit9：选已经解锁的关
           const n = /^Digit([1-9])$/.exec(e.code)?.[1];
           if (!e.down || e.repeat || n === undefined) return;
@@ -318,6 +348,11 @@ function App() {
           clearTimeout(titleEnd);
           titleEnd = setTimeout(() => title.set(null), TITLE_HOLD_MS);
         }}
+        onNet={(e) => {
+          room.handle(e);
+          if (e.kind === "status" && e.status === "online") fetchLeader();
+        }}
+        onHttp={http.handle}
         onRestart={() => {
           clearTimeout(next);
           next = undefined;

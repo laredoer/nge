@@ -24,9 +24,9 @@ export interface NetPeer {
   name: string;
 }
 
-/** `net` 事件。`status` 带着当时的成员列表；断线时先给每个人发 `leave`。 */
+/** `net` 事件。`status` 带着在连的中继地址和当时的成员列表；断线时先给每个人发 `leave`。 */
 export type NetEvent =
-  | { kind: "status"; status: NetStatus; me: number | null; peers: NetPeer[] }
+  | { kind: "status"; status: NetStatus; url: string | null; me: number | null; peers: NetPeer[] }
   | { kind: "join"; peer: NetPeer }
   | { kind: "leave"; peer: NetPeer }
   | { kind: "message"; from: number; type: string; data: unknown }
@@ -37,6 +37,12 @@ export function remoteId(peer: number, key: string): string {
   return `net:${peer}:${key}`;
 }
 
+/** 中继地址（`ws://` / `wss://`）对应的同一台服务器的 HTTP 地址（不带路径）；不是中继地址时是 null。 */
+export function relayHttp(url: string | null): string | null {
+  const m = /^(wss?):\/\/([^/?#]+)/i.exec(url ?? "");
+  return m === null ? null : `${m[1].toLowerCase() === "wss" ? "https" : "http"}://${m[2]}`;
+}
+
 /** 发一条消息给房间里的人（`to` 指定时只给他）。每秒最多 30 条，数据编成 JSON 后最多 4 KB，超了丢掉。 */
 export function netSend(game: NativeComponentRef | undefined, type: string, data?: unknown, to?: number) {
   game?.command("netSend", to === undefined ? { type, data } : { type, data, to });
@@ -44,6 +50,8 @@ export function netSend(game: NativeComponentRef | undefined, type: string, data
 
 export interface NetRoom {
   status(): NetStatus;
+  /** 在连的中继地址；断开时是 null。 */
+  url(): string | null;
   /** 自己的成员 id；不在线时是 null。 */
   me(): number | null;
   /** 房间里的其他人（按 id 排）。 */
@@ -59,6 +67,7 @@ export interface NetRoom {
 /** 从 `net` 事件维护的房间状态（signal）。 */
 export function netRoom(): NetRoom {
   const status = signal<NetStatus>("offline");
+  const url = signal<string | null>(null);
   const me = signal<number | null>(null);
   const peers = signal<NetPeer[]>([]);
   const error = signal<string | null>(null);
@@ -66,6 +75,7 @@ export function netRoom(): NetRoom {
   const sorted = (list: NetPeer[]) => [...list].sort((a, b) => a.id - b.id);
   return {
     status: () => status(),
+    url: () => url(),
     me: () => me(),
     peers: () => peers(),
     error: () => error(),
@@ -73,6 +83,7 @@ export function netRoom(): NetRoom {
       switch (e.kind) {
         case "status":
           status.set(e.status);
+          url.set(e.url);
           me.set(e.me);
           peers.set(e.status === "online" ? sorted(e.peers.filter((p) => p.id !== e.me)) : []);
           if (e.status === "online") error.set(null);

@@ -2,7 +2,7 @@
 import { i18n, type Messages } from "../../ts/nge";
 
 export const ZH = {
-  help: "← → / A D / 手柄 移动 · 空格 / ↑ / A 跳 · R 重来 · 数字键选关（解锁了 {count} 关）· S 换存档 · L 语言 · Q 调试 · P 性能 · ",
+  help: "← → / A D / 手柄 移动 · 空格 / ↑ / A 跳 · R 重来 · 数字键选关（解锁了 {count} 关）· S 换存档 · L 语言 · N 联网 · Q 调试 · P 性能 · ",
   slot: "存档 {n}",
   slotBroken: "（坏了）",
   slotNewer: "（新版本存的，不覆盖）",
@@ -12,6 +12,10 @@ export const ZH = {
   best: " · 最好 {seconds} 秒",
   won: " · 通关！用时 {seconds} 秒",
   stomp: "踩！",
+  netOff: "离线",
+  netConnecting: "连接中…",
+  netOnline: { other: "在线 {count} 人" },
+  leader: " · 榜首 {name} {seconds} 秒",
   jump: "跳",
   level1: "草原",
   level2: "石阶",
@@ -19,7 +23,7 @@ export const ZH = {
 };
 
 export const EN: Messages<typeof ZH> = {
-  help: "← → / A D / pad move · Space / ↑ / A jump · R restart · digits pick a level ({count} unlocked) · S save slot · L language · Q debug · P perf · ",
+  help: "← → / A D / pad move · Space / ↑ / A jump · R restart · digits pick a level ({count} unlocked) · S save slot · L language · N online · Q debug · P perf · ",
   slot: "Save {n}",
   slotBroken: " (broken)",
   slotNewer: " (from a newer version, kept)",
@@ -29,6 +33,10 @@ export const EN: Messages<typeof ZH> = {
   best: " · best {seconds} s",
   won: " · cleared in {seconds} s!",
   stomp: "Stomp!",
+  netOff: "offline",
+  netConnecting: "connecting…",
+  netOnline: { one: "online, {count} player", other: "online, {count} players" },
+  leader: " · top {name} {seconds} s",
   jump: "Jump",
   level1: "Meadow",
   level2: "Steps",
