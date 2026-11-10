@@ -427,7 +427,7 @@ mod tests {
     #[test]
     fn warms_again_when_the_target_format_changes() {
         let Some(srgb) = test_gfx(wgpu::TextureFormat::Rgba8UnormSrgb) else { return };
-        let bgra = Gfx { device: srgb.device.clone(), queue: srgb.queue.clone(), format: wgpu::TextureFormat::Bgra8Unorm, viewport: srgb.viewport };
+        let bgra = Gfx { screen: None, device: srgb.device.clone(), queue: srgb.queue.clone(), format: wgpu::TextureFormat::Bgra8Unorm, viewport: srgb.viewport };
         let shaders = library();
         let mut gpu = Gpu::new(&srgb);
         gpu.sync(&srgb, &shaders, srgb.format);
@@ -436,5 +436,28 @@ mod tests {
         gpu.settle();
         assert!(gpu.identity.is_some());
         assert_eq!(warmed(&gpu), ["dim", "grayscale", "pixelate", "vignette"]);
+    }
+
+    #[test]
+    fn only_the_screen_texture_is_drawn_through_its_srgb_view() {
+        let Some(mut gfx) = test_gfx(wgpu::TextureFormat::Rgba8UnormSrgb) else { return };
+        let texture = |gfx: &Gfx| {
+            gfx.device.create_texture(&wgpu::TextureDescriptor {
+                label: None,
+                size: wgpu::Extent3d { width: 4, height: 4, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            })
+        };
+        let own = texture(&gfx).create_view(&Default::default());
+        assert_eq!(gfx.target_format(&own), wgpu::TextureFormat::Rgba8Unorm, "游戏自己的纹理按它自己的格式");
+        let screen = texture(&gfx);
+        gfx.screen = Some(screen.clone());
+        assert_eq!(gfx.target_format(&screen.create_view(&Default::default())), gfx.format, "画面按 sRGB view 的格式");
+        assert_eq!(gfx.target_format(&own), wgpu::TextureFormat::Rgba8Unorm);
     }
 }

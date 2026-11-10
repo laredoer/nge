@@ -23,7 +23,7 @@ pub(crate) fn test_gfx(format: nge_core::wgpu::TextureFormat) -> Option<nge_core
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     let adapter = pollster::block_on(instance.request_adapter(&Default::default())).ok()?;
     let (device, queue) = pollster::block_on(adapter.request_device(&Default::default())).ok()?;
-    Some(nge_core::Gfx { device, queue, format, viewport: nge_core::Viewport { size: [64.0; 2], pixels: [64; 2] } })
+    Some(nge_core::Gfx { screen: None, device, queue, format, viewport: nge_core::Viewport { size: [64.0; 2], pixels: [64; 2] } })
 }
 
 pub use assets::{AtlasId, Atlases, Grid, TextureId};

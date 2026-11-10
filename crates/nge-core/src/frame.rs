@@ -2,13 +2,13 @@
 //! 原生由渲染线程驱动（`runtime.rs`），wasm 由浏览器的 `requestAnimationFrame` 驱动（`web.rs`）。
 
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::mpsc::SyncSender;
 
 use serde_json::Value as JsonValue;
 use web_time::Instant;
 
-use crate::bridge::{ENGINE_ERROR, EngineError, FRAME_STATS};
+use crate::bridge::{ENGINE_ERROR, EngineError, FRAME_STATS, READY, Ready};
 use crate::game::{Ctx, Emit, FrameTiming, Game, Gfx, Viewport};
 use crate::stats::{FrameClock, FrameStats};
 
@@ -26,7 +26,8 @@ pub enum Msg {
     Quit,
 }
 
-/// GPU 就绪、有了有效视口、且没有暂停之前收到的消息：视口和暂停只记最新的，其余的按顺序攒着。
+/// GPU 就绪、有了有效视口、且没有暂停之前收到的消息：视口和暂停只记最新的；
+/// 同名的 prop 只留最新一份（放在最后一次出现的位置，web 上加载期间每帧都会发 scene），command 按顺序全留着。
 #[derive(Default)]
 pub(crate) struct Gate {
     viewport: Option<Viewport>,
@@ -46,6 +47,10 @@ impl Gate {
             }
             Msg::Resume => self.paused = false,
             Msg::Quit => return false,
+            Msg::Prop(name, value) => {
+                self.pending.retain(|m| !matches!(m, Msg::Prop(n, _) if *n == name));
+                self.pending.push(Msg::Prop(name, value));
+            }
             other => self.pending.push(other),
         }
         true
@@ -139,8 +144,51 @@ pub(crate) fn configure(gpu: Gpu, viewport: Viewport) -> Result<(Gfx, Surface), 
     config.present_mode = wgpu::PresentMode::Fifo;
     config.desired_maximum_frame_latency = 2;
     surface.configure(&device, &config);
-    let gfx = Gfx { device, queue, format: view_format, viewport };
+    let gfx = Gfx { screen: None, device, queue, format: view_format, viewport };
     Ok((gfx, Surface { surface, config, view_format, max_side, lost: false }))
+}
+
+/// 设备丢了（显卡驱动重置、浏览器回收 GPU）：回调在哪个线程都可能来，先记下，下一帧报 `error`。
+#[derive(Default, Clone)]
+pub(crate) struct DeviceLost(Arc<Mutex<Option<String>>>);
+
+impl DeviceLost {
+    /// 给 `set_device_lost_callback` 的回调；引擎自己销毁设备（`Destroyed`）不算。
+    pub fn callback(&self) -> impl Fn(wgpu::DeviceLostReason, String) + Send + 'static {
+        let slot = self.0.clone();
+        move |reason, message| {
+            if reason != wgpu::DeviceLostReason::Destroyed {
+                *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(message);
+            }
+        }
+    }
+
+    /// 丢了的话取出原因（只取一次）。
+    pub fn take(&self) -> Option<String> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).take()
+    }
+}
+
+/// 帧间隔：暂停、藏起来回来以后从回来的那一刻算，不把中间的时间算进 dt。
+pub(crate) struct Tick {
+    last: Instant,
+}
+
+impl Tick {
+    pub fn new(now: Instant) -> Self {
+        Self { last: now }
+    }
+
+    pub fn resume(&mut self, now: Instant) {
+        self.last = now;
+    }
+
+    /// 离上一帧多久（秒，最多 [`MAX_DT`]）。
+    pub fn dt(&mut self, now: Instant) -> f32 {
+        let dt = now.saturating_duration_since(self.last).as_secs_f32().min(MAX_DT);
+        self.last = now;
+        dt
+    }
 }
 
 pub(crate) enum Flow {
@@ -155,15 +203,20 @@ pub(crate) struct Core {
     gfx: Gfx,
     surface: Surface,
     emit: Rc<Emit>,
-    last: Instant,
+    tick: Tick,
     stats: FrameStats,
     clock: FrameClock,
+    lost: DeviceLost,
+    /// 已经发过 `ready`。
+    shown: bool,
 }
 
 impl Core {
     pub fn new(game: Box<dyn Game>, gfx: Gfx, surface: Surface, emit: Rc<Emit>) -> Self {
         let now = Instant::now();
-        Self { game, gfx, surface, emit, last: now, stats: FrameStats::new(now), clock: FrameClock::default() }
+        let lost = DeviceLost::default();
+        gfx.device.set_device_lost_callback(lost.callback());
+        Self { game, gfx, surface, emit, tick: Tick::new(now), stats: FrameStats::new(now), clock: FrameClock::default(), lost, shown: false }
     }
 
     pub fn apply(&mut self, msg: Msg) -> Flow {
@@ -186,16 +239,21 @@ impl Core {
 
     /// 暂停回来：暂停期间的时间不计入 dt，也不计入帧统计。
     pub fn resumed(&mut self) {
-        self.last = Instant::now();
-        self.stats = FrameStats::new(self.last);
+        let now = Instant::now();
+        self.tick.resume(now);
+        self.stats = FrameStats::new(now);
         self.clock.reset();
     }
 
     /// 更新并画一帧；`start` 是这一帧开始处理消息的时刻（消息也算在更新里）。返回 false 表示没拿到画面。
     pub fn step(&mut self, start: Instant) -> bool {
+        if let Some(message) = self.lost.take() {
+            self.surface.lost = true;
+            log::error!("GPU 设备丢了，停止渲染: {message}");
+            (self.emit)(ENGINE_ERROR.name(), ENGINE_ERROR.encode(&EngineError { message: format!("GPU 设备丢了：{message}") }));
+        }
         let now = Instant::now();
-        let dt = (now - self.last).as_secs_f32().min(MAX_DT);
-        self.last = now;
+        let dt = self.tick.dt(now);
         self.game.update(&mut Ctx::new(self.gfx.viewport, &self.emit), dt);
         let update = start.elapsed().as_secs_f32();
 
@@ -204,6 +262,10 @@ impl Core {
             self.clock.reset();
             return false;
         };
+        if !self.shown {
+            self.shown = true;
+            (self.emit)(READY.name(), READY.encode(&Ready {}));
+        }
         let done = Instant::now();
         if let Some(frame) = self.clock.drawn(done) {
             self.game.timing(FrameTiming { frame: frame.as_secs_f32(), update, render, wait });
@@ -238,7 +300,10 @@ impl Core {
         let acquired = Instant::now();
         let target = frame.texture.create_view(&wgpu::TextureViewDescriptor { format: Some(self.surface.view_format), ..Default::default() });
         let mut encoder = self.gfx.device.create_command_encoder(&Default::default());
+        self.gfx.screen = Some(frame.texture.clone());
         self.game.render(&self.gfx, &mut encoder, &target);
+        // 交出去以前放掉，不拿着已经显示了的纹理
+        self.gfx.screen = None;
         self.gfx.queue.submit([encoder.finish()]);
         let submitted = Instant::now();
         self.gfx.queue.present(frame);
@@ -302,6 +367,51 @@ mod tests {
             })
             .collect();
         assert_eq!(names, ["scene", "shake"]);
+    }
+
+    #[test]
+    fn dt_after_resuming_does_not_count_the_gap() {
+        let t0 = Instant::now();
+        let mut tick = Tick::new(t0);
+        let ms = |n| std::time::Duration::from_millis(n);
+        assert!((tick.dt(t0 + ms(16)) - 0.016).abs() < 1e-4);
+        tick.resume(t0 + ms(10_000));
+        assert!((tick.dt(t0 + ms(10_016)) - 0.016).abs() < 1e-4, "暂停的 10 秒不算");
+        assert_eq!(tick.dt(t0 + ms(20_000)), MAX_DT, "没说暂停过的大间隔截到上限");
+    }
+
+    #[test]
+    fn device_loss_is_reported_once_and_not_when_we_destroy_it() {
+        let lost = DeviceLost::default();
+        lost.callback()(wgpu::DeviceLostReason::Destroyed, "自己关的".into());
+        assert_eq!(lost.take(), None, "引擎自己销毁设备不算出错");
+        lost.callback()(wgpu::DeviceLostReason::Unknown, "显卡驱动重置".into());
+        assert_eq!(lost.take().as_deref(), Some("显卡驱动重置"));
+        assert_eq!(lost.take(), None, "只报一次");
+    }
+
+    #[test]
+    fn gate_keeps_only_the_latest_value_of_each_prop() {
+        let mut gate = Gate::default();
+        let prop = |n: &str, v: i32| Msg::Prop(n.into(), Some(JsonValue::from(v)));
+        for i in 0..50 {
+            gate.push(prop("scene", i));
+        }
+        gate.push(Msg::Command("burst".into(), JsonValue::from(1)));
+        gate.push(prop("captureKeys", 0));
+        gate.push(prop("scene", 1000));
+        gate.push(Msg::Command("burst".into(), JsonValue::from(2)));
+        let got: Vec<_> = gate
+            .take()
+            .into_iter()
+            .map(|m| match m {
+                Msg::Prop(n, v) => (n, v.unwrap_or_default()),
+                Msg::Command(n, v) => (n, v),
+                _ => unreachable!(),
+            })
+            .collect();
+        let expect = [("burst", 1), ("captureKeys", 0), ("scene", 1000), ("burst", 2)].map(|(n, v)| (n.to_owned(), JsonValue::from(v)));
+        assert_eq!(got, expect, "同名 prop 只留最新的、放在最后一次出现的位置，command 照原顺序都留着");
     }
 
     #[test]

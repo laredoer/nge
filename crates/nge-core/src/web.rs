@@ -1,6 +1,6 @@
 //! 浏览器（wasm）：没有线程，引擎跑在页面主线程上。平台层每个 `requestAnimationFrame` 调一次
 //! [`Engine::frame`]；GPU 初始化（`request_adapter` / `request_device`）在浏览器的事件循环里异步等，
-//! 期间收到的消息先攒着。一帧做什么见 `frame.rs`。
+//! 期间收到的消息先攒着。阶段怎么走见 `phase.rs`，一帧做什么见 `frame.rs`。
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -13,19 +13,22 @@ use web_time::Instant;
 use crate::bridge::{ENGINE_ERROR, EngineError};
 use crate::frame::{Core, Flow, Gate, Gpu, Msg, configure, request_gpu};
 use crate::game::{Emit, GameFactory};
+use crate::phase::{Phase, Run};
 
-enum Phase {
-    /// 等 GPU。
-    Starting(Gate),
-    /// GPU 好了，等视口（或者暂停着）。
-    Ready(Gpu, Gate),
-    Running { core: Core, paused: bool },
-    /// 出错了或者收到了 `Quit`，什么都不做。
-    Stopped,
+impl Run for Core {
+    fn apply(&mut self, msg: Msg) -> Flow {
+        Core::apply(self, msg)
+    }
+    fn resumed(&mut self) {
+        Core::resumed(self)
+    }
+    fn step(&mut self, start: Instant) -> bool {
+        Core::step(self, start)
+    }
 }
 
 struct Inner {
-    phase: Phase,
+    phase: Phase<Gpu, Core>,
     queue: VecDeque<Msg>,
     emit: Rc<Emit>,
     factory: GameFactory,
@@ -83,7 +86,7 @@ impl Engine {
 
     /// 游戏建好了（还没出错、没退出）。
     pub fn running(&self) -> bool {
-        matches!(self.inner.borrow().phase, Phase::Running { .. })
+        self.inner.borrow().phase.running()
     }
 
     /// 浏览器每帧调一次：处理攒下的消息，跑起来了就更新、画一帧。
@@ -92,47 +95,17 @@ impl Engine {
         let mut inner = self.inner.borrow_mut();
         let inner = &mut *inner;
         let msgs: Vec<Msg> = inner.queue.drain(..).collect();
-        inner.phase = match std::mem::replace(&mut inner.phase, Phase::Stopped) {
-            Phase::Starting(mut gate) => {
-                if msgs.into_iter().all(|m| gate.push(m)) { Phase::Starting(gate) } else { Phase::Stopped }
-            }
-            Phase::Ready(gpu, mut gate) => {
-                if !msgs.into_iter().all(|m| gate.push(m)) {
-                    Phase::Stopped
-                } else if let Some(viewport) = gate.ready() {
-                    start_game(inner, gpu, gate, viewport)
-                } else {
-                    Phase::Ready(gpu, gate)
-                }
-            }
-            Phase::Running { mut core, mut paused } => {
-                let mut quit = false;
-                for msg in msgs {
-                    let resume = matches!(msg, Msg::Resume);
-                    match core.apply(msg) {
-                        Flow::Continue if resume && paused => {
-                            paused = false;
-                            core.resumed();
-                        }
-                        Flow::Continue => {}
-                        Flow::Pause(ack) => {
-                            paused = true;
-                            let _ = ack.send(());
-                        }
-                        Flow::Quit => quit = true,
-                    }
-                }
-                if quit {
-                    Phase::Stopped
-                } else {
-                    if !paused {
-                        core.step(start);
-                    }
-                    Phase::Running { core, paused }
-                }
-            }
-            Phase::Stopped => Phase::Stopped,
-        };
+        let phase = std::mem::replace(&mut inner.phase, Phase::Stopped);
+        let (emit, factory) = (&inner.emit, &inner.factory);
+        let (phase, error) = phase.frame(msgs, start, |gpu, viewport| {
+            let (gfx, surface) = configure(gpu, viewport)?;
+            let game = factory(&gfx);
+            Ok(Core::new(game, gfx, surface, emit.clone()))
+        });
+        inner.phase = phase;
+        if let Some(e) = error {
+            fail(&inner.emit, e);
+        }
     }
 }
 
@@ -140,27 +113,12 @@ impl Engine {
 fn gpu_ready(inner: &Weak<RefCell<Inner>>, gpu: Result<Gpu, String>) {
     let Some(inner) = inner.upgrade() else { return };
     let mut inner = inner.borrow_mut();
-    let Phase::Starting(gate) = std::mem::replace(&mut inner.phase, Phase::Stopped) else { return };
-    match gpu {
-        Ok(gpu) => inner.phase = Phase::Ready(gpu, gate),
-        Err(e) => fail(&inner.emit, e),
+    let phase = std::mem::replace(&mut inner.phase, Phase::Stopped);
+    let (phase, error) = phase.gpu_ready(gpu);
+    inner.phase = phase;
+    if let Some(e) = error {
+        fail(&inner.emit, e);
     }
-}
-
-fn start_game(inner: &Inner, gpu: Gpu, gate: Gate, viewport: crate::Viewport) -> Phase {
-    let (gfx, surface) = match configure(gpu, viewport) {
-        Ok(ok) => ok,
-        Err(e) => {
-            fail(&inner.emit, e);
-            return Phase::Stopped;
-        }
-    };
-    let game = (inner.factory)(&gfx);
-    let mut core = Core::new(game, gfx, surface, inner.emit.clone());
-    for msg in gate.take() {
-        core.apply(msg);
-    }
-    Phase::Running { core, paused: false }
 }
 
 fn fail(emit: &Emit, message: String) {

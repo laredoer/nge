@@ -2,6 +2,8 @@
 
 pub mod bridge;
 mod frame;
+#[cfg(any(target_arch = "wasm32", test))]
+mod phase;
 pub mod game;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod runtime;

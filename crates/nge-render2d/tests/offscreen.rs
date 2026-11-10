@@ -14,7 +14,7 @@ fn gfx() -> Option<Gfx> {
     let adapter = pollster::block_on(instance.request_adapter(&Default::default())).ok()?;
     let (device, queue) = pollster::block_on(adapter.request_device(&Default::default())).ok()?;
     let viewport = Viewport { size: [SIZE as f32; 2], pixels: [SIZE; 2] };
-    Some(Gfx { device, queue, format: FORMAT, viewport })
+    Some(Gfx { screen: None, device, queue, format: FORMAT, viewport })
 }
 
 /// 跑一帧并读回 RGBA 像素。
@@ -208,7 +208,7 @@ fn gfx_with(features: wgpu::Features) -> Option<Gfx> {
     let descriptor = wgpu::DeviceDescriptor { required_features: adapter.features() & features, ..Default::default() };
     let (device, queue) = pollster::block_on(adapter.request_device(&descriptor)).ok()?;
     let viewport = Viewport { size: [SIZE as f32; 2], pixels: [SIZE; 2] };
-    Some(Gfx { device, queue, format: FORMAT, viewport })
+    Some(Gfx { screen: None, device, queue, format: FORMAT, viewport })
 }
 
 #[test]
