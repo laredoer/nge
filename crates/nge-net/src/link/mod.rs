@@ -6,6 +6,10 @@ mod native;
 #[cfg(all(feature = "client", target_arch = "wasm32"))]
 mod web;
 
+#[cfg(all(feature = "client", not(target_arch = "wasm32")))]
+#[doc(hidden)]
+pub use native::live_threads;
+
 /// 单条消息的上限（字节）。
 pub const MAX_MESSAGE: usize = 64 * 1024;
 

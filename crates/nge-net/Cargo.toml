@@ -40,3 +40,7 @@ web-sys = { workspace = true, optional = true, features = ["WebSocket", "BinaryT
 [[test]]
 name = "link"
 required-features = ["client"]
+
+[[test]]
+name = "link_threads"
+required-features = ["client"]
