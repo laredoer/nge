@@ -56,6 +56,8 @@ opt-level = 1
 opt-level = 1
 [profile.dev.package.nge-platform]
 opt-level = 1
+[profile.dev.package.nge-relay]
+opt-level = 1
 [profile.dev.package.nge-render2d]
 opt-level = 1
 [profile.dev.package.nge-render3d]

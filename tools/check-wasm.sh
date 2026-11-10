@@ -10,6 +10,8 @@ fi
 command -v llvm-ar >/dev/null 2>&1 || { echo "找不到 llvm-ar：brew install llvm@20，或设 LLVM_BIN" >&2; exit 1; }
 packages=""
 for dir in crates/nge-*; do
+  # 中继是服务器程序（tokio 的网络），不上浏览器
+  [ "$(basename "$dir")" = nge-relay ] && continue
   packages="$packages -p $(basename "$dir")"
 done
 cargo check --target wasm32-unknown-unknown $packages -p sanguo "$@"
