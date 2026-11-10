@@ -121,6 +121,7 @@ mod tests {
                 Msg::Viewport(v) => self.log.push(format!("viewport {}", v.pixels[0])),
                 Msg::Prop(n, _) => self.log.push(format!("prop {n}")),
                 Msg::Command(n, _) => self.log.push(format!("command {n}")),
+                Msg::Surface(_) => self.log.push("surface".into()),
                 Msg::Pause(ack) => return Flow::Pause(ack),
                 Msg::Resume => self.log.push("resume".into()),
                 Msg::Quit => return Flow::Quit,

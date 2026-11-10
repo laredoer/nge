@@ -231,6 +231,9 @@ pub fn factory() -> nge_core::GameFactory {
 #[nsh_core::prelude::native_module("platformer/native")]
 fn native(registry: &mut nsh_core::prelude::Registry) {
     registry.assets(assets!());
+    // Android 的生成宿主不调组件注册函数：在这里把游戏视图注册进仓库里改过的 nsh-platform-android（见 docs/android.md）
+    #[cfg(target_os = "android")]
+    nge_platform::android::register(factory());
 }
 
 /// 把游戏视图注册进生成的宿主。

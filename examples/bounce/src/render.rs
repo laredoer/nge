@@ -95,7 +95,7 @@ impl Renderer {
                 compilation_options: Default::default(),
             }),
             multiview_mask: None,
-            cache: None,
+            cache: gfx.pipeline_cache.as_ref(),
         });
         let bind_group = gfx.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("uniforms"),

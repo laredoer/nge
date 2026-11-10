@@ -130,6 +130,6 @@ fn pipeline(gfx: &Gfx, layout: &wgpu::PipelineLayout, module: &wgpu::ShaderModul
             compilation_options: Default::default(),
         }),
         multiview_mask: None,
-        cache: None,
+        cache: gfx.pipeline_cache.as_ref(),
     })
 }

@@ -5,6 +5,7 @@ mod frame;
 #[cfg(any(target_arch = "wasm32", test))]
 mod phase;
 pub mod game;
+pub mod pipeline_cache;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod runtime;
 pub mod stats;

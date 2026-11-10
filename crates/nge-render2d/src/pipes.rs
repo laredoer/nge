@@ -151,7 +151,7 @@ impl Pipes {
 
     /// 后台把库里每个精灵着色器 × 每种画法 × 混排与否的管线都编一遍。编不过的跳过，用到时再当场校验、提示。
     fn start_warm(&mut self, gfx: &Gfx, shaders: &Shaders, depth: bool) {
-        let (device, layout, format, plain) = (gfx.device.clone(), self.layout.clone(), gfx.format, self.modules[0].clone());
+        let (device, cache, layout, format, plain) = (gfx.device.clone(), gfx.pipeline_cache.clone(), self.layout.clone(), gfx.format, self.modules[0].clone());
         let library = shaders.library();
         self.warm.start(move |send| {
             let mut modules = vec![(None, plain)];
@@ -170,7 +170,7 @@ impl Pipes {
             for depth in [depth, !depth] {
                 for mode in Mode::ALL {
                     for (name, module) in &modules {
-                        if !send(Warmed::Pipeline(name.clone(), mode, depth, build(&device, &layout, format, module, mode, depth))) {
+                        if !send(Warmed::Pipeline(name.clone(), mode, depth, build(&device, cache.as_ref(), &layout, format, module, mode, depth))) {
                             return;
                         }
                     }
@@ -240,7 +240,7 @@ impl Pipes {
         if self.pipelines.contains_key(&pipe) {
             return;
         }
-        let pipeline = build(&gfx.device, &self.layout, gfx.format, &self.modules[(pipe / 8) as usize], Mode::ALL[(pipe % 4) as usize], pipe / 4 % 2 == 1);
+        let pipeline = build(&gfx.device, gfx.pipeline_cache.as_ref(), &self.layout, gfx.format, &self.modules[(pipe / 8) as usize], Mode::ALL[(pipe % 4) as usize], pipe / 4 % 2 == 1);
         self.pipelines.insert(pipe, pipeline);
     }
 
@@ -262,7 +262,7 @@ fn compile(device: &wgpu::Device, label: &str, source: &str) -> wgpu::ShaderModu
 }
 
 /// 一条精灵管线。混排时用 3D 留下的深度（深度 + 模板），比深度不写深度（精灵是半透明的，靠 z 排序）。
-fn build(device: &wgpu::Device, layout: &wgpu::PipelineLayout, color: wgpu::TextureFormat, module: &wgpu::ShaderModule, mode: Mode, depth: bool) -> wgpu::RenderPipeline {
+fn build(device: &wgpu::Device, cache: Option<&wgpu::PipelineCache>, layout: &wgpu::PipelineLayout, color: wgpu::TextureFormat, module: &wgpu::ShaderModule, mode: Mode, depth: bool) -> wgpu::RenderPipeline {
     let (format, depth_compare) = if depth { (nge_ecs::SCENE_DEPTH_FORMAT, wgpu::CompareFunction::LessEqual) } else { (STENCIL_FORMAT, wgpu::CompareFunction::Always) };
     let write = mode == Mode::Write;
     let attributes = wgpu::vertex_attr_array![
@@ -297,7 +297,7 @@ fn build(device: &wgpu::Device, layout: &wgpu::PipelineLayout, color: wgpu::Text
             compilation_options: Default::default(),
         }),
         multiview_mask: None,
-        cache: None,
+        cache,
     })
 }
 
@@ -395,7 +395,7 @@ mod tests {
         let index = pipes.module(&gfx, &shaders, "glow");
         assert_eq!(pipes.module(&gfx, &shaders, "missing"), 0);
         let plain = pipes.modules[0].clone();
-        let pipeline = || build(&gfx.device, &pipes.layout, gfx.format, &plain, Mode::Inside, true);
+        let pipeline = || build(&gfx.device, gfx.pipeline_cache.as_ref(), &pipes.layout, gfx.format, &plain, Mode::Inside, true);
         let (late, a, b) = (Warmed::Module("glow".into(), plain.clone()), pipeline(), pipeline());
         pipes.take(late);
         assert_eq!((pipes.names["glow"], pipes.modules.len()), (index, 2), "等不及当场编了的不换");

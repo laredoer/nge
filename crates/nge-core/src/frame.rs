@@ -10,16 +10,21 @@ use web_time::Instant;
 
 use crate::bridge::{ENGINE_ERROR, EngineError, FRAME_STATS, READY, Ready};
 use crate::game::{Ctx, Emit, FrameTiming, Game, Gfx, Viewport};
+use crate::pipeline_cache;
 use crate::stats::{FrameClock, FrameStats};
 
 /// 单帧 dt 上限，避免卡顿后物理一步跨太远。
 const MAX_DT: f32 = 0.05;
+/// 开始跑以后过这么久存一次管线缓存（预热编完的管线不用等到切后台）。
+const CACHE_SAVE_AFTER: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// 平台层发给引擎的消息。
 pub enum Msg {
     Viewport(Viewport),
     Command(String, JsonValue),
     Prop(String, Option<JsonValue>),
+    /// 换一个画面（Android 切后台再回来时系统给的是新的 surface）。
+    Surface(wgpu::Surface<'static>),
     /// 停止取画面和提交 GPU 命令；进入暂停后回复确认。
     Pause(SyncSender<()>),
     Resume,
@@ -33,6 +38,8 @@ pub(crate) struct Gate {
     viewport: Option<Viewport>,
     paused: bool,
     pending: Vec<Msg>,
+    /// 等的时候换过的画面：只留最新的。
+    pub surface: Option<wgpu::Surface<'static>>,
 }
 
 impl Gate {
@@ -47,6 +54,7 @@ impl Gate {
             }
             Msg::Resume => self.paused = false,
             Msg::Quit => return false,
+            Msg::Surface(surface) => self.surface = Some(surface),
             Msg::Prop(name, value) => {
                 self.pending.retain(|m| !matches!(m, Msg::Prop(n, _) if *n == name));
                 self.pending.push(Msg::Prop(name, value));
@@ -83,6 +91,44 @@ pub(crate) struct Gpu {
     device: wgpu::Device,
     queue: wgpu::Queue,
     surface: wgpu::Surface<'static>,
+    cache: Option<DiskCache>,
+}
+
+/// 开着的管线缓存和它的文件。
+pub(crate) struct DiskCache {
+    cache: wgpu::PipelineCache,
+    store: pipeline_cache::Store,
+}
+
+impl DiskCache {
+    /// 平台层给了目录、适配器支持（现在只有 Vulkan）时，要在建设备时请求的特性和文件名。
+    fn wanted(adapter: &wgpu::Adapter) -> Option<(std::path::PathBuf, String)> {
+        let dir = pipeline_cache::dir()?;
+        if !adapter.features().contains(wgpu::Features::PIPELINE_CACHE) {
+            return None;
+        }
+        Some((dir, pipeline_cache::file_name(&adapter.get_info())?))
+    }
+
+    fn open(device: &wgpu::Device, dir: &std::path::Path, name: &str) -> Self {
+        let mut store = pipeline_cache::Store::new(dir, name, &pipeline_cache::version());
+        let data = store.load();
+        log::info!("管线缓存 {}：{}", dir.join(name).display(), data.as_ref().map_or("没有存过".to_owned(), |d| format!("读到 {} 字节", d.len())));
+        // SAFETY: 数据是 wgpu 自己 get_data 出来、经过我们的校验和的；fallback 让 wgpu 在数据和驱动对不上时当空的
+        let cache = unsafe {
+            device.create_pipeline_cache(&wgpu::PipelineCacheDescriptor { label: Some("nge"), data: data.as_deref(), fallback: true })
+        };
+        Self { cache, store }
+    }
+
+    fn save(&mut self) {
+        let Some(data) = self.cache.get_data() else { return };
+        match self.store.save(&data) {
+            Ok(true) => log::info!("管线缓存存了 {} 字节", data.len()),
+            Ok(false) => {}
+            Err(e) => log::warn!("管线缓存存不下: {e}"),
+        }
+    }
 }
 
 /// 请求适配器和设备（原生上用 pollster 阻塞等，wasm 上在浏览器的事件循环里等）。
@@ -91,14 +137,18 @@ pub(crate) async fn request_gpu(instance: &wgpu::Instance, surface: wgpu::Surfac
         .request_adapter(&wgpu::RequestAdapterOptions { compatible_surface: Some(&surface), ..Default::default() })
         .await
         .map_err(|e| e.to_string())?;
-    let descriptor = wgpu::DeviceDescriptor {
-        required_limits: device_limits(&adapter.limits()),
-        required_features: compression_features(adapter.features()),
-        ..Default::default()
-    };
+    let info = adapter.get_info();
+    log::info!("GPU：{}（{:?}，驱动 {} {}）", info.name, info.backend, info.driver, info.driver_info);
+    let disk = DiskCache::wanted(&adapter);
+    let mut required_features = compression_features(adapter.features());
+    if disk.is_some() {
+        required_features |= wgpu::Features::PIPELINE_CACHE;
+    }
+    let descriptor = wgpu::DeviceDescriptor { required_limits: device_limits(&adapter.limits()), required_features, ..Default::default() };
     let (device, queue) = adapter.request_device(&descriptor).await.map_err(|e| e.to_string())?;
     device.on_uncaptured_error(Arc::new(|e| log::error!("wgpu 错误: {e}")));
-    Ok(Gpu { adapter, device, queue, surface })
+    let cache = disk.map(|(dir, name)| DiskCache::open(&device, &dir, &name));
+    Ok(Gpu { adapter, device, queue, surface, cache })
 }
 
 /// 画布的格式：sRGB 的照用；WebGPU 的画布只有非 sRGB 的格式，配置时加上 sRGB 的 view format，
@@ -119,6 +169,13 @@ pub(crate) struct Surface {
 }
 
 impl Surface {
+    /// 换上新的画面，按原来的配置配好。
+    fn replace(&mut self, device: &wgpu::Device, surface: wgpu::Surface<'static>) {
+        surface.configure(device, &self.config);
+        self.surface = surface;
+        self.lost = false;
+    }
+
     fn resize(&mut self, device: &wgpu::Device, pixels: [u32; 2]) {
         let [w, h] = pixels.map(|p| p.clamp(1, self.max_side));
         if [self.config.width, self.config.height] != [w, h] {
@@ -130,8 +187,8 @@ impl Surface {
 }
 
 /// 按视口配置画面，得到游戏用的 [`Gfx`]。
-pub(crate) fn configure(gpu: Gpu, viewport: Viewport) -> Result<(Gfx, Surface), String> {
-    let Gpu { adapter, device, queue, surface } = gpu;
+pub(crate) fn configure(gpu: Gpu, viewport: Viewport) -> Result<(Gfx, Surface, Option<DiskCache>), String> {
+    let Gpu { adapter, device, queue, surface, cache } = gpu;
     let max_side = device.limits().max_texture_dimension_2d;
     let [w, h] = viewport.pixels.map(|p| p.clamp(1, max_side));
     let mut config = surface.get_default_config(&adapter, w, h).ok_or("surface 不被该 adapter 支持")?;
@@ -144,8 +201,8 @@ pub(crate) fn configure(gpu: Gpu, viewport: Viewport) -> Result<(Gfx, Surface), 
     config.present_mode = wgpu::PresentMode::Fifo;
     config.desired_maximum_frame_latency = 2;
     surface.configure(&device, &config);
-    let gfx = Gfx { screen: None, device, queue, format: view_format, viewport };
-    Ok((gfx, Surface { surface, config, view_format, max_side, lost: false }))
+    let gfx = Gfx { screen: None, device, queue, format: view_format, viewport, pipeline_cache: cache.as_ref().map(|c| c.cache.clone()) };
+    Ok((gfx, Surface { surface, config, view_format, max_side, lost: false }, cache))
 }
 
 /// 设备丢了（显卡驱动重置、浏览器回收 GPU）：回调在哪个线程都可能来，先记下，下一帧报 `error`。
@@ -209,14 +266,25 @@ pub(crate) struct Core {
     lost: DeviceLost,
     /// 已经发过 `ready`。
     shown: bool,
+    cache: Option<DiskCache>,
+    /// 开始跑以后存第一次管线缓存的时刻（存过就是 None）。
+    save_cache_at: Option<Instant>,
 }
 
 impl Core {
-    pub fn new(game: Box<dyn Game>, gfx: Gfx, surface: Surface, emit: Rc<Emit>) -> Self {
+    pub fn new(game: Box<dyn Game>, gfx: Gfx, surface: Surface, emit: Rc<Emit>, cache: Option<DiskCache>) -> Self {
         let now = Instant::now();
         let lost = DeviceLost::default();
         gfx.device.set_device_lost_callback(lost.callback());
-        Self { game, gfx, surface, emit, tick: Tick::new(now), stats: FrameStats::new(now), clock: FrameClock::default(), lost, shown: false }
+        let save_cache_at = cache.as_ref().map(|_| now + CACHE_SAVE_AFTER);
+        Self { game, gfx, surface, emit, tick: Tick::new(now), stats: FrameStats::new(now), clock: FrameClock::default(), lost, shown: false, cache, save_cache_at }
+    }
+
+    /// 把管线缓存写到磁盘（暂停、退出、开始跑一会儿以后）。
+    pub fn save_pipeline_cache(&mut self) {
+        if let Some(cache) = &mut self.cache {
+            cache.save();
+        }
     }
 
     pub fn apply(&mut self, msg: Msg) -> Flow {
@@ -230,9 +298,16 @@ impl Core {
             }
             Msg::Command(name, args) => self.game.command(ctx, &name, &args),
             Msg::Prop(name, value) => self.game.prop(ctx, &name, value.as_ref()),
-            Msg::Pause(ack) => return Flow::Pause(ack),
+            Msg::Surface(surface) => self.surface.replace(&self.gfx.device, surface),
+            Msg::Pause(ack) => {
+                self.save_pipeline_cache();
+                return Flow::Pause(ack);
+            }
             Msg::Resume => {}
-            Msg::Quit => return Flow::Quit,
+            Msg::Quit => {
+                self.save_pipeline_cache();
+                return Flow::Quit;
+            }
         }
         Flow::Continue
     }
@@ -253,6 +328,10 @@ impl Core {
             (self.emit)(ENGINE_ERROR.name(), ENGINE_ERROR.encode(&EngineError { message: format!("GPU 设备丢了：{message}") }));
         }
         let now = Instant::now();
+        if self.save_cache_at.is_some_and(|at| now >= at) {
+            self.save_cache_at = None;
+            self.save_pipeline_cache();
+        }
         let dt = self.tick.dt(now);
         self.game.update(&mut Ctx::new(self.gfx.viewport, &self.emit), dt);
         let update = start.elapsed().as_secs_f32();

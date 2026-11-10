@@ -33,7 +33,7 @@ fn gfx() -> Option<Gfx> {
     let adapter = pollster::block_on(instance.request_adapter(&Default::default())).ok()?;
     println!("GPU：{:?}", adapter.get_info());
     let (device, queue) = pollster::block_on(adapter.request_device(&Default::default())).ok()?;
-    Some(Gfx { screen: None, device, queue, format: wgpu::TextureFormat::Bgra8UnormSrgb, viewport: Viewport { size: [SIZE as f32; 2], pixels: [SIZE; 2] } })
+    Some(Gfx { screen: None, pipeline_cache: None, device, queue, format: wgpu::TextureFormat::Bgra8UnormSrgb, viewport: Viewport { size: [SIZE as f32; 2], pixels: [SIZE; 2] } })
 }
 
 /// 每帧记下有多少个精灵，确认场景真的加载出来了（不是在量一个空场景）。

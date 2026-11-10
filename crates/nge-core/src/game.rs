@@ -52,6 +52,8 @@ pub struct Gfx {
     pub viewport: Viewport,
     /// 这一帧画面的纹理（引擎每帧设；离屏时是 `None`）。
     pub screen: Option<wgpu::Texture>,
+    /// 建管线时都传它（`RenderPipelineDescriptor::cache`）；只有开了管线磁盘缓存时才有（见 docs/android.md）。
+    pub pipeline_cache: Option<wgpu::PipelineCache>,
 }
 
 impl Gfx {

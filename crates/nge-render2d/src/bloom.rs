@@ -150,9 +150,9 @@ impl Bloom {
             ..Default::default()
         });
         Self {
-            prefilter: pipeline(device, &pipeline_layout, &module, "fs_prefilter", FORMAT, None),
-            down: pipeline(device, &pipeline_layout, &module, "fs_down", FORMAT, None),
-            up: pipeline(device, &pipeline_layout, &module, "fs_up", FORMAT, Some(add)),
+            prefilter: pipeline(device, gfx.pipeline_cache.as_ref(), &pipeline_layout, &module, "fs_prefilter", FORMAT, None),
+            down: pipeline(device, gfx.pipeline_cache.as_ref(), &pipeline_layout, &module, "fs_down", FORMAT, None),
+            up: pipeline(device, gfx.pipeline_cache.as_ref(), &pipeline_layout, &module, "fs_up", FORMAT, Some(add)),
             composite: None,
             layout,
             pipeline_layout,
@@ -220,7 +220,7 @@ impl Bloom {
     /// 按输出格式建好合成的管线（预热时就调，用到时不卡）。
     pub fn prepare(&mut self, gfx: &Gfx, format: wgpu::TextureFormat) {
         if self.composite.as_ref().is_none_or(|(f, _)| *f != format) {
-            self.composite = Some((format, pipeline(&gfx.device, &self.pipeline_layout, &self.module, "fs_composite", format, None)));
+            self.composite = Some((format, pipeline(&gfx.device, gfx.pipeline_cache.as_ref(), &self.pipeline_layout, &self.module, "fs_composite", format, None)));
         }
     }
 
@@ -251,7 +251,7 @@ impl Bloom {
     }
 }
 
-fn pipeline(device: &wgpu::Device, layout: &wgpu::PipelineLayout, module: &wgpu::ShaderModule, entry: &str, format: wgpu::TextureFormat, blend: Option<wgpu::BlendState>) -> wgpu::RenderPipeline {
+fn pipeline(device: &wgpu::Device, cache: Option<&wgpu::PipelineCache>, layout: &wgpu::PipelineLayout, module: &wgpu::ShaderModule, entry: &str, format: wgpu::TextureFormat, blend: Option<wgpu::BlendState>) -> wgpu::RenderPipeline {
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some(entry),
         layout: Some(layout),
@@ -266,7 +266,7 @@ fn pipeline(device: &wgpu::Device, layout: &wgpu::PipelineLayout, module: &wgpu:
             compilation_options: Default::default(),
         }),
         multiview_mask: None,
-        cache: None,
+        cache,
     })
 }
 

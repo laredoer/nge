@@ -13,7 +13,7 @@ fn render(setup: impl Fn(&mut World) + Send + Sync + 'static) -> Option<Vec<[u8;
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     let adapter = pollster::block_on(instance.request_adapter(&Default::default())).ok()?;
     let (device, queue) = pollster::block_on(adapter.request_device(&Default::default())).ok()?;
-    let gfx = Gfx { screen: None, device, queue, format: FORMAT, viewport: Viewport { size: [SIZE as f32; 2], pixels: [SIZE; 2] } };
+    let gfx = Gfx { screen: None, pipeline_cache: None, device, queue, format: FORMAT, viewport: Viewport { size: [SIZE as f32; 2], pixels: [SIZE; 2] } };
     let setup = std::sync::Arc::new(setup);
     let mut game = nge_ecs::factory(move || {
         let setup = setup.clone();

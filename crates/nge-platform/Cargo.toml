@@ -1,6 +1,6 @@
 [package]
 name = "nge-platform"
-description = "NSH 游戏引擎平台层：把引擎挂成 NSH 原生组件（macOS NSView / iOS UIView / 浏览器 canvas）"
+description = "NSH 游戏引擎平台层：把引擎挂成 NSH 原生组件（macOS NSView / iOS UIView / Android SurfaceView / 浏览器 canvas）"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
@@ -27,6 +27,13 @@ block2.workspace = true
 nsh-platform-ios.workspace = true
 objc2-ui-kit.workspace = true
 block2.workspace = true
+
+[target.'cfg(target_os = "android")'.dependencies]
+# 包里的库名是 nsh
+nsh-platform-android = { version = "0.4.0", default-features = false }
+nge-assets.workspace = true
+ndk = { version = "0.9", default-features = false, features = ["rwh_06"] }
+ndk-context = "0.1"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 nsh-platform-web = { version = "0.4.0", default-features = false }

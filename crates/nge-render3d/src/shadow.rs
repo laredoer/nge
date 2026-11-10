@@ -235,7 +235,7 @@ impl ShadowGpu {
             multisample: Default::default(),
             fragment: None,
             multiview_mask: None,
-            cache: None,
+            cache: gfx.pipeline_cache.as_ref(),
         });
         let align = u64::from(device.limits().min_uniform_buffer_offset_alignment);
         let stride = 64u64.div_ceil(align) * align;

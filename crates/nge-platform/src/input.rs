@@ -51,7 +51,7 @@ pub enum Kind {
     Down,
     Up,
     /// flagsChanged（修饰键，macOS）；浏览器上修饰键也是 keydown / keyup。
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    #[cfg_attr(any(target_arch = "wasm32", target_os = "android"), allow(dead_code))]
     Flags,
 }
 

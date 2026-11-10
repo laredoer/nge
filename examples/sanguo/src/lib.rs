@@ -34,6 +34,9 @@ fn native(registry: &mut nsh_core::prelude::Registry) {
     registry.assets(assets!());
     #[cfg(target_arch = "wasm32")]
     nge_platform::web::register(factory(), assets!().iter().map(|f| f.uri));
+    // Android 同样不调组件注册函数（见 docs/android.md）
+    #[cfg(target_os = "android")]
+    nge_platform::android::register(factory());
 }
 
 /// 把游戏视图注册进生成的宿主。

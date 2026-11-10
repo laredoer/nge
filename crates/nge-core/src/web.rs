@@ -98,9 +98,9 @@ impl Engine {
         let phase = std::mem::replace(&mut inner.phase, Phase::Stopped);
         let (emit, factory) = (&inner.emit, &inner.factory);
         let (phase, error) = phase.frame(msgs, start, |gpu, viewport| {
-            let (gfx, surface) = configure(gpu, viewport)?;
+            let (gfx, surface, cache) = configure(gpu, viewport)?;
             let game = factory(&gfx);
-            Ok(Core::new(game, gfx, surface, emit.clone()))
+            Ok(Core::new(game, gfx, surface, emit.clone(), cache))
         });
         inner.phase = phase;
         if let Some(e) = error {

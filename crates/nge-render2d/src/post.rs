@@ -87,7 +87,7 @@ impl PostChain {
             passes.push(Pass::Shader(None, Vec4::ZERO));
         }
         if passes.iter().any(|p| matches!(p, Pass::Shader(None, _))) && gpu.identity.is_none() {
-            gpu.identity = Some(build(&gfx.device, &gpu.pipeline_layout, format, "post identity", &post_source(IDENTITY)));
+            gpu.identity = Some(build(&gfx.device, gfx.pipeline_cache.as_ref(), &gpu.pipeline_layout, format, "post identity", &post_source(IDENTITY)));
         }
         let size = target.texture().size();
         let ping = gpu.ping_views(gfx, size, format);
@@ -261,15 +261,15 @@ impl Gpu {
 
     /// 后台把原样搬的那一遍和库里每个后处理的管线都编一遍。编不过的（多半是精灵着色器）跳过，用到时再当场校验、提示。
     fn start_warm(&mut self, gfx: &Gfx, shaders: &Shaders) {
-        let (device, layout, format) = (gfx.device.clone(), self.pipeline_layout.clone(), self.format);
+        let (device, cache, layout, format) = (gfx.device.clone(), gfx.pipeline_cache.clone(), self.pipeline_layout.clone(), self.format);
         let library = shaders.library();
         self.warm.start(move |send| {
-            if !send((None, build(&device, &layout, format, "post identity", &post_source(IDENTITY)))) {
+            if !send((None, build(&device, cache.as_ref(), &layout, format, "post identity", &post_source(IDENTITY)))) {
                 return;
             }
             for (name, code) in library {
                 let source = post_source(&code);
-                if validate(&source, &code).is_ok() && !send((Some(name.clone()), build(&device, &layout, format, &name, &source))) {
+                if validate(&source, &code).is_ok() && !send((Some(name.clone()), build(&device, cache.as_ref(), &layout, format, &name, &source))) {
                     return;
                 }
             }
@@ -293,7 +293,7 @@ impl Gpu {
                         self.warn(name, || format!("后处理 {name} 编不过（是不是精灵着色器？），跳过：{e}"));
                         None
                     }
-                    Ok(()) => Some(build(&gfx.device, &self.pipeline_layout, self.format, name, &source)),
+                    Ok(()) => Some(build(&gfx.device, gfx.pipeline_cache.as_ref(), &self.pipeline_layout, self.format, name, &source)),
                 }
             }
         };
@@ -356,7 +356,7 @@ impl Gpu {
 }
 
 /// 一遍后处理的管线。
-fn build(device: &wgpu::Device, layout: &wgpu::PipelineLayout, format: wgpu::TextureFormat, label: &str, source: &str) -> wgpu::RenderPipeline {
+fn build(device: &wgpu::Device, cache: Option<&wgpu::PipelineCache>, layout: &wgpu::PipelineLayout, format: wgpu::TextureFormat, label: &str, source: &str) -> wgpu::RenderPipeline {
     let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some(label), source: wgpu::ShaderSource::Wgsl(source.into()) });
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some(label),
@@ -372,7 +372,7 @@ fn build(device: &wgpu::Device, layout: &wgpu::PipelineLayout, format: wgpu::Tex
             compilation_options: Default::default(),
         }),
         multiview_mask: None,
-        cache: None,
+        cache,
     })
 }
 
@@ -427,7 +427,7 @@ mod tests {
     #[test]
     fn warms_again_when_the_target_format_changes() {
         let Some(srgb) = test_gfx(wgpu::TextureFormat::Rgba8UnormSrgb) else { return };
-        let bgra = Gfx { screen: None, device: srgb.device.clone(), queue: srgb.queue.clone(), format: wgpu::TextureFormat::Bgra8Unorm, viewport: srgb.viewport };
+        let bgra = Gfx { screen: None, pipeline_cache: None, device: srgb.device.clone(), queue: srgb.queue.clone(), format: wgpu::TextureFormat::Bgra8Unorm, viewport: srgb.viewport };
         let shaders = library();
         let mut gpu = Gpu::new(&srgb);
         gpu.sync(&srgb, &shaders, srgb.format);

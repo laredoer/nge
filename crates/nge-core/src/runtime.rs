@@ -171,10 +171,12 @@ fn run(
         }
     };
 
+    // 等的时候换过画面（Android 切了一次后台）就用新的
+    let surface = gate.surface.take().unwrap_or(surface);
     let gpu = pollster::block_on(request_gpu(&instance, surface))?;
-    let (gfx, surface) = configure(gpu, viewport)?;
+    let (gfx, surface, cache) = configure(gpu, viewport)?;
     let game = factory(&gfx);
-    let mut state = Loop { core: Core::new(game, gfx, surface, emit), rx };
+    let mut state = Loop { core: Core::new(game, gfx, surface, emit, cache), rx };
     for msg in gate.take() {
         state.core.apply(msg);
     }

@@ -25,7 +25,7 @@ impl Offscreen {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let adapter = pollster::block_on(instance.request_adapter(&Default::default())).ok()?;
         let (device, queue) = pollster::block_on(adapter.request_device(&Default::default())).ok()?;
-        let gfx = Gfx { screen: None, device, queue, format: FORMAT, viewport: Viewport { size: [SIZE as f32; 2], pixels: [SIZE; 2] } };
+        let gfx = Gfx { screen: None, pipeline_cache: None, device, queue, format: FORMAT, viewport: Viewport { size: [SIZE as f32; 2], pixels: [SIZE; 2] } };
         let build = Arc::new(build);
         let game = nge_ecs::factory(move || {
             let mut app = App::new();

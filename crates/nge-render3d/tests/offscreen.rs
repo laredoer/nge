@@ -16,7 +16,7 @@ fn gfx(size: u32) -> Option<Gfx> {
     let adapter = pollster::block_on(instance.request_adapter(&Default::default())).ok()?;
     let (device, queue) = pollster::block_on(adapter.request_device(&Default::default())).ok()?;
     let viewport = Viewport { size: [size as f32; 2], pixels: [size; 2] };
-    Some(Gfx { screen: None, device, queue, format: FORMAT, viewport })
+    Some(Gfx { screen: None, pipeline_cache: None, device, queue, format: FORMAT, viewport })
 }
 
 struct Pixels {
