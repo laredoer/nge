@@ -44,6 +44,8 @@ opt-level = 1
 opt-level = 1
 [profile.dev.package.nge-ecs]
 opt-level = 1
+[profile.dev.package.nge-net]
+opt-level = 1
 [profile.dev.package.nge-nsh]
 opt-level = 1
 [profile.dev.package.nge-particles]
