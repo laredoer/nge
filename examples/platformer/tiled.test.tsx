@@ -108,7 +108,7 @@ test("第三关：Tiled 画的地图生成和代码描述的关卡一样的东�
   expect(built.coins.length).toBe(10);
   // 平台 [10, 8, 11] 上面的金币：平台顶边 128，往上 28
   expect(built.coins[0]).toEqual({ id: "coin-t0", x: 8 * TILE, y: 156 });
-  expect(built.enemies[0]).toEqual({ id: "enemy-0", x: 18.5 * TILE, to: { x: 21.5 * TILE } });
+  expect(built.enemies[0]).toEqual({ id: "enemy-0", x: 18.5 * TILE, y: 12, to: { x: 21.5 * TILE } });
   expect(built.lifts.map((l) => [l.node.x, l.node.y, l.to, l.duration])).toEqual([[29 * TILE, -8, { x: 33 * TILE }, 2.2]]);
   expect([built.goal.x, built.goal.y, built.crate.body.x, built.crate.body.y, built.right]).toEqual([56 * TILE, 40, 54.5 * TILE, 56, 60 * TILE]);
   // 第一个坑上面挂着铁链

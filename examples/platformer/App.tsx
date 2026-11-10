@@ -5,7 +5,7 @@ import { levelKey, otherLocale, strings } from "./strings";
 import { NEW_SAVE, nextSlot, SAVE_MIGRATIONS, SAVE_VERSION, saveDataOf, saveSummary, SLOTS } from "./savefile";
 import { hpBar, outOfHearts, TITLE_HOLD_MS, titleBubble } from "./hud";
 import { boardOf, leaderOf, nameTags, NET_KEY, netLabel, netNode, netSetting, playerName, remotePlayers, scoresUrl, submitUrl, type Leader } from "./online";
-import { campfireAt, finish, flagOn, JELLY_ZONE, jellyAt, LEVELS, ROWS, TILE, TOWER_TRIGGER, towerAt, towerSpot, type Progress } from "./levels";
+import { campfireAt, finish, flagOn, JELLY_ZONE, jellyAt, LEVELS, TILE, TOWER_TRIGGER, towerAt, towerSpot, type Progress } from "./levels";
 
 /** Rust 发的事件：掉出关卡或被敌人撞到送回起点、按 R 重新开始、踩到敌人。 */
 interface Events {
@@ -206,14 +206,14 @@ function App() {
     post: [...(LEVELS[level()].night ? night(now().goal).post : []), ...POST],
     audio: { preload: [COIN_SOUND, WIN_SOUND], ...levelAudio(LEVELS[level()].night ?? false) },
     physics: { gravity: [0, -1800] },
-    camera: { follow: "player", y: 60, smooth: 0.15, bounds: { left: 0, right: now().right, bottom: -160, top: (ROWS - 1) * TILE } },
+    camera: { follow: "player", y: 60, smooth: 0.15, bounds: { left: 0, right: now().right, bottom: -160, top: now().top } },
     camera3d: { match2d: true, interleave: true },
     // 箱子顶上的小箱子在大箱子顶面投下影子；有箱子堆的关再加一盏照着它的聚光灯
-    lights: [{ id: "sun", kind: "directional", direction: [-1, -2, -1.5], shadows: true }, ...(now().tower === null ? [] : [towerSpot(now().tower!)])],
+    lights: [{ id: "sun", kind: "directional", direction: [-1, -2, -1.5], shadows: true }, ...(now().tower === null ? [] : [towerSpot(now().tower!)]), ...now().lights],
     ambient: { brightness: 0.35 },
     // 3D 箱子摞起来的地面和关卡的地面一样高
     physics3d: { gravity: [0, -1800, 0] },
-    models: [now().crate.model, flagOn(now().goal), ...(tower()?.models ?? []), ...(jelly() === null ? [] : [jelly()!.model])],
+    models: [now().crate.model, flagOn(now().goal), ...(tower()?.models ?? []), ...(jelly() === null ? [] : [jelly()!.model]), ...now().models],
     emitters3d: now().tower === null ? [] : [campfireAt(now().tower!)],
     bars: [hpBar(falls())],
     bubbles: [...(title() === null ? [] : [titleBubble(t(levelKey(title()!)))]), ...nameTags(room.peers())],
@@ -224,17 +224,17 @@ function App() {
       ...BACKDROP,
       ...(LEVELS[level()].night ? stonesNear(3 * TILE) : []),
       ...remotePlayers(room.peers()),
-      { id: "player", x: 3 * TILE, y: 16, w: 24, h: 32, z: 5, color: "#ff7a59", body: { kind: "character", friction: 0, collide: true }, ...(flashing() ? FLASH : {}) },
+      { id: "player", x: now().spawn[0], y: now().spawn[1], w: 24, h: 32, z: 5, color: "#ff7a59", body: { kind: "character", friction: 0, collide: true }, ...(flashing() ? FLASH : {}) },
       // 金币自己发光，夜里也不暗
       ...now().coins.filter((c) => !taken().includes(c.id)).map(
         (c): SpriteNode => ({ id: c.id, x: c.x, y: c.y, w: 14, z: 2, rotation: 45, color: "#ffd93d", body: { kind: "fixed", sensor: true }, ...COIN_SHADER, unlit: true }),
       ),
       ...now().lifts.map(({ node }): SpriteNode => ({ ...node, z: 1, color: "#c08552", body: { kind: "kinematic", friction: 0 } })),
       // 踩到的不删：去掉刚体、变透明，巡逻补间接着走，重新开始时直接恢复
-      ...now().enemies.map(({ id, x }): SpriteNode =>
+      ...now().enemies.map(({ id, x, y }): SpriteNode =>
         stomped().includes(id)
-          ? { id, x, y: 12, w: 24, h: 24, z: 4, color: "#00000000" }
-          : { id, x, y: 12, w: 24, h: 24, z: 4, color: "#9b59b6", body: { kind: "kinematic", friction: 0 } },
+          ? { id, x, y, w: 24, h: 24, z: 4, color: "#00000000" }
+          : { id, x, y, w: 24, h: 24, z: 4, color: "#9b59b6", body: { kind: "kinematic", friction: 0 } },
       ),
       // 幽灵：看见角色就绕开平台追过来，追远了飘回去（见 docs/ai.md）；踩到的和敌人一样变透明
       ...now().ghosts.map(({ id, x, y }): SpriteNode =>

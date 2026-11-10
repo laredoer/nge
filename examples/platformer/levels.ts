@@ -1,7 +1,11 @@
 // 平台跳跃的关卡数据，以及按数据生成地图、金币、移动平台、敌人。
 import type { Emitter3dNode, JointNode, LightNode, ModelNode, SpriteNode, TilemapNode, TrailNode, Tween } from "../../ts/nge";
+import { checkTypes, LEVEL_FORMAT, LEVEL_VERSION, parseLevel, toTilemap, type Entity, type LevelFile } from "../../ts/level";
 import { tiled, type TiledMap } from "../../ts/tiled";
+import { propOf, sizeOf, TILESET, TYPES } from "./catalog";
 import level3 from "./maps/level3.json";
+// 第二关在编辑器的目录里：编辑器只能读写自己目录下的 levels/（见 docs/editor.md）
+import stairs from "../editor/levels/stairs.json";
 
 export const TILE = 32;
 export const ROWS = 15;
@@ -39,7 +43,7 @@ export interface Level {
   ramps?: number[][][];
 }
 
-/** 用代码描述的关卡。 */
+/** 用代码描述的关卡（第二关「石阶」导出成了关卡文件，见 docs/editor.md）。 */
 const DESCRIBED: Level[] = [
   {
     name: "草原",
@@ -66,32 +70,13 @@ const DESCRIBED: Level[] = [
     // 第三块平台右边、第二个坑前面的地面上
     jelly: 38,
   },
-  {
-    name: "石阶",
-    cols: 72,
-    pits: [[10, 12], [26, 31], [44, 46], [55, 58]],
-    platforms: [[11, 5, 7], [9, 14, 17], [8, 20, 23], [11, 33, 36], [9, 38, 41], [9, 48, 51], [10, 60, 62]],
-    stairs: [[22, 13], [23, 12], [24, 11], [25, 11], [52, 13], [53, 12], [54, 12]],
-    groundCoins: [4, 9, 19, 35, 43, 64, 67],
-    // 第二个坑太宽，靠横着的平台过去；最后一个坑上面有个竖着的
-    lifts: [
-      { col: 27, y: -8, to: { col: 31 }, duration: 2.2 },
-      { col: 56.5, y: -8, to: { y: 120 }, duration: 2 },
-    ],
-    extraCoins: [[29, 120], [56.5, 170]],
-    enemies: [15, 37, 47],
-    crate: 66.5,
-    // 第一个坑上面
-    swing: [11.5, 150],
-    ghosts: [[19, 230], [45, 250]],
-  },
 ];
 
 export interface Built {
   tilemaps: TilemapNode[];
   coins: { id: string; x: number; y: number }[];
   lifts: { node: SpriteNode; to: Tween["to"]; duration: number }[];
-  enemies: { id: string; x: number; to: { x: number } }[];
+  enemies: { id: string; x: number; y: number; to: { x: number } }[];
   /** 幽灵：id 以 enemy- 开头（踩它、碰它和别的敌人一样），会飞，追角色。 */
   ghosts: { id: string; x: number; y: number }[];
   /** 斜坡：转过角度的固定刚体。 */
@@ -105,9 +90,21 @@ export interface Built {
   /** 吊着的铁链：几节链子和一个铁球，用转动关节一节节连起来，挂在世界上的支点。 */
   swing: { sprites: SpriteNode[]; joints: JointNode[] };
   goal: SpriteNode;
-  /** 相机的范围右边。 */
+  /** 相机的范围右边、上边。 */
   right: number;
+  top: number;
+  /** 角色的起点。 */
+  spawn: [number, number];
+  /** 额外的 3D 灯（关卡文件里摆的）。 */
+  lights: LightNode[];
+  /** 摆着看的 3D 模型（关卡文件里摆的）。 */
+  models: ModelNode[];
 }
+
+/** 角色默认的起点。 */
+export const SPAWN: [number, number] = [3 * TILE, 16];
+/** 代码描述的关卡和 Tiled 关卡没有的东西。 */
+const EXTRAS = { spawn: SPAWN, lights: [], models: [] };
 
 /** 按关卡数据生成场景里这一关的东西。地面顶边在 y = 0，地图左边在 x = 0。 */
 export function build(level: Level): Built {
@@ -144,15 +141,18 @@ export function build(level: Level): Built {
   ];
   const lifts = level.lifts.map((l, i) => lift(`lift-${i}`, l.col * TILE, l.y, l.to.col === undefined ? { y: l.to.y } : { x: l.to.col * TILE }, l.duration));
   // id 以 enemy- 开头（Rust 按这个认），kinematic
-  const enemies = level.enemies.map((c, i) => ({ id: `enemy-${i}`, x: (c + 0.5) * TILE, to: { x: (c + 3.5) * TILE } }));
+  const enemies = level.enemies.map((c, i) => ({ id: `enemy-${i}`, x: (c + 0.5) * TILE, y: ENEMY_Y, to: { x: (c + 3.5) * TILE } }));
   // 终点前转着的 3D 箱子（2.5D）：3D 相机跟着 2D 相机（`match2d`），模型的 (x, y) 就是关卡里的位置
   const swing = level.swing === undefined ? NO_SWING : swingAt(level.swing[0] * TILE, level.swing[1]);
   const ghosts = (level.ghosts ?? []).map(([c, y], i) => ({ id: `enemy-ghost-${i}`, x: (c + 0.5) * TILE, y }));
   const ramps = (level.ramps ?? []).map(([a, b], i) => rampOf(`ramp-${i}`, a, b));
   const tower = level.tower === undefined ? null : (level.tower + 0.5) * TILE;
   const jelly = level.jelly === undefined ? null : (level.jelly + 0.5) * TILE;
-  return { tilemaps: [tilemap], coins, lifts, enemies, ghosts, ramps, tower, jelly, crate: crateAt(level.crate * TILE, 56), swing, goal: goalAt((cols - 4) * TILE, 40), right: cols * TILE };
+  return { tilemaps: [tilemap], coins, lifts, enemies, ghosts, ramps, tower, jelly, crate: crateAt(level.crate * TILE, 56), swing, goal: goalAt((cols - 4) * TILE, 40), right: cols * TILE, top: (ROWS - 1) * TILE, ...EXTRAS };
 }
+
+/** 地面上的敌人的 y（中心）。 */
+const ENEMY_Y = 12;
 
 /** 厚 16 的斜坡，顶面从 `a` 到 `b`。 */
 export function rampOf(id: string, [ax, ay]: number[], [bx, by]: number[]): SpriteNode {
@@ -173,12 +173,17 @@ export function rampOf(id: string, [ax, ay]: number[], [bx, by]: number[]): Spri
   };
 }
 
-const lift = (id: string, x: number, y: number, to: Tween["to"], duration: number) => ({ node: { id, x, y, w: 64, h: 16 } as SpriteNode, to, duration });
+/** 移动平台：宽 `w`、高 16。 */
+export function lift(id: string, x: number, y: number, to: Tween["to"], duration: number, w = 64) {
+  return { node: { id, x, y, w, h: 16 } as SpriteNode, to, duration };
+}
 /** 箱子边长 40（模型是边长 1 的立方体）。刚体不画（全透明），模型挂在它上面，往后仰 20° 看得出是 3D 的。 */
-const crateAt = (x: number, y: number) => ({
-  body: { id: "crate-body", x, y, w: 40, h: 40, z: 3, color: "#00000000", body: { density: 0.3, friction: 0.6 } } as SpriteNode,
-  model: { id: "crate", model: "asset:/@platformer/crate.glb", attach: "crate-body", scale: 40, rotation: [20, 0, 0] } as ModelNode,
-});
+export function crateAt(x: number, y: number) {
+  return {
+    body: { id: "crate-body", x, y, w: 40, h: 40, z: 3, color: "#00000000", body: { density: 0.3, friction: 0.6 } } as SpriteNode,
+    model: { id: "crate", model: "asset:/@platformer/crate.glb", attach: "crate-body", scale: 40, rotation: [20, 0, 0] } as ModelNode,
+  };
+}
 
 /** 一摞 3D 箱子的边长、离关卡平面多远（往后）。 */
 export const TOWER_BOX = 14;
@@ -278,7 +283,7 @@ const LINK = 18;
 const NO_SWING = { sprites: [], joints: [] };
 
 /** 支点在 (x, y) 的铁链：链子一节挨一节往下挂，最下面是半径 10 的铁球，一开始往右甩着。 */
-function swingAt(x: number, y: number): Built["swing"] {
+export function swingAt(x: number, y: number): Built["swing"] {
   const links = Array.from({ length: LINKS }, (_, i): SpriteNode => ({
     id: `swing-${i}`, x, y: y - LINK * (i + 0.5), w: 6, h: LINK, z: 1, color: "#8a8f9c", body: { density: 0.5 },
   }));
@@ -288,7 +293,9 @@ function swingAt(x: number, y: number): Built["swing"] {
   const joints = [...links, ball].map((s, i): JointNode => ({ id: `swing-j${i}`, a: i === 0 ? undefined : `swing-${i - 1}`, b: s.id, kind: "revolute", anchorA: [x, y - LINK * i] }));
   return { sprites: [...links, ball], joints };
 }
-const goalAt = (x: number, y: number): SpriteNode => ({ id: "goal", x, y, w: 16, h: 80, color: "#6bcb77", body: { kind: "fixed", sensor: true, collide: true } });
+export function goalAt(x: number, y: number): SpriteNode {
+  return { id: "goal", x, y, w: 16, h: 80, color: "#6bcb77", body: { kind: "fixed", sensor: true, collide: true } };
+}
 
 /**
  * 终点旗杆顶上挥动的 3D 旗子：带骨骼动画的 glTF（布宽 1、高 0.6，从原点往右下挂），放大 40 倍挂在旗杆右上角。
@@ -332,7 +339,7 @@ export function fromTiled(map: TiledMap): Built {
       if (dx !== 0 && dy !== 0) throw new Error(`Tiled 关卡的移动平台 ${o.id} 只能往一个方向走（dx 和 dy 只给一个）`);
       return lift(`lift-${i}`, o.x, o.y, dy === 0 ? { x: o.x + dx } : { y: o.y - dy }, num(o, "duration", 2));
     }),
-    enemies: of("enemy").map((o, i) => ({ id: `enemy-${i}`, x: o.x, to: { x: o.x + num(o, "patrol", 3) * TILE } })),
+    enemies: of("enemy").map((o, i) => ({ id: `enemy-${i}`, x: o.x, y: ENEMY_Y, to: { x: o.x + num(o, "patrol", 3) * TILE } })),
     ghosts: of("ghost").map((o, i) => ({ id: `enemy-ghost-${i}`, x: o.x, y: o.y })),
     ramps: [],
     tower: null,
@@ -341,12 +348,135 @@ export function fromTiled(map: TiledMap): Built {
     swing: swing === undefined ? NO_SWING : swingAt(swing.x, swing.y),
     goal: goalAt(goal.x, goal.y),
     right: width,
+    top: (map.height - 1) * map.tileheight,
+    ...EXTRAS,
   };
 }
 
+/** 关卡文件里的东西：id 按类型编号（敌人以 enemy- 开头，Rust 按这个认）。 */
+function entitiesOf(entities: Entity[]) {
+  const of = (type: string) => entities.filter((e) => e.type === type);
+  const num = (e: Entity, key: string) => propOf<number>(e, key);
+  const lifts = of("lift").map((e, i) => {
+    const [dx, dy] = [num(e, "dx"), num(e, "dy")];
+    return lift(`lift-${i}`, e.x, e.y, dy === 0 ? { x: e.x + dx } : { y: e.y + dy }, num(e, "duration"), sizeOf(e)[0]);
+  });
+  const ramps = of("ramp").map((e, i) => {
+    const [w, h] = sizeOf(e);
+    const down = propOf<boolean>(e, "down");
+    return rampOf(`ramp-${i}`, [e.x - w / 2, e.y + (down ? h : -h) / 2], [e.x + w / 2, e.y + (down ? -h : h) / 2]);
+  });
+  const lights = of("light").map((e, i): LightNode => {
+    const spot = propOf<string>(e, "kind") === "spot";
+    const base: LightNode = { id: `light-${i}`, kind: spot ? "spot" : "point", x: e.x, y: e.y, z: num(e, "z"), color: propOf<string>(e, "color"), intensity: num(e, "intensity"), range: num(e, "range") };
+    // 聚光灯朝关卡平面往下照
+    return spot ? { ...base, angle: num(e, "angle"), direction: [0, -0.5, -1] } : base;
+  });
+  const models = of("model").map((e, i): ModelNode => ({ id: `model-${i}`, model: `asset:/@platformer/${propOf<string>(e, "model")}`, x: e.x, y: e.y, z: num(e, "z"), scale: num(e, "scale"), spin: num(e, "spin") }));
+  return { of, lifts, ramps, lights, models };
+}
+
+/** 关卡文件 → 游戏用的关卡。先查格式和类型（缺终点、属性超范围……），不合规的不转，返回错误。 */
+export function fromFile(file: unknown): { ok: true; built: Built; name: string; night: boolean } | { ok: false; errors: string[] } {
+  const parsed = parseLevel(file);
+  if (!parsed.ok) return parsed;
+  const level = parsed.level;
+  const errors = checkTypes(level, TYPES);
+  for (const e of level.entities.filter((e) => e.type === "lift" && propOf<number>(e, "dx") !== 0 && propOf<number>(e, "dy") !== 0)) {
+    errors.push(`${e.id}：移动平台只能往一个方向走（横向、纵向距离只给一个）`);
+  }
+  if (errors.length > 0) return { ok: false, errors };
+  const { of, lifts, ramps, lights, models } = entitiesOf(level.entities);
+  const one = (type: string) => of(type)[0];
+  const spawn = one("spawn");
+  const swing = one("swing");
+  const tower = one("tower");
+  const jelly = one("jelly");
+  const crate = one("crate");
+  const goal = one("goal");
+  const built: Built = {
+    // 角色的速度归 Rust 管，地面默认不要摩擦
+    tilemaps: level.tiles.map((t) => ({ ...toTilemap(t), friction: t.friction ?? 0 })),
+    coins: of("coin").map((e, i) => ({ id: `coin-${i}`, x: e.x, y: e.y })),
+    lifts,
+    enemies: of("enemy").map((e, i) => ({ id: `enemy-${i}`, x: e.x, y: e.y, to: { x: e.x + propOf<number>(e, "patrol") * TILE } })),
+    ghosts: of("ghost").map((e, i) => ({ id: `enemy-ghost-${i}`, x: e.x, y: e.y })),
+    ramps,
+    tower: tower === undefined ? null : tower.x,
+    jelly: jelly === undefined ? null : jelly.x,
+    crate: crateAt(crate.x, crate.y),
+    // 铁链的支点在包围盒顶边的中点
+    swing: swing === undefined ? NO_SWING : swingAt(swing.x, swing.y + sizeOf(swing)[1] / 2),
+    goal: goalAt(goal.x, goal.y),
+    right: Math.max(0, ...level.tiles.map((t) => t.x + t.cols * t.tile)),
+    top: Math.max(0, ...level.tiles.map((t) => t.y)),
+    spawn: spawn === undefined ? SPAWN : [spawn.x, spawn.y],
+    lights,
+    models,
+  };
+  return { ok: true, built, name: level.name, night: level.night };
+}
+
+/** 代码描述的关卡 → 关卡文件（导出用）：位置都取 `build` 生成的，转回来和原来一样。 */
+export function toFile(level: Level): LevelFile {
+  const b = build(level);
+  const map = b.tilemaps[0];
+  let n = 0;
+  const at = (type: string, x: number, y: number, rest: Partial<Entity> = {}): Entity => ({ id: `e${++n}`, type, x, y, ...rest });
+  const swingSize = sizeOf({ id: "", type: "swing", x: 0, y: 0 });
+  const entities: Entity[] = [
+    at("spawn", ...SPAWN),
+    ...b.coins.map((c) => at("coin", c.x, c.y)),
+    ...b.lifts.map(({ node, to, duration }) => {
+      const props = to.x === undefined ? { dx: 0, dy: to.y! - node.y! } : { dx: to.x - node.x!, dy: 0 };
+      return at("lift", node.x!, node.y!, { props: { ...props, duration } });
+    }),
+    ...b.enemies.map((e) => at("enemy", e.x, e.y, { props: { patrol: (e.to.x - e.x) / TILE } })),
+    ...b.ghosts.map((g) => at("ghost", g.x, g.y)),
+    ...(level.ramps ?? []).map(([[ax, ay], [bx, by]]) => {
+      const [left, right] = ax <= bx ? [[ax, ay], [bx, by]] : [[bx, by], [ax, ay]];
+      return at("ramp", (ax + bx) / 2, (ay + by) / 2, { w: right[0] - left[0], h: Math.abs(by - ay), props: { down: right[1] < left[1] } });
+    }),
+    ...(b.tower === null ? [] : [at("tower", b.tower, TYPES.tower.fixedY!)]),
+    ...(b.jelly === null ? [] : [at("jelly", b.jelly, TYPES.jelly.fixedY!)]),
+    at("crate", b.crate.body.x!, b.crate.body.y!),
+    ...(level.swing === undefined ? [] : [at("swing", level.swing[0] * TILE, level.swing[1] - swingSize[1] / 2)]),
+    at("goal", b.goal.x!, b.goal.y!),
+  ];
+  const data = Array.from({ length: ROWS }, (_, r) => map.data.slice(r * map.cols, (r + 1) * map.cols));
+  return {
+    format: LEVEL_FORMAT,
+    version: LEVEL_VERSION,
+    name: level.name,
+    night: false,
+    tiles: [{ id: map.id, texture: map.texture, grid: map.grid!, tile: map.tile, cols: map.cols, rows: ROWS, x: map.x!, y: map.y!, solid: map.solid!, data, friction: 0 }],
+    entities,
+  };
+}
+
+/** 读坏了的关卡文件时顶上的：一段平地加终点，照样能玩。 */
+function fallbackLevel(): Built {
+  const cols = 20;
+  const data = Array.from({ length: ROWS * cols }, (_, i) => (i >= (ROWS - 1) * cols ? TILESET.frames[1].frame : -1));
+  const tilemaps: TilemapNode[] = [{ id: "level", texture: TILESET.texture, grid: TILESET.grid, tile: TILE, cols, x: 0, y: (ROWS - 1) * TILE, data, solid: TILESET.solid, friction: 0 }];
+  return { tilemaps, coins: [], lifts: [], enemies: [], ghosts: [], ramps: [], tower: null, jelly: null, crate: crateAt(10 * TILE, 56), swing: NO_SWING, goal: goalAt((cols - 4) * TILE, 40), right: cols * TILE, top: (ROWS - 1) * TILE, ...EXTRAS };
+}
+
+/** 游戏里的一关：关卡文件读不了时（编辑器存了个没做完的）不崩，换成一段平地并报错。 */
+export function fileLevel(raw: unknown, fallbackName: string, report: (message: string) => void = console.error): { name: string; built: Built; night?: boolean } {
+  const r = fromFile(raw);
+  if (r.ok) return { name: r.name || fallbackName, built: r.built, night: r.night };
+  report(`关卡文件「${fallbackName}」读不了，先用一段平地顶上：${r.errors.join("；")}`);
+  return { name: fallbackName, built: fallbackLevel() };
+}
+
+/** 第一关（导出、测试用）。 */
+export const MEADOW = DESCRIBED[0];
+
 /** `night`：夜里，开 2D 光照（见 effects.ts）。 */
 export const LEVELS: { name: string; built: Built; night?: boolean }[] = [
-  ...DESCRIBED.map((level) => ({ name: level.name, built: build(level) })),
+  { name: MEADOW.name, built: build(MEADOW) },
+  fileLevel(stairs, "石阶"),
   { name: "云端", built: fromTiled(level3), night: true },
 ];
 
