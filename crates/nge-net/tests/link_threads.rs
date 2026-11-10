@@ -73,24 +73,36 @@ fn a_peer_that_never_reads_cannot_hang_the_link() {
     let before = live_threads();
     let mut link = connect(&format!("ws://127.0.0.1:{port}"));
     wait_open(&mut link);
-    // 一直往里塞：send 不卡；写不出去、待发的排满了就当断了
+    // 一直往里塞：send 不卡；待发的排满了马上当断了（不用等写超时）
     let start = Instant::now();
     let mut closed = None;
-    for _ in 0..20_000 {
+    while closed.is_none() && start.elapsed() < Duration::from_secs(2) {
         link.send(Frame::Binary(vec![0; 32 * 1024]));
-        if let Some(LinkEvent::Closed(why)) = link.poll().into_iter().find(|e| matches!(e, LinkEvent::Closed(_))) {
-            closed = Some(why);
-            break;
-        }
-    }
-    assert!(start.elapsed() < Duration::from_secs(5), "send 卡住了: {:?}", start.elapsed());
-    let deadline = Instant::now() + Duration::from_secs(8);
-    while closed.is_none() && Instant::now() < deadline {
         closed = link.poll().into_iter().find_map(|e| if let LinkEvent::Closed(why) = e { Some(why) } else { None });
-        std::thread::sleep(Duration::from_millis(10));
     }
-    assert!(closed.is_some(), "对方不读时应该当断了");
+    let why = closed.expect("2 秒内应该因为排满了当断了");
+    assert!(why.contains("待发"), "{why}");
     assert!(link.poll().is_empty(), "Closed 之后没有别的事件");
     drop(link);
-    assert!(wait_threads(before, Duration::from_secs(8)), "线程还在: {}", live_threads());
+    assert!(wait_threads(before, Duration::from_secs(3)), "线程还在: {}", live_threads());
+}
+
+#[test]
+fn a_write_that_never_finishes_times_out() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let port = deaf_server();
+    let mut link = connect(&format!("ws://127.0.0.1:{port}"));
+    wait_open(&mut link);
+    // 没排满，但对方不读，写着写着卡住：5 秒后当断了
+    for _ in 0..200 {
+        link.send(Frame::Binary(vec![0; 60 * 1024]));
+    }
+    let deadline = Instant::now() + Duration::from_secs(9);
+    let mut closed = None;
+    while closed.is_none() && Instant::now() < deadline {
+        closed = link.poll().into_iter().find_map(|e| if let LinkEvent::Closed(why) = e { Some(why) } else { None });
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let why = closed.expect("写卡住了应该当断了");
+    assert!(why.contains("没发出去"), "{why}");
 }

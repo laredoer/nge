@@ -9,6 +9,10 @@ pub const MAX_SAMPLES: usize = 32;
 pub const MAX_EXTRAPOLATE: f64 = 100.0;
 /// 两个样本离得比这远（point）当成瞬移（掉坑回起点），不在中间插值。
 pub const SNAP_DISTANCE: f32 = 300.0;
+/// 同一个人后一个快照的时间戳比前一个多出来的，超过本地过去的时间再加这么多（毫秒）时丢掉（伪造的）。
+pub const MAX_JUMP: f64 = 5000.0;
+/// 往回拨这么多（毫秒）时从头来过（对方重启了）：经中继转发是按顺序的，正常不会往回走。
+pub const MAX_REWIND: f64 = 1000.0;
 /// 默认的显示延迟（毫秒）：缓冲大约两个包（20 Hz）。
 pub const DEFAULT_DELAY: f64 = 100.0;
 /// 时钟偏移每次往上跟多少（比例）。

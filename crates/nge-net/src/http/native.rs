@@ -4,7 +4,7 @@ use std::sync::Mutex;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::Duration;
 
-use super::{HttpBackend, HttpDone, HttpRequest, MAX_RESPONSE, Method};
+use super::{HttpBackend, HttpDone, HttpRequest, MAX_RESPONSE, Method, too_large};
 
 pub struct NativeHttp {
     tx: Sender<HttpDone>,
@@ -49,8 +49,10 @@ fn fetch(id: u64, request: &HttpRequest) -> HttpDone {
         Err(e) => return HttpDone::failed(id, format!("请求 {} 失败: {e}", request.url)),
     };
     let status = response.status().as_u16();
-    match response.body_mut().with_config().limit(MAX_RESPONSE).read_to_string() {
-        Ok(body) => HttpDone { id, status, body, error: None },
+    // 按字节读，不是 UTF-8 的按替换字符解（和浏览器的 text() 一样）
+    match response.body_mut().with_config().limit(MAX_RESPONSE).read_to_vec() {
+        Ok(bytes) => HttpDone { id, status, body: String::from_utf8_lossy(&bytes).into_owned(), error: None },
+        Err(ureq::Error::BodyExceedsLimit(_)) => HttpDone { id, status, body: String::new(), error: Some(too_large()) },
         Err(e) => HttpDone { id, status, body: String::new(), error: Some(format!("读响应失败: {e}")) },
     }
 }

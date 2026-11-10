@@ -8,7 +8,7 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{AbortController, Headers, Request, RequestInit, Response};
 
-use super::{HttpBackend, HttpDone, HttpRequest, MAX_RESPONSE, Method};
+use super::{HttpBackend, HttpDone, HttpRequest, MAX_RESPONSE, Method, too_large};
 
 #[derive(Default)]
 pub struct WebHttp {
@@ -58,19 +58,27 @@ async fn fetch(request: &HttpRequest) -> Result<Result<(u16, String), String>, J
     }
     let abort = AbortController::new()?;
     init.set_signal(Some(&abort.signal()));
+    // 定时器的回调留在这里，请求结束时清掉定时器、放掉回调（不用 once_into_js：没触发的会一直留着）
     let timer = {
         let abort = abort.clone();
-        Closure::once_into_js(move || abort.abort())
+        Closure::<dyn FnMut()>::new(move || abort.abort())
     };
-    let timeout = window.set_timeout_with_callback_and_timeout_and_arguments_0(timer.unchecked_ref(), (request.timeout * 1000.0) as i32)?;
-    let req = Request::new_with_str_and_init(&request.url, &init)?;
+    let timeout = window.set_timeout_with_callback_and_timeout_and_arguments_0(timer.as_ref().unchecked_ref(), (request.timeout * 1000.0) as i32)?;
     let result = async {
+        let req = Request::new_with_str_and_init(&request.url, &init)?;
         let response: Response = JsFuture::from(window.fetch_with_request(&req)).await?.dyn_into()?;
         let status = response.status();
+        // 先看 Content-Length：明说超了的不读，中止掉
+        let declared = response.headers().get("content-length").ok().flatten().and_then(|v| v.trim().parse::<u64>().ok());
+        if declared.is_some_and(|n| n > MAX_RESPONSE) {
+            abort.abort();
+            return Ok(Err(too_large()));
+        }
         let text = JsFuture::from(response.text()?).await?.as_string().unwrap_or_default();
-        Ok::<_, JsValue>(if text.len() as u64 > MAX_RESPONSE { Err(format!("响应超过 {MAX_RESPONSE} 字节")) } else { Ok((status, text)) })
+        Ok::<_, JsValue>(if text.len() as u64 > MAX_RESPONSE { Err(too_large()) } else { Ok((status, text)) })
     }
     .await;
     window.clear_timeout_with_handle(timeout);
+    drop(timer);
     result
 }

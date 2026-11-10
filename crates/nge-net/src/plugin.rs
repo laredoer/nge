@@ -69,7 +69,7 @@ type Clock = Box<dyn Fn() -> f64 + Send + Sync>;
 pub struct Net {
     pub(crate) client: NetClient,
     clock: Clock,
-    /// 每秒发几次快照（默认 20）。
+    /// 每秒发几次快照（默认 20，最多 25，不合规的按 20）。
     pub rate: f32,
     /// 远端显示的延迟，毫秒（默认 100）。
     pub delay: f64,
@@ -165,6 +165,7 @@ fn status_name(status: Status) -> &'static str {
         Status::Offline => "offline",
         Status::Connecting => "connecting",
         Status::Online => "online",
+        Status::Full => "full",
     }
 }
 

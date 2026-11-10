@@ -19,6 +19,8 @@ pub use ecs::{HTTP, HTTP_REQUEST, Http, HttpCommand, HttpPlugin, HttpReply};
 
 /// 同时最多几个请求在路上，多的排队。
 pub const MAX_INFLIGHT: usize = 8;
+/// 最多排几个：再多的马上报错。
+pub const MAX_QUEUED: usize = 64;
 /// 响应体最多几个字节，超出算出错。
 pub const MAX_RESPONSE: u64 = 1024 * 1024;
 /// 请求体最多几个字节。
@@ -84,8 +86,9 @@ impl HttpRequest {
             if name.is_empty() || !name.chars().all(token) {
                 return Err(format!("请求头名不合规: {name:?}"));
             }
-            if value.chars().any(|c| c.is_control() && c != '\t') {
-                return Err(format!("请求头 {name} 的值有控制字符"));
+            // 只认可见的 ASCII、空格和制表符：浏览器和原生对别的字符处理不一样，干脆都拒
+            if !value.chars().all(|c| c == '\t' || (' '..='~').contains(&c)) {
+                return Err(format!("请求头 {name} 的值只能是 ASCII，不能有控制字符"));
             }
         }
         match (&self.method, &self.body) {
@@ -98,6 +101,11 @@ impl HttpRequest {
         }
         Ok(())
     }
+}
+
+/// 响应体超过上限时的错误（原生和浏览器一样）。
+pub(crate) fn too_large() -> String {
+    format!("响应超过 {MAX_RESPONSE} 字节")
 }
 
 /// 一个请求的结果。`error` 不是空的时候是没拿到响应（地址不合规、连不上、超时、响应太大）。
@@ -155,6 +163,9 @@ impl HttpClient {
         let id = self.next_id;
         self.next_id += 1;
         match request.validate() {
+            Ok(()) if self.inflight.len() >= MAX_INFLIGHT && self.queue.len() >= MAX_QUEUED => {
+                self.ready.push(HttpDone::failed(id, format!("排队的请求超过 {MAX_QUEUED} 个")));
+            }
             Ok(()) => {
                 self.queue.push_back((id, request));
                 self.pump();
@@ -247,6 +258,9 @@ pub(crate) mod tests {
             HttpRequest::get("http://x/").timeout(f32::NAN),
             HttpRequest::get("http://x/").timeout(MAX_TIMEOUT + 1.0),
             (0..=MAX_HEADERS).fold(HttpRequest::get("http://x/"), |r, i| r.header(format!("X-{i}"), "v")),
+            // 头的值只能是 ASCII（浏览器和原生一样拒）
+            HttpRequest::get("http://x/").header("X-Name", "小明"),
+            HttpRequest::get("http://x/").header("X-Name", "caf\u{e9}"),
         ];
         for r in bad {
             assert!(r.validate().is_err(), "{r:?}");
@@ -286,6 +300,17 @@ pub(crate) mod tests {
         assert_eq!(done, vec![HttpDone { id: ids[0], status: 200, body: "a".into(), error: None }]);
         assert_eq!((c.inflight(), c.queued()), (MAX_INFLIGHT, 1), "空出来的名额发了排着的");
         assert_eq!(fake.started().last().unwrap().1.url, "http://x/8", "按顺序");
+    }
+
+    #[test]
+    fn the_queue_is_capped_and_overflow_fails_at_once() {
+        let fake = FakeHttp::default();
+        let mut c = HttpClient::new(Box::new(fake.clone()));
+        let ids: Vec<u64> = (0..MAX_INFLIGHT + MAX_QUEUED + 3).map(|i| c.send(HttpRequest::get(format!("http://x/{i}")))).collect();
+        assert_eq!((c.inflight(), c.queued()), (MAX_INFLIGHT, MAX_QUEUED));
+        let done = c.poll();
+        assert_eq!(done.iter().map(|d| d.id).collect::<Vec<_>>(), ids[MAX_INFLIGHT + MAX_QUEUED..].to_vec(), "多出来的马上报错");
+        assert!(done.iter().all(|d| d.error.as_deref().is_some_and(|e| e.contains("排队"))));
     }
 
     #[test]

@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use crate::backoff::Backoff;
 use crate::limit::TokenBucket;
 use crate::link::{Connector, Frame, Link, LinkEvent, MAX_MESSAGE};
-use crate::proto::{self, ClientMsg, MAX_JSON, MAX_KEY, MAX_NAME, MAX_ROOM, PROTOCOL_VERSION, Payload, Peer, PeerId, RelayMsg};
+use crate::proto::{self, ClientMsg, ErrorCode, MAX_JSON, MAX_KEY, MAX_NAME, MAX_ROOM, PROTOCOL_VERSION, Payload, Peer, PeerId, RelayMsg};
 
 /// 多久发一次心跳（秒）。
 pub const PING_INTERVAL: f64 = 2.0;
@@ -14,6 +14,8 @@ pub const SILENCE_TIMEOUT: f64 = 10.0;
 /// 用户消息每秒最多几条、最多攒几条。
 pub const MESSAGE_RATE: f64 = 30.0;
 pub const MESSAGE_BURST: f64 = 30.0;
+/// 房间满了以后多久再试（秒）。
+pub const ROOM_FULL_RETRY: f64 = 30.0;
 
 /// 连到哪：中继地址、房间、自己的名字。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,6 +34,8 @@ pub enum Status {
     Connecting,
     /// 进了房间。
     Online,
+    /// 房间满了，等 [`ROOM_FULL_RETRY`] 秒再试。
+    Full,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -67,6 +71,8 @@ pub struct NetClient {
     last_ping: f64,
     messages: TokenBucket,
     events: Vec<ClientEvent>,
+    /// 重连也没用（协议版本不对、房间名或名字不合规）：换目标之前不再连。
+    stopped: bool,
 }
 
 impl NetClient {
@@ -84,6 +90,7 @@ impl NetClient {
             last_ping: 0.0,
             messages: TokenBucket::new(MESSAGE_RATE, MESSAGE_BURST),
             events: Vec::new(),
+            stopped: false,
         }
     }
 
@@ -101,6 +108,7 @@ impl NetClient {
         self.target = target;
         self.backoff.reset();
         self.retry_at = None;
+        self.stopped = false;
         self.set_status(if self.target.is_some() { Status::Connecting } else { Status::Offline });
     }
 
@@ -108,8 +116,13 @@ impl NetClient {
     pub fn update(&mut self, now: f64) -> Vec<ClientEvent> {
         if let Some(target) = &self.target
             && self.link.is_none()
+            && !self.stopped
             && self.retry_at.is_none_or(|at| now >= at)
         {
+            if hello_of(target).is_none() {
+                self.stop("房间名或名字不合规（空的、有控制字符），不连");
+                return std::mem::take(&mut self.events);
+            }
             self.link = Some((self.connector)(&target.url));
             self.retry_at = None;
             self.last_heard = now;
@@ -121,12 +134,16 @@ impl NetClient {
                 LinkEvent::Open => self.hello(now),
                 LinkEvent::Frame(frame) => {
                     self.last_heard = now;
-                    self.receive(frame);
+                    self.receive(frame, now);
                 }
                 LinkEvent::Closed(reason) => {
                     self.lost(reason, now);
                     break;
                 }
+            }
+            // 中继报错后连接已经丢掉了：后面的事件（比如关闭）是旧连接的
+            if self.link.is_none() {
+                break;
             }
         }
         if self.link.is_some() {
@@ -197,16 +214,23 @@ impl NetClient {
         }
     }
 
-    /// 连上了：报上房间和名字（超长的截断，中继还会再查）。
+    /// 连上了：报上房间和名字。
     fn hello(&mut self, now: f64) {
-        let Some(target) = &self.target else { return };
-        let cut = |s: &str, max: usize| s.trim().chars().take(max).collect::<String>();
-        let hello = ClientMsg::Hello { version: PROTOCOL_VERSION, room: cut(&target.room, MAX_ROOM), name: cut(&target.name, MAX_NAME) };
+        let Some(hello) = self.target.as_ref().and_then(hello_of) else { return };
         self.last_heard = now;
         self.send(&hello);
     }
 
-    fn receive(&mut self, frame: Frame) {
+    /// 不再重连：换目标之前一直离线。
+    fn stop(&mut self, reason: &str) {
+        self.drop_link();
+        self.stopped = true;
+        self.retry_at = None;
+        self.set_status(Status::Offline);
+        self.events.push(ClientEvent::Error(reason.to_owned()));
+    }
+
+    fn receive(&mut self, frame: Frame, now: f64) {
         let bytes = match frame {
             Frame::Binary(b) => b,
             Frame::Text(_) => return log::warn!("中继发来了文本帧，忽略"),
@@ -244,6 +268,14 @@ impl NetClient {
                 }
             }
             RelayMsg::Pong => {}
+            RelayMsg::Error(ErrorCode::Version) => self.stop("中继报错: Version（协议版本对不上），不再重连"),
+            RelayMsg::Error(ErrorCode::BadHello) => self.stop("中继报错: BadHello（房间名或名字不合规），不再重连"),
+            RelayMsg::Error(ErrorCode::RoomFull) => {
+                self.drop_link();
+                self.set_status(Status::Full);
+                self.events.push(ClientEvent::Error(format!("中继报错: RoomFull（房间满了），{ROOM_FULL_RETRY} 秒后再试")));
+                self.retry_at = Some(now + ROOM_FULL_RETRY);
+            }
             RelayMsg::Error(code) => self.events.push(ClientEvent::Error(format!("中继报错: {code:?}"))),
         }
     }
@@ -265,6 +297,12 @@ impl NetClient {
     }
 }
 
+/// 要发的 `Hello`：超长的截断，空的、有控制字符的不行（中继还会再查）。
+fn hello_of(target: &Target) -> Option<ClientMsg> {
+    let cut = |s: &str, max: usize| proto::clean_text(&s.trim().chars().take(max).collect::<String>(), max);
+    Some(ClientMsg::Hello { version: PROTOCOL_VERSION, room: cut(&target.room, MAX_ROOM)?, name: cut(&target.name, MAX_NAME)? })
+}
+
 /// 退避抖动的种子：每个客户端不一样，免得一起断的又一起连回来。
 fn seed() -> u64 {
     let nanos = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64);
@@ -275,7 +313,7 @@ fn seed() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proto::{ErrorCode, Snapshot, encode};
+    use crate::proto::{Snapshot, encode};
     use crate::testing::FakeRelay;
 
     fn client(fake: &FakeRelay) -> NetClient {
@@ -458,5 +496,62 @@ mod tests {
         c.update(0.0);
         let ClientMsg::Hello { room, name, .. } = &fake.take_sent()[0] else { panic!() };
         assert_eq!((room.chars().count(), name.chars().count()), (MAX_ROOM, MAX_NAME));
+    }
+
+    /// 连上、进房间时中继回 `code`，返回之后的事件。
+    fn refused(fake: &FakeRelay, c: &mut NetClient, code: ErrorCode) -> Vec<ClientEvent> {
+        c.set_target(Some(target("r")));
+        c.update(0.0);
+        fake.push(LinkEvent::Open);
+        fake.relay(RelayMsg::Error(code));
+        // 中继报完错就关连接
+        fake.push(LinkEvent::Closed("对方关闭了连接".into()));
+        c.update(0.1)
+    }
+
+    #[test]
+    fn a_version_mismatch_or_bad_hello_stops_retrying() {
+        for code in [ErrorCode::Version, ErrorCode::BadHello] {
+            let fake = FakeRelay::default();
+            let mut c = client(&fake);
+            let events = refused(&fake, &mut c, code);
+            assert_eq!(c.status(), Status::Offline, "{code:?}: {events:?}");
+            assert!(events.contains(&ClientEvent::Status(Status::Offline)));
+            assert!(events.iter().any(|e| matches!(e, ClientEvent::Error(why) if why.contains("不再重连"))), "{events:?}");
+            c.update(100.0);
+            assert_eq!(fake.count(), 1, "{code:?} 不重连");
+            // 换了目标重新开始
+            c.set_target(Some(target("other")));
+            c.update(100.0);
+            assert_eq!(fake.count(), 2);
+        }
+    }
+
+    #[test]
+    fn a_full_room_waits_long_before_trying_again() {
+        let fake = FakeRelay::default();
+        let mut c = client(&fake);
+        let events = refused(&fake, &mut c, ErrorCode::RoomFull);
+        assert_eq!(c.status(), Status::Full, "{events:?}");
+        assert!(events.contains(&ClientEvent::Status(Status::Full)));
+        c.update(ROOM_FULL_RETRY - 1.0);
+        assert_eq!(fake.count(), 1, "不按短退避重连");
+        c.update(ROOM_FULL_RETRY + 0.2);
+        assert_eq!((fake.count(), c.status()), (2, Status::Connecting));
+    }
+
+    #[test]
+    fn bad_names_and_rooms_fail_locally_without_connecting() {
+        for (room, name) in [("", "a"), ("r", "  "), ("r", "a\u{7}"), ("a\u{1}b", "a")] {
+            let fake = FakeRelay::default();
+            let mut c = client(&fake);
+            c.set_target(Some(Target { url: "ws://x".into(), room: room.into(), name: name.into() }));
+            let events = c.update(0.0);
+            assert_eq!(fake.count(), 0, "{room:?} {name:?} 不去连");
+            assert_eq!(c.status(), Status::Offline);
+            assert!(events.iter().any(|e| matches!(e, ClientEvent::Error(_))), "{events:?}");
+            c.update(50.0);
+            assert_eq!(fake.count(), 0);
+        }
     }
 }

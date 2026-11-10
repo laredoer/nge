@@ -46,3 +46,25 @@ test("json() 只解 2xx 的合法 JSON", () => {
   expect(json({ ok: true, status: 200, body: "{" })).toBe(undefined);
   expect(json({ ok: false, status: 500, body: '{"a":1}' })).toBe(undefined);
 });
+
+test("自己写的 content-type 不管大小写都盖掉默认的，不重复", () => {
+  const g = fakeGame();
+  const http = httpClient(() => g.view);
+  http.post("http://x/", "{}", { headers: { "content-type": "application/json" } });
+  expect(g.sent[0][1].headers).toEqual({ "content-type": "application/json" });
+  http.post("http://x/", "{}", { headers: { "CONTENT-TYPE": "a/b", "X-A": "1" } });
+  expect(g.sent[1][1].headers).toEqual({ "CONTENT-TYPE": "a/b", "X-A": "1" });
+});
+
+test("引擎一直没回（command 丢了）时到点按超时出错，晚到的不再交", async () => {
+  const g = fakeGame();
+  const http = httpClient(() => g.view, { graceMs: 10 });
+  const started = Date.now();
+  const r = await http.get("http://x/", { timeout: 0.02 });
+  expect(r.ok).toBe(false);
+  expect(r.error).toBe("引擎没有回应");
+  expect(Date.now() - started).toBeLessThan(1000);
+  expect(http.pending()).toBe(0);
+  http.handle({ id: 1, ok: true, status: 200, body: "late", error: null });
+  expect(http.pending()).toBe(0);
+});

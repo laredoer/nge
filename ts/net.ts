@@ -17,7 +17,8 @@ export interface NetNode {
   delay?: number;
 }
 
-export type NetStatus = "offline" | "connecting" | "online";
+/** `full`：房间满了，引擎过一会儿（30 秒）再试。 */
+export type NetStatus = "offline" | "connecting" | "online" | "full";
 
 export interface NetPeer {
   id: number;

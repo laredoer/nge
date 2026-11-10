@@ -44,3 +44,7 @@ required-features = ["client"]
 [[test]]
 name = "link_threads"
 required-features = ["client"]
+
+[[test]]
+name = "http_native"
+required-features = ["client"]

@@ -8,7 +8,7 @@ use glam::Vec2;
 use nge_render2d::Transform2d;
 
 use crate::client::Status;
-use crate::interp::{Clock, InterpBuffer, Sample};
+use crate::interp::{Clock, InterpBuffer, MAX_JUMP, MAX_REWIND, Sample};
 use crate::plugin::Net;
 use crate::proto::{Item, MAX_COORD, MAX_ITEMS, Payload, PeerId, Snapshot};
 
@@ -36,6 +36,8 @@ pub struct KeepOnLeave;
 struct PeerState {
     clock: Clock,
     buffers: HashMap<String, InterpBuffer>,
+    /// 上一个收下的快照：对方的时间戳、本地收到的时间（毫秒）。
+    last: Option<(f64, f64)>,
 }
 
 /// 每个远端的时钟和插值缓冲，以及自己发快照的序号。
@@ -50,6 +52,18 @@ impl Remotes {
     /// 本地时间 `local`（毫秒）收到 `from` 的快照。
     pub(crate) fn receive(&mut self, from: PeerId, snapshot: &Snapshot, local: f64) {
         let peer = self.peers.entry(from).or_default();
+        let t = snapshot.t as f64;
+        if let Some((last_t, last_local)) = peer.last {
+            // 比本地过去的时间还往前跳了很多：伪造的，丢掉（不让它把时钟和缓冲带偏）
+            if t - last_t > (local - last_local).max(0.0) + MAX_JUMP {
+                return;
+            }
+            // 往回拨很多：对方重启了，时钟和缓冲从头来
+            if last_t - t > MAX_REWIND {
+                *peer = PeerState::default();
+            }
+        }
+        peer.last = Some((t, local));
         peer.clock.observe(local, snapshot.t as f64);
         for item in snapshot.items.iter().take(MAX_ITEMS) {
             if !peer.buffers.contains_key(&item.key) && peer.buffers.len() >= MAX_KEYS {
@@ -95,7 +109,17 @@ pub(crate) fn apply(net: Res<Net>, mut remotes: ResMut<Remotes>, mut entities: Q
     }
 }
 
-/// 到点了把 `NetSync` 的实体发出去（每秒 `Net::rate` 次）。
+/// 快照每秒最多几次：加上用户消息（每秒最多 30 条）和心跳（2 秒一次），不超过中继默认的每秒 60 帧。
+pub const MAX_RATE: f32 = 25.0;
+/// `Net::rate` 不是正的有限数时用这个。
+pub const DEFAULT_RATE: f32 = 20.0;
+
+/// 实际的快照频率：夹在 [1, `MAX_RATE`]，不合规的回落到 `DEFAULT_RATE`。
+pub fn snapshot_rate(rate: f32) -> f32 {
+    if rate.is_finite() && rate > 0.0 { rate.clamp(1.0, MAX_RATE) } else { DEFAULT_RATE }
+}
+
+/// 到点了把 `NetSync` 的实体发出去（每秒 `snapshot_rate(Net::rate)` 次）。
 pub(crate) fn broadcast(mut net: ResMut<Net>, mut remotes: ResMut<Remotes>, entities: Query<(&NetSync, &Transform2d)>) {
     if net.status() != Status::Online {
         remotes.next_send = None;
@@ -106,7 +130,7 @@ pub(crate) fn broadcast(mut net: ResMut<Net>, mut remotes: ResMut<Remotes>, enti
     if remotes.next_send.is_some_and(|at| now + 1e-6 < at) {
         return;
     }
-    let interval = 1.0 / net.rate.clamp(1.0, 60.0) as f64;
+    let interval = 1.0 / snapshot_rate(net.rate) as f64;
     // 掉帧时不补发，从现在起重新算
     remotes.next_send = Some(match remotes.next_send {
         Some(at) if now - at < interval => at + interval,
@@ -159,6 +183,63 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// `rate` 设成 `rate` 时一秒发几次。
+    fn sent_per_second(rate: f32) -> usize {
+        let (fake, clock) = (FakeRelay::default(), Manual::default());
+        let mut app = app(&fake, &clock);
+        app.world_mut().resource_mut::<Net>().rate = rate;
+        app.world_mut().spawn((NetSync { key: "player".into() }, Transform2d::default()));
+        online(&mut app, &fake);
+        for ms in (1..=1000).step_by(1) {
+            at(&mut app, &clock, ms);
+        }
+        snapshots(&fake).len()
+    }
+
+    #[test]
+    fn the_snapshot_rate_is_capped_and_bad_rates_fall_back() {
+        assert_eq!(sent_per_second(100.0), MAX_RATE as usize, "最多每秒 25 次");
+        assert_eq!(sent_per_second(f32::NAN), 20);
+        assert_eq!(sent_per_second(f32::INFINITY), 20);
+        assert_eq!(sent_per_second(-3.0), 20);
+        assert_eq!(sent_per_second(0.5), 1, "最少每秒 1 次");
+    }
+
+    fn snap(seq: u32, t: u32, x: f32) -> Snapshot {
+        Snapshot { seq, t, items: vec![Item { key: "player".into(), x, y: 0.0, rotation: 0.0 }] }
+    }
+
+    #[test]
+    fn a_forged_timestamp_cannot_freeze_a_remote() {
+        let mut r = Remotes::default();
+        // 正常的：本地 1000 毫秒起每 50 毫秒一个，x 跟着走
+        for i in 0..10u32 {
+            r.receive(2, &snap(i, 500 + i * 50, i as f32), 1000.0 + i as f64 * 50.0);
+        }
+        // 伪造一个时间戳拉满的：丢掉，正常的那些照常按延迟画
+        r.receive(2, &snap(100, u32::MAX, 999.0), 1460.0);
+        let x = r.state(2, "player", 1470.0, 100.0).unwrap().pos[0];
+        assert!((x - 7.4).abs() < 0.5, "不被伪造的那个带偏: {x}");
+        // 停了很久（10 秒）再发的照常收
+        let mut quiet = Remotes::default();
+        quiet.receive(3, &snap(0, 1000, 1.0), 1000.0);
+        quiet.receive(3, &snap(1, 11_000, 2.0), 11_000.0);
+        quiet.receive(3, &snap(2, 11_050, 2.0), 11_050.0);
+        assert_eq!(quiet.state(3, "player", 11_200.0, 100.0).unwrap().pos[0], 2.0);
+        // 之后又是正常的
+        for i in 10..20u32 {
+            r.receive(2, &snap(i, 500 + i * 50, i as f32), 1000.0 + i as f64 * 50.0);
+        }
+        let x = r.state(2, "player", 2000.0, 100.0).unwrap().pos[0];
+        // 本地 2000 − 延迟 100 → 对方的 1400 毫秒，正好是第 18 个
+        assert!((x - 18.0).abs() < 0.5, "照常按延迟插值，不被伪造的那个带偏: {x}");
+        // 时间往回拨（对方重启了）也重新来
+        r.receive(2, &snap(0, 10, 50.0), 2100.0);
+        r.receive(2, &snap(1, 60, 50.0), 2150.0);
+        let x = r.state(2, "player", 2300.0, 100.0).unwrap().pos[0];
+        assert_eq!(x, 50.0);
     }
 
     #[test]

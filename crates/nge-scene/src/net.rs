@@ -156,6 +156,33 @@ mod tests {
         }
 
         #[test]
+        fn changing_level_and_room_drops_the_old_rooms_remotes() {
+            use nge_net::Peer;
+            use nge_net::link::LinkEvent;
+            use nge_net::proto::RelayMsg;
+            let fake = FakeRelay::default();
+            let mut app = app_with(NetPlugin::new().connector(fake.connector()));
+            let scene = |level: u32, remotes: &[&str]| {
+                let mut sprites = vec![json!({ "id": "me" })];
+                sprites.extend(remotes.iter().map(|id| json!({ "id": id })));
+                json!({ "level": level, "net": { "room": format!("r{level}"), "sync": ["me"] }, "sprites": sprites })
+            };
+            frame(&mut app, Some(scene(1, &["net:7:me"])));
+            fake.push(LinkEvent::Open);
+            fake.relay(RelayMsg::Welcome { you: 1, peers: vec![Peer { id: 7, name: "bob".into() }], max: 8 });
+            let events = frame(&mut app, Some(scene(1, &["net:7:me"])));
+            assert!(app.world().resource::<Net>().peers().iter().any(|p| p.id == 7), "{events:?}");
+            // 换关：房间跟着换，旧房间的人都算离开，TSX 那边按成员列表不再声明他的精灵
+            let events = frame(&mut app, Some(scene(2, &[])));
+            assert!(events.iter().any(|(name, e)| name == "net" && e["kind"] == "leave" && e["peer"]["id"] == 7), "{events:?}");
+            assert!(app.world().resource::<Net>().peers().is_empty());
+            let world = app.world_mut();
+            let left: Vec<String> = world.query::<&SceneId>().iter(world).map(|s| s.0.clone()).collect();
+            assert_eq!(left, vec!["me".to_owned()], "上一关的远端精灵去掉了");
+            assert!(world.query::<&Remote>().iter(world).next().is_none());
+        }
+
+        #[test]
         fn rebuilt_levels_get_tagged_again() {
             let fake = FakeRelay::default();
             let mut app = app_with(NetPlugin::new().connector(fake.connector()));
