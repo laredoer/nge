@@ -1,7 +1,7 @@
 // 平台跳跃的联网演示（见 docs/networking.md）：房间、远端角色、头顶名字、排行榜的地址和解析。
 import { expect, test } from "nsh/test";
 import { remoteId } from "../../ts/net";
-import { boardOf, leaderOf, nameTags, netLabel, netNode, NET_KEY, playerName, remotePlayers, scoresUrl } from "./online";
+import { boardOf, leaderOf, nameTags, netLabel, netNode, netSetting, NET_KEY, playerName, remotePlayers, scoresUrl } from "./online";
 
 const bob = { id: 2, name: "bob" };
 const carol = { id: 3, name: "carol" };
@@ -59,4 +59,33 @@ test("榜首：拿不到、格式不对、空榜都是 null，不信对面的数
   expect(leaderOf(ok('{"top":[{"name":"x","score":"NaN"}]}'))).toBe(null);
   expect(leaderOf(ok(`{"top":[{"name":"${"x".repeat(100)}","score":1}]}`))).toEqual({ name: "x".repeat(32), seconds: 1 });
   expect(leaderOf({ ok: false, status: 0, body: "", error: "连不上" })).toBe(null);
+});
+
+test("联网开关：读完存档前是 null（场景里不写 net），存的不是布尔值按默认开，切换时写回去", async () => {
+  let release = (_: string | null) => {};
+  const pending = new Promise<string | null>((r) => (release = r));
+  const written: [string, string][] = [];
+  const s = netSetting({ getItem: () => pending, setItem: async (k: string, v: string) => void written.push([k, v]) });
+  expect(s.on()).toBe(null);
+  expect(netNode(s.on(), 0, "甲")).toBe(undefined);
+  release('"yes"');
+  await pending;
+  await new Promise((r) => setTimeout(r, 0));
+  expect(s.on()).toBe(true);
+  s.toggle();
+  expect(s.on()).toBe(false);
+  expect(written).toEqual([["nge:net", "false"]]);
+
+  const off = netSetting({ getItem: async () => "false", setItem: async () => {} });
+  await new Promise((r) => setTimeout(r, 0));
+  expect(off.on()).toBe(false);
+  const broken = netSetting({ getItem: async () => "{坏的", setItem: async () => {} });
+  await new Promise((r) => setTimeout(r, 0));
+  expect(broken.on()).toBe(true);
+});
+
+test("HUD：房间满了单独显示，没读完开关时算关着", () => {
+  const t = (key: string, args?: Record<string, unknown>) => `${key}${args ? JSON.stringify(args) : ""}`;
+  expect(netLabel(t, true, "full", 0)).toBe("netFull");
+  expect(netLabel(t, null, "offline", 0)).toBe("netOff");
 });

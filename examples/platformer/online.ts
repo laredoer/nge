@@ -1,4 +1,5 @@
 // 平台跳跃的联网演示（见 docs/networking.md）：每关一个房间，别人的角色半透明、头顶写名字；排行榜走中继同一台服务器的 HTTP。
+import { signal, Storage } from "nsh";
 import type { BubbleNode, HttpResult, NetNode, NetPeer, NetStatus, SpriteNode } from "../../ts/nge";
 import { json, relayHttp, remoteId } from "../../ts/nge";
 import { TILE } from "./levels";
@@ -15,9 +16,48 @@ export function boardOf(level: number): string {
   return `platformer-${level + 1}`;
 }
 
-/** 场景的 `net`：关着时没有。地址不写，原生用环境变量 `NGE_RELAY`，默认 ws://127.0.0.1:9100。 */
-export function netNode(on: boolean, level: number, name: string): NetNode | undefined {
-  return on ? { room: boardOf(level), name, sync: [SYNCED] } : undefined;
+/** 场景的 `net`：关着、还没读完开关时没有。地址不写，原生用环境变量 `NGE_RELAY`，默认 ws://127.0.0.1:9100。 */
+export function netNode(on: boolean | null, level: number, name: string): NetNode | undefined {
+  return on === true ? { room: boardOf(level), name, sync: [SYNCED] } : undefined;
+}
+
+/** 存开关的地方（nsh 的 `Storage` 就是）。 */
+export interface NetStore {
+  getItem(key: string): Promise<string | null>;
+  setItem(key: string, value: string): Promise<void>;
+}
+
+const NET_STORAGE_KEY = "nge:net";
+
+/** 联网开关，记在设备上（默认开）。读完存档之前是 `null`：免得存的是关、却先连上了中继。存的不是布尔值时按默认。 */
+export function netSetting(store: NetStore = Storage) {
+  const on = signal<boolean | null>(null);
+  let changed = false;
+  const parse = (raw: string | null) => {
+    try {
+      const v: unknown = raw === null ? null : JSON.parse(raw);
+      return typeof v === "boolean" ? v : true;
+    } catch {
+      return true;
+    }
+  };
+  store.getItem(NET_STORAGE_KEY).then(
+    (raw) => {
+      if (!changed) on.set(parse(raw));
+    },
+    () => {
+      if (!changed) on.set(true);
+    },
+  );
+  return {
+    on: () => on(),
+    toggle() {
+      changed = true;
+      const next = on() === false;
+      on.set(next);
+      store.setItem(NET_STORAGE_KEY, JSON.stringify(next)).catch((e) => console.warn(`写存档 ${NET_STORAGE_KEY} 失败: ${e}`));
+    },
+  };
 }
 
 /** 随机的名字：两个窗口一眼分得出来。 */
@@ -35,9 +75,10 @@ export function nameTags(peers: NetPeer[]): BubbleNode[] {
   return peers.map((p) => ({ id: `name-${p.id}`, text: p.name, follow: remoteId(p.id, SYNCED), y: 22, size: 11, back: "#00000080" }));
 }
 
-/** HUD 上的联网状态：关着、连接中（连不上时一直在重试）、在线 N 人（算上自己）。 */
-export function netLabel(t: (key: "netOff" | "netConnecting" | "netOnline", args?: { count: number }) => string, on: boolean, status: NetStatus, peers: number): string {
-  if (!on) return t("netOff");
+/** HUD 上的联网状态：关着、连接中（连不上时一直在重试）、房间满了、在线 N 人（算上自己）。 */
+export function netLabel(t: (key: "netOff" | "netConnecting" | "netOnline" | "netFull", args?: { count: number }) => string, on: boolean | null, status: NetStatus, peers: number): string {
+  if (on !== true) return t("netOff");
+  if (status === "full") return t("netFull");
   return status === "online" ? t("netOnline", { count: peers + 1 }) : t("netConnecting");
 }
 

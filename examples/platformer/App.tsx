@@ -4,7 +4,7 @@ import { COIN_SHADER, FLASH, FLASH_MS, levelAudio, night, portalOver, POST, SHAD
 import { levelKey, otherLocale, strings } from "./strings";
 import { NEW_SAVE, nextSlot, SAVE_MIGRATIONS, SAVE_VERSION, saveDataOf, saveSummary, SLOTS } from "./savefile";
 import { hpBar, outOfHearts, TITLE_HOLD_MS, titleBubble } from "./hud";
-import { boardOf, leaderOf, nameTags, NET_KEY, netLabel, netNode, playerName, remotePlayers, scoresUrl, submitUrl, type Leader } from "./online";
+import { boardOf, leaderOf, nameTags, NET_KEY, netLabel, netNode, netSetting, playerName, remotePlayers, scoresUrl, submitUrl, type Leader } from "./online";
 import { campfireAt, finish, flagOn, JELLY_ZONE, jellyAt, LEVELS, ROWS, TILE, TOWER_TRIGGER, towerAt, towerSpot, type Progress } from "./levels";
 
 /** Rust 发的事件：掉出关卡或被敌人撞到送回起点、按 R 重新开始、踩到敌人。 */
@@ -101,7 +101,7 @@ function App() {
   let switching = true;
   const now = () => LEVELS[level()].built;
   /** 联网（见 docs/networking.md）：按 N 开关，记在设备上；中继连不上时一直重试，照样单机玩。 */
-  const online = saved("net", true);
+  const online = netSetting();
   const room = netRoom();
   const http = httpClient(() => game);
   const name = playerName();
@@ -217,7 +217,7 @@ function App() {
     emitters3d: now().tower === null ? [] : [campfireAt(now().tower!)],
     bars: [hpBar(falls())],
     bubbles: [...(title() === null ? [] : [titleBubble(t(levelKey(title()!)))]), ...nameTags(room.peers())],
-    net: netNode(online(), level(), name),
+    net: netNode(online.on(), level(), name),
     joints: now().swing.joints,
     tilemaps: now().tilemaps,
     sprites: [
@@ -270,7 +270,7 @@ function App() {
         {won() === null ? "" : t("won", { seconds: won()! })}
         {leader() === null ? "" : t("leader", { ...leader()! })}
         {" · "}
-        {netLabel(t, online(), room.status(), room.peers().length)}
+        {netLabel(t, online.on(), room.status(), room.peers().length)}
       </Text>
       <GameView
         class="flex-1"
@@ -313,7 +313,7 @@ function App() {
         onKey={(e) => {
           if (e.down && !e.repeat && e.code === "KeyS") return pick(nextSlot(target));
           if (e.down && !e.repeat && e.code === "KeyL") return chosenLang.set(otherLocale(lang.locale()));
-          if (e.down && !e.repeat && e.code === NET_KEY) return online.set(!online());
+          if (e.down && !e.repeat && e.code === NET_KEY) return online.toggle();
           // Digit1 … Digit9：选已经解锁的关
           const n = /^Digit([1-9])$/.exec(e.code)?.[1];
           if (!e.down || e.repeat || n === undefined) return;
