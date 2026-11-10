@@ -98,10 +98,11 @@
 | **3D 渲染补齐** | 材质 `blend` 的半透明网格按到相机的距离由远到近画；`SpotLight` 聚光灯；聚光灯、点光源（六面）能投影子，方向光可以分 2–4 段级联；`Animator::play(clip, fade)` 淡入淡出；glTF 的变形（morph target）和 `weights` 动画；见 [render3d-more.md](render3d-more.md) | 平台跳跃第一关有照着箱子堆、投影子的聚光灯，一只半透明的果冻靠近时从 idle 淡到 squish |
 | **Web** | `wasm32` 上浏览器主线程用 `requestAnimationFrame` 驱动引擎，只用 WebGPU；仓库里改过的 `nsh-platform-web` 支持原生组件；资源启动前取进内存，键盘、声音（第一次按键后出声）；见 [web.md](web.md) | `nsh package --target web` 打出的长坂坡在浏览器里能玩 |
 | **联网** | `nge-net`：WebSocket 连接（原生 tokio-tungstenite 在单独线程、浏览器 `WebSocket`），断线指数退避重连；postcard 协议；`NetSync` 每秒 20 次广播位置，`Remote` 缓冲 100 ms 插值、容忍乱序丢包；`Http` 的 GET / POST（原生 ureq、浏览器 fetch）；`nge-relay` 中继（房间、进出通知、心跳、人数 / 大小 / 频率上限，顺带排行榜）；场景的 `net`、TSX 的 `netRoom()` / `httpClient()`；见 [networking.md](networking.md) | 平台跳跃两个窗口同一关互相看见（半透明、头顶名字），N 开关，中继连不上照常单机，通关成绩进排行榜 |
+| **编辑器** | `examples/editor`：用 nge 做的关卡编辑器，画布就是平台跳跃的游戏视图（编辑时 `timeScale: 0`、不放角色和刚体）；带版本号的关卡文件格式 `ts/level.ts`（读入校验、保存格式化）；命令模式的撤销重做、点选 / 框选 / 拖动 / 吸附、瓦片刷、复制粘贴、属性校验都是纯函数；⌘R 用当前关卡试玩，Esc 回来；见 [editor.md](editor.md) | 平台跳跃第二关「石阶」从关卡文件读，编辑器里能打开、改、保存、直接试玩 |
 | **M6 Android** | SurfaceView 和 Vulkan，JNI 胶水层 | 示例游戏在 Android 真机上能跑 |
 
 ## 待定
 
 - 正式名称和 crate 前缀
 - 是否给 nsh 上游提 PR：iOS `run_app` 支持注册组件，以及能否从原生层直接拿到输入以降低延迟
-- 编辑器和工具链（场景编辑、资源打包）放在 M3 之后再评估
+- 工具链的其余部分（资源打包、编辑器里编辑 Tiled 地图和多个瓦片层）：关卡编辑器已经有了（见 [editor.md](editor.md)），这些等有需要再做
