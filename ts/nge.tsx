@@ -1,5 +1,6 @@
 // nge 的 TSX 绑定：<GameView> 组件和场景类型（和 crates/nge-scene 的协议一一对应）。
 import { nativeComponent, signal, Storage, Text, untracked, View, type GestureResponderEvent, type NativeComponentProps, type NativeComponentRef, type Signal } from "nsh";
+import type { HttpReply } from "./http";
 import type { NetEvent, NetNode } from "./net";
 
 /** 一个精灵。坐标是世界坐标（point，y 朝上，原点在视口中心），角度用度（逆时针）。 */
@@ -776,6 +777,8 @@ interface BuiltinEvents {
   ready: {};
   /** 联网的状态、成员进出、消息（`scene.net`，见 `netRoom()`）。 */
   net: NetEvent;
+  /** HTTP 请求的结果（见 `httpClient()`）。 */
+  http: HttpReply;
 }
 
 type TouchPhase = "start" | "move" | "end" | "cancel";
@@ -784,14 +787,14 @@ export type GameViewProps<P, E> = NativeComponentProps<Partial<BuiltinProps> & P
 
 /**
  * 生成游戏视图组件。`props` / `events` 是游戏自己的通道名（Rust 侧 `add_prop` / `add_state` / `add_event`），
- * 类型由泛型给出；内置 prop `scene`、事件 `tap` / `collide` / `animEnd` / `tweenEnd` / `key` / `levelStart` / `chase` / `typed` / `fps` / `error` / `ready` / `net`，触摸自动转成引擎的 `touch` command。
+ * 类型由泛型给出；内置 prop `scene`、事件 `tap` / `collide` / `animEnd` / `tweenEnd` / `key` / `levelStart` / `chase` / `typed` / `fps` / `error` / `ready` / `net` / `http`，触摸自动转成引擎的 `touch` command。
  */
 export function gameView<P extends object = {}, E extends object = {}>(
   spec: { props?: readonly (keyof P & string)[]; events?: readonly (keyof E & string)[] } = {},
 ) {
   const Native = nativeComponent<BuiltinProps & P, BuiltinEvents & E>("nge.game", {
     props: [...new Set(["scene", "captureKeys", ...(spec.props ?? [])])] as (keyof (BuiltinProps & P) & string)[],
-    events: [...new Set(["tap", "collide", "animEnd", "tweenEnd", "key", "levelStart", "chase", "typed", "fps", "error", "ready", "net", ...(spec.events ?? [])])] as (keyof (BuiltinEvents & E) & string)[],
+    events: [...new Set(["tap", "collide", "animEnd", "tweenEnd", "key", "levelStart", "chase", "typed", "fps", "error", "ready", "net", "http", ...(spec.events ?? [])])] as (keyof (BuiltinEvents & E) & string)[],
   });
 
   return (props: GameViewProps<P, E>) => {
@@ -827,6 +830,7 @@ export function gameView<P extends object = {}, E extends object = {}>(
 export { i18n, missing, plural, resolveLocale, type I18n, type I18nOptions, type Message, type Messages, type Params, type PluralCategory } from "./i18n";
 // 联网见 docs/networking.md
 export { netRoom, netSend, remoteId, type NetEvent, type NetNode, type NetPeer, type NetRoom, type NetStatus } from "./net";
+export { httpClient, json, type HttpClient, type HttpOptions, type HttpReply, type HttpResult } from "./http";
 // 存档槽见 docs/saves.md
 export { saveSlots, type LoadResult, type SaveSlots, type SaveSlotsOptions, type SaveStore, type SlotInfo } from "./saves";
 

@@ -51,5 +51,6 @@ mod tests {
         assert_eq!(app.is_plugin_added::<nge_physics3d::Physics3dPlugin>(), cfg!(feature = "physics3d"));
         assert_eq!(app.is_plugin_added::<nge_ai::AiPlugin>(), cfg!(feature = "ai"));
         assert_eq!(app.is_plugin_added::<nge_net::NetPlugin>(), cfg!(feature = "net"));
+        assert_eq!(app.is_plugin_added::<nge_net::HttpPlugin>(), cfg!(feature = "net"));
     }
 }

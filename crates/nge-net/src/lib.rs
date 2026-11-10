@@ -2,6 +2,7 @@
 
 pub mod backoff;
 pub mod client;
+pub mod http;
 pub mod interp;
 pub mod limit;
 pub mod link;
@@ -14,6 +15,9 @@ mod sync;
 pub mod testing;
 
 pub use client::{ClientEvent, NetClient, SendError, Status, Target};
+pub use http::{HttpClient, HttpDone, HttpRequest, Method};
+#[cfg(feature = "ecs")]
+pub use http::{HTTP, HTTP_REQUEST, Http, HttpCommand, HttpPlugin, HttpReply};
 pub use link::{Connector, Frame, Link, LinkEvent};
 #[cfg(feature = "ecs")]
 pub use plugin::{DEFAULT_URL, NET, NET_SEND, Net, NetEvent, NetPlugin, NetSend, NetSet, NetWire};

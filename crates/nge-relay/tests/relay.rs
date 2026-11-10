@@ -105,3 +105,39 @@ fn the_leaderboard_answers_over_http_on_the_same_port() {
     let r = http(&addr, &format!("POST /scores HTTP/1.1\r\nContent-Length: {}\r\n\r\n", 1 << 20));
     assert!(r.starts_with("HTTP/1.1 413"), "{r}");
 }
+
+/// 一直 poll 到拿到 `n` 个结果（最多 5 秒）。
+fn wait_http(client: &mut nge_net::HttpClient, n: usize) -> Vec<nge_net::HttpDone> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut done = Vec::new();
+    while done.len() < n && Instant::now() < deadline {
+        done.extend(client.poll());
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    done
+}
+
+#[test]
+fn the_engine_http_client_talks_to_the_leaderboard() {
+    use nge_net::{HttpClient, HttpRequest};
+    let addr = relay();
+    let mut client = HttpClient::new(nge_net::http::backend());
+    let body = r#"{"board":"b","name":"乙","score":3}"#;
+    let post = client.send(HttpRequest::post(format!("http://{addr}/scores"), body).header("Content-Type", "text/plain"));
+    let done = wait_http(&mut client, 1);
+    assert_eq!(done.len(), 1);
+    assert!(done[0].ok() && done[0].id == post, "{done:?}");
+    let get = client.send(HttpRequest::get(format!("http://{addr}/scores?board=b")));
+    let missing = client.send(HttpRequest::get(format!("http://{addr}/nope")));
+    let mut done = wait_http(&mut client, 2);
+    done.sort_by_key(|d| d.id);
+    assert_eq!((done[0].id, done[0].status), (get, 200));
+    assert!(done[0].body.contains(r#""name":"乙""#), "{}", done[0].body);
+    assert_eq!((done[1].id, done[1].status, done[1].ok()), (missing, 404, false), "4xx 不算出错，状态码照实给");
+    // 连不上：有 error
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let down = client.send(HttpRequest::get(format!("http://127.0.0.1:{port}/")).timeout(2.0));
+    let done = wait_http(&mut client, 1);
+    assert_eq!(done[0].id, down);
+    assert!(done[0].error.is_some());
+}

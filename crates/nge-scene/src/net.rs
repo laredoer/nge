@@ -1,4 +1,4 @@
-//! 场景的 `net`：写了就连中继，去掉就断；`sync` 里的精灵广播自己的位置，id 是 `net:<成员>:<key>` 的精灵按远端插值（见 docs/networking.md）。
+//! 场景的 `net`（feature `net` 同时加上 HTTP 的 `http` 通道）：写了就连中继，去掉就断；`sync` 里的精灵广播自己的位置，id 是 `net:<成员>:<key>` 的精灵按远端插值（见 docs/networking.md）。
 
 use serde::Deserialize;
 
@@ -35,7 +35,7 @@ pub(crate) use enabled::register;
 mod enabled {
     use bevy_ecs::prelude::*;
     use nge_ecs::{App, PostUpdate, PreUpdate};
-    use nge_net::{DEFAULT_URL, KeepOnLeave, Net, NetPlugin, NetSet, NetSync, Remote, Target};
+    use nge_net::{DEFAULT_URL, HttpPlugin, KeepOnLeave, Net, NetPlugin, NetSet, NetSync, Remote, Target};
     use nge_physics2d::PhysicsStepped;
 
     use super::{NetNode, parse_remote};
@@ -45,6 +45,9 @@ mod enabled {
     pub(crate) fn register(app: &mut App) {
         if !app.is_plugin_added::<NetPlugin>() {
             app.add_plugins(NetPlugin::new());
+        }
+        if !app.is_plugin_added::<HttpPlugin>() {
+            app.add_plugins(HttpPlugin::new());
         }
         // 先设好目标再收：同一帧里就开始连
         app.add_systems(PreUpdate, (connect, tag).chain().run_if(resource_changed::<Scene>).after(crate::sync::sync_sprites).before(NetSet::Receive))

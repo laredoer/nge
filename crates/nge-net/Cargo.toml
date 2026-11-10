@@ -9,7 +9,7 @@ license.workspace = true
 [features]
 default = ["client", "ecs"]
 # 连接和 HTTP 的平台实现；中继只要协议，关掉
-client = ["dep:tokio", "dep:tokio-tungstenite", "dep:futures-util", "dep:wasm-bindgen", "dep:js-sys", "dep:web-sys"]
+client = ["dep:tokio", "dep:tokio-tungstenite", "dep:futures-util", "dep:ureq", "dep:wasm-bindgen", "dep:wasm-bindgen-futures", "dep:js-sys", "dep:web-sys"]
 # ECS 插件：NetSync / Remote 组件、TSX 的 net 通道
 ecs = ["client", "dep:bevy_ecs", "dep:nge-ecs", "dep:nge-core", "dep:nge-render2d", "dep:glam", "dep:serde_json"]
 
@@ -29,11 +29,13 @@ serde_json = { workspace = true, optional = true }
 tokio = { version = "1", default-features = false, features = ["rt", "net", "sync", "time", "macros"], optional = true }
 tokio-tungstenite = { version = "0.28", default-features = false, features = ["connect", "rustls-tls-webpki-roots"], optional = true }
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"], optional = true }
+ureq = { version = "3", optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = { workspace = true, optional = true }
+wasm-bindgen-futures = { workspace = true, optional = true }
 js-sys = { workspace = true, optional = true }
-web-sys = { workspace = true, optional = true, features = ["WebSocket", "BinaryType", "MessageEvent", "CloseEvent", "Event"] }
+web-sys = { workspace = true, optional = true, features = ["WebSocket", "BinaryType", "MessageEvent", "CloseEvent", "Event", "Window", "Request", "RequestInit", "Response", "Headers", "AbortController", "AbortSignal"] }
 
 [[test]]
 name = "link"
