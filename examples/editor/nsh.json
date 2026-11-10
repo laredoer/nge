@@ -5,6 +5,6 @@
   "build": 1,
   "rust": ".",
   "capabilities": {
-    "fs": { "read": ["levels"], "write": ["levels"] }
+    "fs": { "read": ["${pluginDir}/levels"], "write": ["${pluginDir}/levels"] }
   }
 }
