@@ -1,9 +1,9 @@
-import { batch, effect, keymap, type NativeComponentRef, platform, signal, Text, View } from "nsh";
+import { batch, effect, keymap, type NativeComponentRef, platform, safeArea, signal, Text, View } from "nsh";
 import { floatText, gameView, httpClient, KeyButton, netRoom, push, saved, saveSlots, sound, tween, type Scene, type SpriteNode } from "../../ts/nge";
 import { COIN_SHADER, FLASH, FLASH_MS, levelAudio, night, portalOver, POST, SHADERS, stonesNear } from "./effects";
 import { levelKey, otherLocale, strings } from "./strings";
 import { NEW_SAVE, nextSlot, SAVE_MIGRATIONS, SAVE_VERSION, saveDataOf, saveSummary, SLOTS } from "./savefile";
-import { hpBar, outOfHearts, TITLE_HOLD_MS, titleBubble } from "./hud";
+import { hpBar, outOfHearts, padPlace, TITLE_HOLD_MS, titleBubble } from "./hud";
 import { boardOf, leaderOf, nameTags, NET_KEY, netLabel, netNode, netSetting, playerName, remotePlayers, scoresUrl, submitUrl, type Leader } from "./online";
 import { campfireAt, finish, flagOn, JELLY_ZONE, jellyAt, LEVELS, TILE, TOWER_TRIGGER, towerAt, towerSpot, type Built, type Progress } from "./levels";
 
@@ -271,7 +271,8 @@ export function Game(props: GameProps = {}) {
   const best = () => progress().best[String(level() + 1)];
 
   return (
-    <View class="flex-1 bg-black">
+    // 让开系统栏和刘海（手机上状态栏盖在最上面；横过来时刘海在左右）
+    <View class="flex-1 bg-black" style={{ paddingTop: safeArea().top, paddingLeft: safeArea().left, paddingRight: safeArea().right }}>
       <Text class="text-white p-4">
         {trial !== undefined ? "试玩，按 Esc 回到编辑 · " : platform.desktop ? t("help", { count: progress().unlocked }) : ""}
         {trial !== undefined ? "" : t("slot", { n: slot() + 1 })}
@@ -286,7 +287,7 @@ export function Game(props: GameProps = {}) {
         {won() === null ? "" : t("won", { seconds: won()! })}
         {leader() === null ? "" : t("leader", { ...leader()! })}
         {trial !== undefined ? "" : " · "}
-        {trial !== undefined ? "" : netLabel(t, online.on(), room.status(), room.peers().length)}
+        {trial !== undefined ? "" : netLabel(t, online.on(), room.status(), room.peers().length, room.error())}
       </Text>
       <GameView
         class="flex-1"
@@ -387,7 +388,7 @@ export function Game(props: GameProps = {}) {
 /** 手机上的触屏按钮，叠在游戏视图下方：左边跑，右边跳和重来（见 docs/touch-controls.md）。 */
 function TouchPad(props: { game: () => NativeComponentRef | undefined }) {
   return (
-    <View class="absolute bottom-8 left-6 right-6 flex-row justify-between items-end">
+    <View class="absolute flex-row justify-between items-end" style={padPlace(safeArea())}>
       <View class="flex-row gap-4">
         <KeyButton game={props.game} code="ArrowLeft" label="←" />
         <KeyButton game={props.game} code="ArrowRight" label="→" />

@@ -76,10 +76,18 @@ export function nameTags(peers: NetPeer[]): BubbleNode[] {
 }
 
 /** HUD 上的联网状态：关着、连接中（连不上时一直在重试）、房间满了、在线 N 人（算上自己）。 */
-export function netLabel(t: (key: "netOff" | "netConnecting" | "netOnline" | "netFull", args?: { count: number }) => string, on: boolean | null, status: NetStatus, peers: number): string {
+export function netLabel(
+  t: (key: "netOff" | "netConnecting" | "netFailed" | "netOnline" | "netFull", args?: { count: number }) => string,
+  on: boolean | null,
+  status: NetStatus,
+  peers: number,
+  error: string | null = null,
+): string {
   if (on !== true) return t("netOff");
   if (status === "full") return t("netFull");
-  return status === "online" ? t("netOnline", { count: peers + 1 }) : t("netConnecting");
+  if (status === "online") return t("netOnline", { count: peers + 1 });
+  // 出过错、还没连上（退避着重连）：连不上，不是还在连
+  return error === null ? t("netConnecting") : t("netFailed");
 }
 
 /** 这关排行榜的地址；不知道中继在哪时是 null。 */

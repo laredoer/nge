@@ -79,6 +79,14 @@ pub fn set_source(source: Arc<dyn AssetSource>) {
     *GLOBAL.write().unwrap_or_else(|e| e.into_inner()) = Some(source);
 }
 
+/// 平台层的视图没了：现在的来源还是 `source` 时放掉它（不让全局拿着平台层的对象）。
+pub fn unset_source(source: &Arc<dyn AssetSource>) {
+    let mut global = GLOBAL.write().unwrap_or_else(|e| e.into_inner());
+    if global.as_ref().is_some_and(|s| Arc::ptr_eq(s, source)) {
+        *global = None;
+    }
+}
+
 /// 平台层设置的来源；没设置时是 App 包里的资源目录（找不到目录时为 None）。
 pub fn platform_source() -> Option<Arc<dyn AssetSource>> {
     if let Some(source) = GLOBAL.read().unwrap_or_else(|e| e.into_inner()).clone() {
@@ -105,6 +113,17 @@ pub fn bundle_dir(app_dir: Option<PathBuf>, exe: Option<&Path>) -> Option<PathBu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_source_that_is_set_is_unset() {
+        let a: Arc<dyn AssetSource> = Arc::new(MemorySource::default());
+        let b: Arc<dyn AssetSource> = Arc::new(MemorySource::default());
+        set_source(a.clone());
+        unset_source(&b);
+        assert!(GLOBAL.read().unwrap().as_ref().is_some_and(|s| Arc::ptr_eq(s, &a)), "换成别人的了：不动");
+        unset_source(&a);
+        assert!(GLOBAL.read().unwrap().is_none(), "放掉，不再拿着平台层的对象");
+    }
 
     #[test]
     fn asset_paths() {

@@ -135,6 +135,8 @@ pub struct Audio {
     failed: HashSet<Handle<Sound>>,
     volume: f32,
     muted: bool,
+    /// 画面没了、App 进了后台：分组轨道停下，总输出静音（[`Audio::set_suspended`]）。
+    suspended: bool,
     /// 三个分组的轨道（没有音频设备时没有）。
     tracks: Option<Vec<BusTrack>>,
     buses: [BusState; 3],
@@ -156,6 +158,7 @@ impl Audio {
             failed: HashSet::new(),
             volume: 1.0,
             muted: false,
+            suspended: false,
             tracks: None,
             buses: [BusState::default(); 3],
             listener: Vec2::ZERO,
@@ -363,9 +366,40 @@ impl Audio {
         self.apply_master();
     }
 
+    pub fn suspended(&self) -> bool {
+        self.suspended
+    }
+
+    /// 画面没了、App 进了后台时停下（分组轨道暂停，直接进总输出的静音），回来时接着放。
+    pub fn set_suspended(&mut self, suspended: bool) {
+        if self.suspended == suspended {
+            return;
+        }
+        self.suspended = suspended;
+        for bus in self.tracks.iter_mut().flatten() {
+            if suspended {
+                bus.track.pause(tween(0.05));
+            } else {
+                bus.track.resume(tween(0.05));
+            }
+        }
+        self.apply_master();
+    }
+
+    /// 主轨道实际的音量：静音或者暂停着（[`Audio::set_suspended`]）时是 0。
+    pub fn master_level(&self) -> f32 {
+        if self.muted || self.suspended { 0.0 } else { self.volume }
+    }
+
     fn apply_master(&mut self) {
-        let volume = if self.muted { 0.0 } else { self.volume };
+        let volume = self.master_level();
         with_main_track(&self.manager, |track| track.set_volume(decibels(volume), tween(0.05)));
+    }
+
+    /// 测试用：声音放到了哪儿（秒）。
+    #[cfg(test)]
+    pub(crate) fn position(&self, voice: Voice) -> Option<f64> {
+        self.playing.get(&voice).map(|p| p.handle.position())
     }
 
     /// 这个分组的轨道上有几个声音（含正在淡出的；没有音频设备时是 0）。

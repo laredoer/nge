@@ -89,3 +89,13 @@ test("HUD：房间满了单独显示，没读完开关时算关着", () => {
   expect(netLabel(t, true, "full", 0)).toBe("netFull");
   expect(netLabel(t, null, "offline", 0)).toBe("netOff");
 });
+
+test("HUD：连不上中继（出过错、还没连上）时说连不上，不一直显示连接中", () => {
+  const t = (key: string, args?: Record<string, unknown>) => `${key}${args ? JSON.stringify(args) : ""}`;
+  expect(netLabel(t, true, "connecting", 0, "连接失败")).toBe("netFailed");
+  expect(netLabel(t, true, "offline", 0, "连接失败")).toBe("netFailed");
+  expect(netLabel(t, true, "connecting", 0, null)).toBe("netConnecting");
+  expect(netLabel(t, true, "online", 0, "旧的错")).toBe('netOnline{"count":1}');
+  expect(netLabel(t, true, "full", 0, "中继报错: RoomFull")).toBe("netFull");
+  expect(netLabel(t, false, "offline", 0, "连接失败")).toBe("netOff");
+});

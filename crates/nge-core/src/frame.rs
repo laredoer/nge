@@ -15,16 +15,17 @@ use crate::stats::{FrameClock, FrameStats};
 
 /// 单帧 dt 上限，避免卡顿后物理一步跨太远。
 const MAX_DT: f32 = 0.05;
-/// 开始跑以后过这么久存一次管线缓存（预热编完的管线不用等到切后台）。
+/// 开始跑以后过这么久存一次管线缓存（预热编完的管线不用等到切后台），之后每隔 [`CACHE_SAVE_EVERY`] 一次（没变不写）。
 const CACHE_SAVE_AFTER: std::time::Duration = std::time::Duration::from_secs(10);
+const CACHE_SAVE_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
 
-/// 平台层发给引擎的消息。
-pub enum Msg {
+/// 平台层发给引擎的消息。`S` 是画面（测试里用别的类型代替）。
+pub enum Msg<S = wgpu::Surface<'static>> {
     Viewport(Viewport),
     Command(String, JsonValue),
     Prop(String, Option<JsonValue>),
     /// 换一个画面（Android 切后台再回来时系统给的是新的 surface）。
-    Surface(wgpu::Surface<'static>),
+    Surface(S),
     /// 停止取画面和提交 GPU 命令；进入暂停后回复确认。
     Pause(SyncSender<()>),
     Resume,
@@ -33,18 +34,25 @@ pub enum Msg {
 
 /// GPU 就绪、有了有效视口、且没有暂停之前收到的消息：视口和暂停只记最新的；
 /// 同名的 prop 只留最新一份（放在最后一次出现的位置，web 上加载期间每帧都会发 scene），command 按顺序全留着。
-#[derive(Default)]
-pub(crate) struct Gate {
+pub(crate) struct Gate<S = wgpu::Surface<'static>> {
     viewport: Option<Viewport>,
     paused: bool,
-    pending: Vec<Msg>,
+    pending: Vec<Msg<S>>,
     /// 等的时候换过的画面：只留最新的。
-    pub surface: Option<wgpu::Surface<'static>>,
+    surface: Option<S>,
+    /// 手上的画面不能用（配置失败）：等到新的画面才能开始。
+    stale: bool,
 }
 
-impl Gate {
+impl<S> Default for Gate<S> {
+    fn default() -> Self {
+        Self { viewport: None, paused: false, pending: Vec::new(), surface: None, stale: false }
+    }
+}
+
+impl<S> Gate<S> {
     /// 收一条消息；返回 false 表示收到了 `Quit`。
-    pub fn push(&mut self, msg: Msg) -> bool {
+    pub fn push(&mut self, msg: Msg<S>) -> bool {
         match msg {
             Msg::Viewport(v) if !v.is_empty() => self.viewport = Some(v),
             Msg::Viewport(_) => {}
@@ -66,11 +74,25 @@ impl Gate {
 
     /// 能开始了：返回视口。
     pub fn ready(&self) -> Option<Viewport> {
-        if self.paused { None } else { self.viewport }
+        if self.paused || (self.stale && self.surface.is_none()) { None } else { self.viewport }
+    }
+
+    /// 等的时候换来的画面（只给一次）。
+    pub fn take_surface(&mut self) -> Option<S> {
+        let surface = self.surface.take();
+        if surface.is_some() {
+            self.stale = false;
+        }
+        surface
+    }
+
+    /// 手上的画面配置不了：等下一个画面。
+    pub fn surface_unusable(&mut self) {
+        self.stale = true;
     }
 
     /// 开始时把攒着的消息交出去。
-    pub fn take(self) -> Vec<Msg> {
+    pub fn take(self) -> Vec<Msg<S>> {
         self.pending
     }
 }
@@ -97,7 +119,30 @@ pub(crate) struct Gpu {
 /// 开着的管线缓存和它的文件。
 pub(crate) struct DiskCache {
     cache: wgpu::PipelineCache,
-    store: pipeline_cache::Store,
+    /// 写文件在后台线程上，不挡着渲染线程。
+    store: Arc<Mutex<pipeline_cache::Store>>,
+    /// 上次读到、存下的数据有多大。
+    len: usize,
+}
+
+/// 什么时候存管线缓存。
+pub(crate) struct SaveClock {
+    at: Instant,
+}
+
+impl SaveClock {
+    pub fn new(now: Instant) -> Self {
+        Self { at: now + CACHE_SAVE_AFTER }
+    }
+
+    /// 到点了（到点以后排下一次）。
+    pub fn due(&mut self, now: Instant) -> bool {
+        if now < self.at {
+            return false;
+        }
+        self.at = now + CACHE_SAVE_EVERY;
+        true
+    }
 }
 
 impl DiskCache {
@@ -118,15 +163,26 @@ impl DiskCache {
         let cache = unsafe {
             device.create_pipeline_cache(&wgpu::PipelineCacheDescriptor { label: Some("nge"), data: data.as_deref(), fallback: true })
         };
-        Self { cache, store }
+        Self { cache, store: Arc::new(Mutex::new(store)), len: data.map_or(0, |d| d.len()) }
     }
 
+    /// 渲染线程上只取数据，写文件交给后台线程（没变的 `Store` 不写）。
     fn save(&mut self) {
         let Some(data) = self.cache.get_data() else { return };
-        match self.store.save(&data) {
-            Ok(true) => log::info!("管线缓存存了 {} 字节", data.len()),
-            Ok(false) => {}
-            Err(e) => log::warn!("管线缓存存不下: {e}"),
+        if pipeline_cache::shrank(self.len, data.len()) {
+            log::info!("管线缓存从 {} 字节变成 {} 字节：wgpu 多半判定旧数据过期，当空的重来了", self.len, data.len());
+        }
+        self.len = data.len();
+        let store = self.store.clone();
+        let spawned = std::thread::Builder::new().name("nge-pipeline-cache".into()).spawn(move || {
+            match store.lock().unwrap_or_else(|e| e.into_inner()).save(&data) {
+                Ok(true) => log::info!("管线缓存存了 {} 字节", data.len()),
+                Ok(false) => {}
+                Err(e) => log::warn!("管线缓存存不下: {e}"),
+            }
+        });
+        if let Err(e) = spawned {
+            log::warn!("管线缓存存不下（起不了线程）: {e}");
         }
     }
 }
@@ -151,10 +207,14 @@ pub(crate) async fn request_gpu(instance: &wgpu::Instance, surface: wgpu::Surfac
     Ok(Gpu { adapter, device, queue, surface, cache })
 }
 
-/// 画布的格式：sRGB 的照用；WebGPU 的画布只有非 sRGB 的格式，配置时加上 sRGB 的 view format，
-/// 引擎画到 sRGB 的 view 上，颜色和原生一致。返回（画布格式、引擎画的格式）。
-pub(crate) fn surface_formats(format: wgpu::TextureFormat) -> (wgpu::TextureFormat, wgpu::TextureFormat) {
-    (format, format.add_srgb_suffix())
+/// 画布的格式：有 sRGB 的就直接用（Android 的老设备没有 `VK_KHR_swapchain_mutable_format`，配不了 view format）；
+/// 没有时（WebGPU 的画布）用第一个，配置时加上 sRGB 的 view format，引擎画到 sRGB 的 view 上，颜色和原生一致。
+/// 返回（画布格式、引擎画的格式）；一个格式都没有时是 `None`。
+pub(crate) fn surface_formats(formats: &[wgpu::TextureFormat]) -> Option<(wgpu::TextureFormat, wgpu::TextureFormat)> {
+    if let Some(srgb) = formats.iter().find(|f| f.is_srgb()) {
+        return Some((*srgb, *srgb));
+    }
+    formats.first().map(|f| (*f, f.add_srgb_suffix()))
 }
 
 pub(crate) struct Surface {
@@ -186,13 +246,25 @@ impl Surface {
     }
 }
 
-/// 按视口配置画面，得到游戏用的 [`Gfx`]。
-pub(crate) fn configure(gpu: Gpu, viewport: Viewport) -> Result<(Gfx, Surface, Option<DiskCache>), String> {
-    let Gpu { adapter, device, queue, surface, cache } = gpu;
-    let max_side = device.limits().max_texture_dimension_2d;
+impl Gpu {
+    /// 换一个画面（配置之前收到的新画面）。
+    pub fn with_surface(self, surface: Option<wgpu::Surface<'static>>) -> Self {
+        match surface {
+            Some(surface) => Self { surface, ..self },
+            None => self,
+        }
+    }
+}
+
+/// 按视口配置画面，得到游戏用的 [`Gfx`]。画面配不了（没有能力、格式）时把 GPU 还回去，等下一个画面。
+pub(crate) fn configure(gpu: Gpu, viewport: Viewport) -> Result<(Gfx, Surface, Option<DiskCache>), (Gpu, String)> {
+    let max_side = gpu.device.limits().max_texture_dimension_2d;
     let [w, h] = viewport.pixels.map(|p| p.clamp(1, max_side));
-    let mut config = surface.get_default_config(&adapter, w, h).ok_or("surface 不被该 adapter 支持")?;
-    let (format, view_format) = surface_formats(config.format);
+    let formats = gpu.surface.get_capabilities(&gpu.adapter).formats;
+    let (Some((format, view_format)), Some(mut config)) = (surface_formats(&formats), gpu.surface.get_default_config(&gpu.adapter, w, h)) else {
+        return Err((gpu, "surface 不被该 adapter 支持".into()));
+    };
+    let Gpu { device, queue, surface, cache, .. } = gpu;
     config.format = format;
     if view_format != format {
         config.view_formats.push(view_format);
@@ -267,8 +339,7 @@ pub(crate) struct Core {
     /// 已经发过 `ready`。
     shown: bool,
     cache: Option<DiskCache>,
-    /// 开始跑以后存第一次管线缓存的时刻（存过就是 None）。
-    save_cache_at: Option<Instant>,
+    save_cache: SaveClock,
 }
 
 impl Core {
@@ -276,11 +347,10 @@ impl Core {
         let now = Instant::now();
         let lost = DeviceLost::default();
         gfx.device.set_device_lost_callback(lost.callback());
-        let save_cache_at = cache.as_ref().map(|_| now + CACHE_SAVE_AFTER);
-        Self { game, gfx, surface, emit, tick: Tick::new(now), stats: FrameStats::new(now), clock: FrameClock::default(), lost, shown: false, cache, save_cache_at }
+        Self { game, gfx, surface, emit, tick: Tick::new(now), stats: FrameStats::new(now), clock: FrameClock::default(), lost, shown: false, cache, save_cache: SaveClock::new(now) }
     }
 
-    /// 把管线缓存写到磁盘（暂停、退出、开始跑一会儿以后）。
+    /// 把管线缓存写到磁盘（暂停确认以后、退出、开始跑 10 秒以后每分钟）。
     pub fn save_pipeline_cache(&mut self) {
         if let Some(cache) = &mut self.cache {
             cache.save();
@@ -299,10 +369,8 @@ impl Core {
             Msg::Command(name, args) => self.game.command(ctx, &name, &args),
             Msg::Prop(name, value) => self.game.prop(ctx, &name, value.as_ref()),
             Msg::Surface(surface) => self.surface.replace(&self.gfx.device, surface),
-            Msg::Pause(ack) => {
-                self.save_pipeline_cache();
-                return Flow::Pause(ack);
-            }
+            // 暂停确认以后再存（`runtime.rs`），写盘不挡着平台层
+            Msg::Pause(ack) => return Flow::Pause(ack),
             Msg::Resume => {}
             Msg::Quit => {
                 self.save_pipeline_cache();
@@ -328,8 +396,7 @@ impl Core {
             (self.emit)(ENGINE_ERROR.name(), ENGINE_ERROR.encode(&EngineError { message: format!("GPU 设备丢了：{message}") }));
         }
         let now = Instant::now();
-        if self.save_cache_at.is_some_and(|at| now >= at) {
-            self.save_cache_at = None;
+        if self.cache.is_some() && self.save_cache.due(now) {
             self.save_pipeline_cache();
         }
         let dt = self.tick.dt(now);
@@ -368,10 +435,15 @@ impl Core {
                 return None;
             }
             wgpu::CurrentSurfaceTexture::Lost => {
-                // surface 需要重建，这一版先停止渲染并上报
                 self.surface.lost = true;
-                log::error!("surface 丢失，停止渲染");
-                (self.emit)(ENGINE_ERROR.name(), ENGINE_ERROR.encode(&EngineError { message: "surface lost".into() }));
+                if cfg!(target_os = "android") {
+                    // 画面没了、暂停又超时了（慢的设备上）：等平台层换上新的画面（Msg::Surface）
+                    log::warn!("surface 丢失，等新的画面");
+                } else {
+                    // surface 需要重建，这一版先停止渲染并上报
+                    log::error!("surface 丢失，停止渲染");
+                    (self.emit)(ENGINE_ERROR.name(), ENGINE_ERROR.encode(&EngineError { message: "surface lost".into() }));
+                }
                 return None;
             }
             _ => return None,
@@ -421,16 +493,19 @@ mod tests {
     #[test]
     fn the_engine_draws_in_srgb_even_when_the_canvas_is_not() {
         use wgpu::TextureFormat as T;
-        // WebGPU 的画布
-        assert_eq!(surface_formats(T::Bgra8Unorm), (T::Bgra8Unorm, T::Bgra8UnormSrgb));
-        assert_eq!(surface_formats(T::Rgba8Unorm), (T::Rgba8Unorm, T::Rgba8UnormSrgb));
+        // WebGPU 的画布：只有非 sRGB 的，画到 sRGB 的 view 上
+        assert_eq!(surface_formats(&[T::Bgra8Unorm]), Some((T::Bgra8Unorm, T::Bgra8UnormSrgb)));
+        assert_eq!(surface_formats(&[T::Rgba8Unorm, T::Rgba16Float]), Some((T::Rgba8Unorm, T::Rgba8UnormSrgb)));
         // Mac、iPhone 默认就是 sRGB
-        assert_eq!(surface_formats(T::Bgra8UnormSrgb), (T::Bgra8UnormSrgb, T::Bgra8UnormSrgb));
+        assert_eq!(surface_formats(&[T::Bgra8UnormSrgb]), Some((T::Bgra8UnormSrgb, T::Bgra8UnormSrgb)));
+        // Android 的 Vulkan：非 sRGB 排在前面也直接用 sRGB 的，不靠 view_formats（老设备没有 VK_KHR_swapchain_mutable_format）
+        assert_eq!(surface_formats(&[T::Rgba8Unorm, T::Rgba8UnormSrgb, T::Rgb10a2Unorm]), Some((T::Rgba8UnormSrgb, T::Rgba8UnormSrgb)));
+        assert_eq!(surface_formats(&[]), None, "没有格式");
     }
 
     #[test]
     fn gate_waits_for_a_viewport_and_keeps_the_rest_in_order() {
-        let mut gate = Gate::default();
+        let mut gate = Gate::<u32>::default();
         assert!(gate.push(Msg::Prop("scene".into(), None)));
         assert!(gate.push(Msg::Viewport(Viewport::default())));
         assert_eq!(gate.ready(), None, "空视口不算");
@@ -460,6 +535,18 @@ mod tests {
     }
 
     #[test]
+    fn the_pipeline_cache_is_saved_ten_seconds_in_and_then_every_minute() {
+        let t0 = Instant::now();
+        let s = |n| t0 + std::time::Duration::from_secs(n);
+        let mut clock = SaveClock::new(t0);
+        assert!(!clock.due(s(9)));
+        assert!(clock.due(s(10)), "预热编完的管线不等切后台");
+        assert!(!clock.due(s(11)) && !clock.due(s(69)), "存过以后等一分钟");
+        assert!(clock.due(s(70)));
+        assert!(!clock.due(s(71)));
+    }
+
+    #[test]
     fn device_loss_is_reported_once_and_not_when_we_destroy_it() {
         let lost = DeviceLost::default();
         lost.callback()(wgpu::DeviceLostReason::Destroyed, "自己关的".into());
@@ -471,7 +558,7 @@ mod tests {
 
     #[test]
     fn gate_keeps_only_the_latest_value_of_each_prop() {
-        let mut gate = Gate::default();
+        let mut gate = Gate::<u32>::default();
         let prop = |n: &str, v: i32| Msg::Prop(n.into(), Some(JsonValue::from(v)));
         for i in 0..50 {
             gate.push(prop("scene", i));
@@ -494,8 +581,24 @@ mod tests {
     }
 
     #[test]
+    fn gate_keeps_the_latest_surface_and_waits_for_one_after_a_failed_configure() {
+        let mut gate = Gate::<u32>::default();
+        gate.push(Msg::Viewport(VIEW));
+        gate.push(Msg::Surface(1));
+        gate.push(Msg::Surface(2));
+        assert_eq!(gate.take_surface(), Some(2), "只留最新的画面");
+        assert_eq!(gate.take_surface(), None, "只给一次");
+        gate.surface_unusable();
+        assert_eq!(gate.ready(), None, "画面配置不了：等新的");
+        gate.push(Msg::Surface(3));
+        assert_eq!(gate.ready(), Some(VIEW));
+        assert_eq!(gate.take_surface(), Some(3));
+        assert_eq!(gate.ready(), Some(VIEW), "换上新的画面以后照常开始");
+    }
+
+    #[test]
     fn gate_stays_closed_while_paused_and_answers_the_pause() {
-        let mut gate = Gate::default();
+        let mut gate = Gate::<u32>::default();
         gate.push(Msg::Viewport(VIEW));
         let (tx, rx) = mpsc::sync_channel(1);
         gate.push(Msg::Pause(tx));

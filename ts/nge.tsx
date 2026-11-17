@@ -783,6 +783,8 @@ interface BuiltinProps {
    * 不填时是字母、数字、方向键、Space、Enter；用到别的键（如 Esc 暂停）要自己列上，不然 NSH 不处理时会「咚」一声。
    */
   captureKeys: string[];
+  /** Android：锁住屏幕方向（跟着传感器转 180°），游戏视图没了时放开。不填时跟着系统转。别的平台不管。 */
+  screenOrientation: "landscape" | "portrait";
 }
 
 interface BuiltinEvents {
@@ -818,7 +820,7 @@ export function gameView<P extends object = {}, E extends object = {}>(
   spec: { props?: readonly (keyof P & string)[]; events?: readonly (keyof E & string)[] } = {},
 ) {
   const Native = nativeComponent<BuiltinProps & P, BuiltinEvents & E>("nge.game", {
-    props: [...new Set(["scene", "captureKeys", ...(spec.props ?? [])])] as (keyof (BuiltinProps & P) & string)[],
+    props: [...new Set(["scene", "captureKeys", "screenOrientation", ...(spec.props ?? [])])] as (keyof (BuiltinProps & P) & string)[],
     events: [...new Set(["tap", "collide", "animEnd", "tweenEnd", "key", "levelStart", "chase", "typed", "fps", "error", "ready", "net", "http", ...(spec.events ?? [])])] as (keyof (BuiltinEvents & E) & string)[],
   });
 

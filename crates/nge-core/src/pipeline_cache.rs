@@ -3,6 +3,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// 文件开头的魔数（最后一位是我们这层格式的版本）。
 pub const MAGIC: &[u8; 8] = b"NGEPCAC1";
@@ -57,6 +58,19 @@ pub fn decode<'a>(version: &str, bytes: &'a [u8]) -> Result<&'a [u8], Reject> {
     Ok(data)
 }
 
+/// 写到一半的临时文件：带上进程号和一个计数，同时写的不撞名（同一个目录里，改名是原子的）。
+fn tmp_path(path: &Path) -> PathBuf {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let mut name = path.file_name().map(|n| n.to_os_string()).unwrap_or_default();
+    name.push(format!(".{}.{}.tmp", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+    path.with_file_name(name)
+}
+
+/// 缓存比上次小了一半多：wgpu 多半判定旧数据过期、当空的重来了（日志里要看得出来）。
+pub fn shrank(before: usize, after: usize) -> bool {
+    after * 2 < before
+}
+
 /// 这块 GPU 的缓存文件名；只有实现了管线缓存的后端（Vulkan）有。
 pub fn file_name(info: &wgpu::AdapterInfo) -> Option<String> {
     wgpu::util::pipeline_cache_key(info)
@@ -90,7 +104,7 @@ impl Store {
         }
     }
 
-    /// 写进文件（先写临时文件再改名）；和上次存的、读到的一样时不写，返回 false。
+    /// 写进文件（先写临时文件再改名，写不成删掉临时文件）；和上次存的、读到的一样时不写，返回 false。
     pub fn save(&mut self, data: &[u8]) -> std::io::Result<bool> {
         let sum = checksum(data);
         if self.saved == Some(sum) {
@@ -99,9 +113,12 @@ impl Store {
         if let Some(dir) = self.path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        let tmp = self.path.with_extension("tmp");
-        std::fs::write(&tmp, encode(&self.version, data))?;
-        std::fs::rename(&tmp, &self.path)?;
+        let tmp = tmp_path(&self.path);
+        let written = std::fs::write(&tmp, encode(&self.version, data)).and_then(|()| std::fs::rename(&tmp, &self.path));
+        if let Err(e) = written {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e);
+        }
         self.saved = Some(sum);
         Ok(true)
     }
@@ -174,13 +191,30 @@ mod tests {
         let mut store = Store::new(&dir, "gpu", V);
         assert_eq!(store.load(), None, "还没存过");
         assert!(store.save(b"abc").unwrap(), "目录不在时建好");
-        assert!(!dir.join("gpu.tmp").exists(), "先写临时文件再改名，不留下它");
+        let names: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert_eq!(names, ["gpu"], "先写临时文件再改名，不留下它");
         assert!(!store.save(b"abc").unwrap(), "没变不写");
         assert!(store.save(b"abcd").unwrap());
         let mut again = Store::new(&dir, "gpu", V);
         assert_eq!(again.load().as_deref(), Some(&b"abcd"[..]));
         assert!(!again.save(b"abcd").unwrap(), "读出来的就是存着的，不用再写");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn temporary_files_are_named_per_process_and_per_write() {
+        let path = Path::new("/c/gpu");
+        let (a, b) = (tmp_path(path), tmp_path(path));
+        assert_ne!(a, b, "同一个进程两次写不撞名");
+        assert_eq!(a.parent(), path.parent(), "同一个目录里，改名是原子的");
+        let name = a.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(name.starts_with("gpu.") && name.ends_with(".tmp") && name.contains(&std::process::id().to_string()), "{name}");
+    }
+
+    #[test]
+    fn a_much_smaller_cache_is_noticed() {
+        assert!(shrank(1000, 400), "少了一半多：wgpu 多半是把旧缓存当空的了");
+        assert!(!shrank(1000, 600) && !shrank(1000, 2000) && !shrank(0, 0));
     }
 
     #[test]

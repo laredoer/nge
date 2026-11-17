@@ -109,6 +109,12 @@ pub(crate) fn mock_manager() -> Manager {
 impl Plugin for AudioPlugin {
     fn build(&self, app: &mut App) {
         nge_assets::ensure_plugin(app);
+        // 画面没了、App 进了后台（平台层发 `nge.suspend`）：停下声音，回来接着放
+        app.on_suspend(|world, suspended| {
+            if let Some(mut audio) = world.get_resource_mut::<Audio>() {
+                audio.set_suspended(suspended);
+            }
+        });
         if self.locked() {
             app.init_asset::<Sound>()
                 .insert_resource(Audio::locked())

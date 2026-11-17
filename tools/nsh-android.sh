@@ -25,12 +25,23 @@ export ANDROID_NDK_HOME
 java_src="$root/vendor/nsh-platform-android/java"
 runtime="$root/target/nge-android/runtime"
 dex="$runtime/android/release/classes.dex"
-# 有比 classes.dex 新的 Java 源文件（或者还没有）才重编
-if [ ! -f "$dex" ] || [ -n "$(find "$java_src" -newer "$dex" -print -quit)" ]; then
+# 上次编进 classes.dex 的源文件
+built="$runtime/android/sources.txt"
+sources="$(find "$java_src" -name '*.java' | sort)"
+# 还没有 classes.dex、有比它新的 Java 源文件、或者源文件加了删了才重编
+if [ ! -f "$dex" ] || [ -n "$(find "$java_src" -newer "$dex" -print -quit)" ] \
+  || [ "$sources" != "$(cat "$built" 2>/dev/null)" ]; then
+  for tool in javac jar; do
+    command -v "$tool" >/dev/null || { echo "找不到 $tool：装 JDK 17 或更新的版本" >&2; exit 1; }
+  done
+  # javac 17.0.2 → 17；javac 1.8.0 → 1
+  major="$(javac -version 2>&1 | sed -n 's/^javac \([0-9]*\).*/\1/p')"
+  [ "${major:-0}" -ge 17 ] || { echo "javac 要 17 或更新：$(javac -version 2>&1)" >&2; exit 1; }
   build="$root/target/nge-android/java"
   rm -rf "$build"
   mkdir -p "$build/classes"
-  find "$java_src" -name '*.java' > "$build/sources.txt"
+  # argfile 一行一个路径，加引号：路径里有空格也行
+  printf '%s\n' "$sources" | sed 's/.*/"&"/' > "$build/sources.txt"
   javac --release 17 -Xlint:-options -encoding UTF-8 -classpath "$platform" -d "$build/classes" @"$build/sources.txt"
   (cd "$build/classes" && jar cf "$build/classes.jar" .)
   "$ANDROID_HOME/build-tools/$tools/d8" --min-api 28 --lib "$platform" --output "$build" "$build/classes.jar"
@@ -39,6 +50,7 @@ if [ ! -f "$dex" ] || [ -n "$(find "$java_src" -newer "$dex" -print -quit)" ]; t
     mkdir -p "$runtime/android/$variant/lib/arm64-v8a" "$runtime/android/$variant/lib/x86_64"
     cp "$build/classes.dex" "$runtime/android/$variant/classes.dex"
   done
+  printf '%s\n' "$sources" > "$built"
   echo "编好了 Java 运行时：$dex" >&2
 fi
 [ "$1" = "--runtime-only" ] && exit 0

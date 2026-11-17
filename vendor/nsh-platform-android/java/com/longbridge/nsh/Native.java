@@ -203,9 +203,12 @@ final class Native {
     static native void rustComponentSurface(long ptr, android.view.Surface surface, int width, int height);
 
     static native boolean rustComponentKey(long ptr, int keyCode, int source, boolean down, int repeat, int meta,
-            boolean editing);
+            int device, boolean editing);
 
     static native boolean rustComponentMotion(long ptr, int device, float[] axes);
+
+    /** 手柄 {@code device} 拔掉了，或者（{@code all}）窗口失焦：按着的都松开。 */
+    static native void rustComponentInputLost(long ptr, int device, boolean all);
 
     static native void rustComponentDestroy(long ptr);
 

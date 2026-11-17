@@ -8,12 +8,23 @@ pub fn viewport(width: u32, height: u32, density: f32) -> Viewport {
     Viewport { size: [width as f32 / density, height as f32 / density], pixels: [width, height] }
 }
 
-/// 引擎起来（第一次有画面）之前收到的属性和 command，起来后按顺序交出去。
+/// 最多攒多少条（一直没有画面时不无限长）。
+pub const MAX_PENDING: usize = 256;
+
+/// 引擎起来（第一次有画面）之前收到的属性和 command，起来后按顺序交出去。和引擎里等 GPU 时一样，
+/// 同名的 prop 只留最新一份（放在最后一次出现的位置）；超过 [`MAX_PENDING`] 条丢最早的。
 #[derive(Default)]
 pub struct Pending(Vec<Msg>);
 
 impl Pending {
     pub fn push(&mut self, msg: Msg) {
+        if let Msg::Prop(name, _) = &msg {
+            self.0.retain(|m| !matches!(m, Msg::Prop(n, _) if n == name));
+        }
+        if self.0.len() >= MAX_PENDING {
+            log::warn!("游戏视图还没有画面，攒的消息超过 {MAX_PENDING} 条，丢掉最早的");
+            self.0.remove(0);
+        }
         self.0.push(msg);
     }
 
@@ -52,5 +63,31 @@ mod tests {
             .collect();
         assert_eq!(names, ["scene", "burst", "captureKeys"]);
         assert!(pending.take().is_empty(), "交出去就没了");
+    }
+
+    #[test]
+    fn only_the_latest_value_of_a_prop_waits_and_commands_are_capped() {
+        let mut pending = Pending::default();
+        for i in 0..100 {
+            pending.push(Msg::Prop("scene".into(), Some(json!(i))));
+        }
+        pending.push(Msg::Command("burst".into(), json!(0)));
+        pending.push(Msg::Prop("scene".into(), Some(json!("last"))));
+        let got: Vec<_> = pending
+            .take()
+            .into_iter()
+            .map(|m| match m {
+                Msg::Prop(n, v) => (n, v.unwrap_or_default()),
+                Msg::Command(n, v) => (n, v),
+                _ => unreachable!(),
+            })
+            .collect();
+        assert_eq!(got, [("burst".to_owned(), json!(0)), ("scene".to_owned(), json!("last"))], "同名 prop 只留最新的，放在最后");
+        for i in 0..MAX_PENDING + 10 {
+            pending.push(Msg::Command("burst".into(), json!(i)));
+        }
+        let commands = pending.take();
+        assert_eq!(commands.len(), MAX_PENDING, "最多攒这么多");
+        assert!(matches!(&commands[0], Msg::Command(_, v) if *v == json!(10)), "丢最早的");
     }
 }

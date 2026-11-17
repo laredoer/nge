@@ -19,7 +19,7 @@ pub use gpu::GpuImages;
 pub use ktx2::{BlockFormat, Compressed};
 pub use image::{Image, ImageId, MAX_TEXTURE_SIDE};
 pub use server::{Asset, AssetEvent, AssetServer, Assets, Handle, LoadContext, LoadState};
-pub use source::{AssetSource, Chain, DirSource, MemorySource, SourceFiles, asset_path, bundle_dir, platform_source, set_source};
+pub use source::{AssetSource, Chain, DirSource, MemorySource, SourceFiles, asset_path, bundle_dir, platform_source, set_source, unset_source};
 
 /// 资源系统集：`PreUpdate` 里最先收回后台加载的结果。
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]

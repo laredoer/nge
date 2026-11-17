@@ -2,3 +2,4 @@ target/
 .nsh/
 tools/NshGame/build/
 *.log
+vendor/*/Cargo.lock

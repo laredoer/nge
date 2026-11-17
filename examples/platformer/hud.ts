@@ -21,3 +21,8 @@ export function outOfHearts(falls: number): boolean {
 export function titleBubble(name: string): BubbleNode {
   return { id: "title", text: name, follow: "player", y: 32, typing: 10, size: 13 };
 }
+
+/** 手机上触屏按钮离屏幕边的距离：原来的边距（下 32、左右 24）加上安全区（系统栏、刘海）。 */
+export function padPlace(safe: { top: number; right: number; bottom: number; left: number }): { bottom: number; left: number; right: number } {
+  return { bottom: 32 + safe.bottom, left: 24 + safe.left, right: 24 + safe.right };
+}

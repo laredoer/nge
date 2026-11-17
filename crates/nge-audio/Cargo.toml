@@ -17,3 +17,4 @@ kira = { version = "0.12.6", default-features = false, features = ["cpal", "ogg"
 
 [dev-dependencies]
 nge-core.workspace = true
+serde_json.workspace = true

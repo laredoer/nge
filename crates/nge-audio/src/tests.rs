@@ -359,3 +359,37 @@ fn music_stopped_before_unlocking_never_starts() {
     settle(&mut app);
     assert_eq!(audio(&mut app).voices(), 0);
 }
+
+#[test]
+fn suspending_pauses_the_audio_and_resuming_brings_it_back() {
+    let mut app = app();
+    audio(&mut app).set_volume(0.5);
+    app.command("nge.suspend", &serde_json::json!({ "suspended": true }));
+    assert!(audio(&mut app).suspended(), "画面没了：停下");
+    assert_eq!((audio(&mut app).volume(), audio(&mut app).muted()), (0.5, false), "不改游戏设的音量");
+    assert_eq!(audio(&mut app).master_level(), 0.0, "主轨道静音");
+    app.command("nge.suspend", &serde_json::json!({ "suspended": false }));
+    assert!(!audio(&mut app).suspended());
+    assert_eq!(audio(&mut app).master_level(), 0.5, "回来恢复游戏设的音量");
+}
+
+#[test]
+fn suspending_stops_the_bus_tracks_from_playing_on() {
+    let mut app = app();
+    let beep = load(&mut app, BEEP);
+    settle(&mut app);
+    let music = audio(&mut app).play(beep, Play { bus: Bus::Music, ..Play::looped() });
+    app.tick(VIEWPORT, 0.016);
+    audio(&mut app).advance_mock(1);
+    let before = audio(&mut app).position(music).unwrap();
+    app.command("nge.suspend", &serde_json::json!({ "suspended": true }));
+    // 停下要一点时间（0.05 秒的淡出）：先过一帧
+    audio(&mut app).advance_mock(1);
+    let paused = audio(&mut app).position(music).unwrap();
+    audio(&mut app).advance_mock(2);
+    assert_eq!(audio(&mut app).position(music), Some(paused), "停着不往前走");
+    assert!(paused - before < 1.5, "{before} → {paused}");
+    app.command("nge.suspend", &serde_json::json!({ "suspended": false }));
+    audio(&mut app).advance_mock(2);
+    assert!(audio(&mut app).position(music).unwrap() != paused, "回来接着放");
+}
