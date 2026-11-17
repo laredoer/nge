@@ -100,6 +100,7 @@
 | **联网** | `nge-net`：WebSocket 连接（原生 tokio-tungstenite 在单独线程、浏览器 `WebSocket`），断线指数退避重连；postcard 协议；`NetSync` 每秒 20 次广播位置，`Remote` 缓冲 100 ms 插值、容忍乱序丢包；`Http` 的 GET / POST（原生 ureq、浏览器 fetch）；`nge-relay` 中继（房间、进出通知、心跳、人数 / 大小 / 频率上限，顺带排行榜）；场景的 `net`、TSX 的 `netRoom()` / `httpClient()`；见 [networking.md](networking.md) | 平台跳跃两个窗口同一关互相看见（半透明、头顶名字），N 开关，中继连不上照常单机，通关成绩进排行榜 |
 | **编辑器** | `examples/editor`：用 nge 做的关卡编辑器，画布就是平台跳跃的游戏视图（编辑时 `timeScale: 0`、不放角色和刚体）；带版本号的关卡文件格式 `ts/level.ts`（读入校验、保存格式化）；命令模式的撤销重做、点选 / 框选 / 拖动 / 吸附、瓦片刷、复制粘贴、属性校验都是纯函数；⌘R 用当前关卡试玩，Esc 回来；见 [editor.md](editor.md) | 平台跳跃第二关「石阶」从关卡文件读，编辑器里能打开、改、保存、直接试玩 |
 | **M6 Android** | 仓库里改过的 `nsh-platform-android` 支持 Rust 写的原生组件（`SurfaceView`），wgpu 只走 Vulkan，画面没了暂停、回来换新的 surface；Android 键码和手柄的轴换成和 Mac 一样的键名；不用 Gradle，`tools/nsh-android.sh` 编好 Java 运行时再交给 `nsh package`；Vulkan 上的管线存到磁盘（`codeCacheDir`），坏了、版本不对当没有；见 [android.md](android.md) | 平台跳跃在 Android 模拟器上能玩，第二次启动读到管线缓存 |
+| **输入映射** | 动作绑定（`Actions`，按钮 / 一维 / 二维轴，Rust 每帧问、TSX 收 `action` 事件）；`inputMap()` 改键（按任意键、冲突、恢复默认、存在设备上）；手柄按设备分（`pad` command，`Input::pad`，每个玩家一个手柄，接入 / 拔出事件）；扳机模拟量；手柄震动（`Rumble`，GameController haptics / Android `VibratorManager` / `vibrationActuator`）；浏览器的手柄；见 [input-actions.md](input-actions.md) | 平台跳跃的操作全走动作，有改键面板，第二个手柄接入时出现第二个角色，落地、受伤时震动 |
 
 ## 待定
 

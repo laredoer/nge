@@ -1039,6 +1039,55 @@ public class NshView extends FrameLayout {
         });
     }
 
+    /**
+     * 本仓库加的：让手柄震动（见 docs/input-actions.md）。任意线程。
+     *
+     * @param device {@code InputDevice} 的号；负数是所有手柄
+     * @param low 低频（重）马达的振幅，0 … 255，0 不震
+     * @param high 高频（轻）马达的振幅
+     * @param millis 毫秒
+     */
+    void vibratePad(int device, int low, int high, int millis) {
+        if (millis <= 0 || (low <= 0 && high <= 0)) return;
+        int[] ids = device >= 0 ? new int[] {device} : android.view.InputDevice.getDeviceIds();
+        for (int id : ids) {
+            android.view.InputDevice pad = android.view.InputDevice.getDevice(id);
+            if (pad == null) continue;
+            int source = pad.getSources();
+            boolean gamepad = (source & android.view.InputDevice.SOURCE_GAMEPAD) == android.view.InputDevice.SOURCE_GAMEPAD
+                    || (source & android.view.InputDevice.SOURCE_JOYSTICK) == android.view.InputDevice.SOURCE_JOYSTICK;
+            if (!gamepad) continue;
+            try {
+                vibrate(pad, Math.min(low, 255), Math.min(high, 255), millis);
+            } catch (RuntimeException e) {
+                // 没有权限、设备刚拔掉：不震，不崩
+                android.util.Log.w("nsh", "cannot vibrate input device " + id + ": " + e);
+            }
+        }
+    }
+
+    /** 两个马达各放各的（Android 12 起）；只有一个、或者系统老时取大的。 */
+    private static void vibrate(android.view.InputDevice pad, int low, int high, int millis) {
+        int both = Math.max(low, high);
+        if (Build.VERSION.SDK_INT >= 31) {
+            android.os.VibratorManager manager = pad.getVibratorManager();
+            int[] motors = manager.getVibratorIds();
+            if (motors.length >= 2) {
+                android.os.CombinedVibration.ParallelCombination combo = android.os.CombinedVibration.startParallel();
+                if (low > 0) combo.addVibrator(motors[0], android.os.VibrationEffect.createOneShot(millis, low));
+                if (high > 0) combo.addVibrator(motors[1], android.os.VibrationEffect.createOneShot(millis, high));
+                manager.vibrate(combo.combine());
+            } else if (motors.length == 1) {
+                manager.getVibrator(motors[0]).vibrate(android.os.VibrationEffect.createOneShot(millis, both));
+            }
+            return;
+        }
+        android.os.Vibrator vibrator = pad.getVibrator();
+        if (vibrator != null && vibrator.hasVibrator()) {
+            vibrator.vibrate(android.os.VibrationEffect.createOneShot(millis, both));
+        }
+    }
+
     /** Bytes of an `asset:/…` URI, or null. Blocking: engine and image threads. */
     byte[] readAsset(String uri) {
         String path = uri.startsWith("asset:/") ? uri.substring(7) : uri;

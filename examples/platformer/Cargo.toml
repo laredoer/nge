@@ -20,6 +20,7 @@ nsh-core.workspace = true
 # derive(Resource) 展开时需要 bevy_ecs 路径
 bevy_ecs.workspace = true
 serde.workspace = true
+log.workspace = true
 
 # 生成的宿主（nsh run / nsh package）里注册游戏视图用
 [target.'cfg(target_os = "macos")'.dependencies]

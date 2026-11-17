@@ -61,7 +61,7 @@ nsh 0.3 的 `nsh/keymap` 只报快捷键「按下了」（`KeyCommand`），没�
 
 - Android（iOS / iPad 的硬件键盘后来用 GameController 做了，见 [ios-input.md](ios-input.md)）
 - 手柄：见 [gamepad.md](gamepad.md)
-- 文本输入（游戏里打字）、键位重映射
+- 文本输入（游戏里打字）；键位重映射后来做了，见 [input-actions.md](input-actions.md)
 
 ## 验收记录（2026-11-04，Mac）
 

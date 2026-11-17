@@ -1,6 +1,7 @@
 //! 平台跳跃：关卡（瓦片地图）、金币、终点和相机都在 `game.tsx` 里声明；
-//! Rust 只管每帧的角色控制：读键盘、看脚下有没有地、设速度，踩敌人、被敌人撞或掉下去了送回起点，按 R 重新开始；
-//! 起跳、踩敌人和掉坑的音效也在这里放。
+//! Rust 只管每帧的角色控制：问动作（`move`、`jump`、`restart`，绑定见 controls.json 和 docs/input-actions.md）、看脚下有没有地、设速度，
+//! 踩敌人、被敌人撞或掉下去了送回起点，重新开始；起跳、踩敌人和掉坑的音效、落地和受伤时手柄的震动也在这里放。
+//! 第二个手柄接入时 TSX 往场景里放第二个角色（`player2`），这里让它能跑能跳。
 
 mod debug;
 
@@ -11,7 +12,7 @@ use nge_assets::{AssetPlugin, AssetServer, Assets, Handle};
 use nge_audio::{Audio, AudioPlugin, Play, Sound};
 use nge_core::EventKey;
 use nge_ecs::glam::Vec2;
-use nge_ecs::{App, Input, Outbox, Startup, Time, Update};
+use nge_ecs::{ActionMap, Actions, App, Input, Outbox, Rumble, Startup, Time, Update};
 use nge_physics2d::{Contact, Physics, Velocity};
 use nge_render2d::{Render2dPlugin, Transform2d};
 use nge_render3d::Render3dPlugin;
@@ -21,6 +22,8 @@ use serde::Serialize;
 
 /// 角色精灵的 id（`game.tsx` 里声明）。
 pub const PLAYER: &str = "player";
+/// 第二个角色的精灵 id（第二个手柄接入时 `game.tsx` 放进场景）。
+pub const GUEST: &str = "player2";
 /// 掉出关卡、被送回起点时发给 TSX。
 pub const RESPAWN: EventKey<Respawn> = EventKey::new("respawn");
 
@@ -61,12 +64,21 @@ const BUFFER: f32 = 0.12;
 const GROUND_NORMAL: f32 = 0.7;
 /// 掉到这条线以下就送回起点。
 const FALL_LINE: f32 = -400.0;
-const LEFT: [&str; 4] = ["ArrowLeft", "KeyA", "GamepadLeft", "GamepadLeftStickLeft"];
-const RIGHT: [&str; 4] = ["ArrowRight", "KeyD", "GamepadRight", "GamepadLeftStickRight"];
-const JUMP_KEYS: [&str; 4] = ["Space", "ArrowUp", "KeyW", "GamepadA"];
-/// 手柄的菜单键（Xbox ≡ / PS Options / Switch +）也能重来。
-const RESTART_KEYS: [&str; 2] = ["KeyR", "GamepadMenu"];
+/// 动作名（绑定在 controls.json 里，TSX 的改键面板能改）。
+const MOVE: &str = "move";
+const JUMP_ACTION: &str = "jump";
+const RESTART_ACTION: &str = "restart";
+/// 在空中超过这么久，落地时手柄轻震一下。
+const LAND_RUMBLE_AIR: f32 = 0.2;
 const PERF_KEY: &str = "KeyP";
+
+/// 默认绑定：和 TSX 读的是同一份文件，TSX 的 `actions` 到之前（和测试里）也能玩。
+fn default_controls() -> ActionMap {
+    ActionMap::from_json(include_str!("../controls.json")).unwrap_or_else(|e| {
+        log::error!("controls.json: {e}");
+        ActionMap::default()
+    })
+}
 const JUMP_SOUND: &str = "asset:/@platformer/jump.wav";
 const FALL_SOUND: &str = "asset:/@platformer/fall.wav";
 const STOMP_SOUND: &str = "asset:/@platformer/stomp.wav";
@@ -99,6 +111,8 @@ struct Controller {
     airborne: f32,
     /// 按跳多久了（还没用掉的）。
     jump_pressed: f32,
+    /// 这一次腾空多久了（落地震动用；`airborne` 起跳时会被设成无穷大）。
+    air_time: f32,
     /// 第一次见到角色时的位置。
     spawn: Option<Vec2>,
     falls: u32,
@@ -108,7 +122,7 @@ struct Controller {
 
 impl Default for Controller {
     fn default() -> Self {
-        Self { airborne: f32::INFINITY, jump_pressed: f32::INFINITY, spawn: None, falls: 0, stomped: HashSet::new() }
+        Self { airborne: f32::INFINITY, jump_pressed: f32::INFINITY, air_time: 0.0, spawn: None, falls: 0, stomped: HashSet::new() }
     }
 }
 
@@ -119,7 +133,7 @@ fn move_toward(from: f32, to: f32, step: f32) -> f32 {
 #[allow(clippy::too_many_arguments)]
 fn control(
     time: Res<Time>,
-    input: Res<Input>,
+    actions: Res<Actions>,
     physics: Res<Physics>,
     mut ctl: ResMut<Controller>,
     mut players: Query<(Entity, &SceneId, &mut Transform2d, &mut Velocity)>,
@@ -127,6 +141,7 @@ fn control(
     mut outbox: ResMut<Outbox>,
     mut audio: ResMut<Audio>,
     sfx: Res<Sfx>,
+    mut rumble: ResMut<Rumble>,
 ) {
     let Some((entity, _, mut t, mut v)) = players.iter_mut().find(|(_, id, ..)| id.0 == PLAYER) else { return };
     let spawn = *ctl.spawn.get_or_insert(t.translation);
@@ -136,7 +151,7 @@ fn control(
         return;
     }
     // 和起跳同一帧时重来优先，这一下跳不算
-    if RESTART_KEYS.iter().any(|k| input.key_pressed(k)) {
+    if actions.pressed(RESTART_ACTION) {
         t.translation = spawn;
         *v = Velocity::default();
         *ctl = Controller { spawn: Some(spawn), ..Controller::default() };
@@ -150,13 +165,18 @@ fn control(
         contacts.iter().filter(|c| is_enemy(c.other) && !ctl.stomped.contains(&c.other)).partition(|c| c.normal.y > GROUND_NORMAL);
     // 脚下有东西（法线朝上）。角色控制器的接触是走完这一帧之后贴着的，起跳后的下一帧已经离开地面
     let grounded = contacts.iter().any(|c| c.normal.y > GROUND_NORMAL);
+    // 腾空够久再落地：手柄轻震一下
+    if grounded && ctl.air_time > LAND_RUMBLE_AIR {
+        rumble.play(0, 0.25, 0.5, 0.08);
+    }
+    ctl.air_time = if grounded { 0.0 } else { ctl.air_time + dt };
     ctl.airborne = if grounded { 0.0 } else { ctl.airborne + dt };
-    ctl.jump_pressed = if JUMP_KEYS.iter().any(|k| input.key_pressed(k)) { 0.0 } else { ctl.jump_pressed + dt };
+    ctl.jump_pressed = if actions.pressed(JUMP_ACTION) { 0.0 } else { ctl.jump_pressed + dt };
 
     let accel = if grounded { GROUND_ACCEL } else { AIR_ACCEL };
     let mut velocity = v.linear;
-    velocity.x = move_toward(velocity.x, input.axis(&LEFT, &RIGHT) * SPEED, accel * dt);
-    let holding = JUMP_KEYS.iter().any(|k| input.key_down(k));
+    velocity.x = move_toward(velocity.x, actions.value(MOVE) * SPEED, accel * dt);
+    let holding = actions.down(JUMP_ACTION);
     if ctl.jump_pressed <= BUFFER && ctl.airborne <= COYOTE {
         // 缓冲里的跳到落地时键已经松开了：直接按短跳
         velocity.y = if holding { JUMP } else { JUMP * 0.5 };
@@ -165,7 +185,7 @@ fn control(
         if stomps.is_empty() {
             play(&mut audio, &sfx.jump, 0.5);
         }
-    } else if velocity.y > 0.0 && !holding && JUMP_KEYS.iter().any(|k| input.key_released(k)) {
+    } else if velocity.y > 0.0 && actions.released(JUMP_ACTION) {
         // 上升时跳跃键全松开了：跳得矮
         velocity.y *= 0.5;
     }
@@ -191,6 +211,46 @@ fn control(
         *ctl = Controller { spawn: Some(spawn), falls: ctl.falls + 1, stomped, ..Controller::default() };
         outbox.send(RESPAWN, &Respawn { falls: ctl.falls });
         play(&mut audio, &sfx.fall, 0.6);
+        // 被撞、掉下去：重震一下
+        rumble.play(0, 1.0, 0.5, 0.3);
+    }
+}
+
+/// 第二个玩家（见 docs/input-actions.md）：只会跑、跳，掉下去回到出现的地方；不踩敌人、不算失手。
+fn control_guest(
+    time: Res<Time>,
+    actions: Res<Actions>,
+    physics: Res<Physics>,
+    mut starts: MessageReader<LevelStart>,
+    mut spawn: Local<Option<Vec2>>,
+    mut players: Query<(Entity, &SceneId, &mut Transform2d, &mut Velocity)>,
+) {
+    // 换关了：出现的地方重新记
+    if starts.read().count() > 0 {
+        *spawn = None;
+    }
+    let Some((entity, _, mut t, mut v)) = players.iter_mut().find(|(_, id, ..)| id.0 == GUEST) else {
+        *spawn = None;
+        return;
+    };
+    let home = *spawn.get_or_insert(t.translation);
+    let dt = time.delta;
+    if !(dt > 0.0) {
+        return;
+    }
+    let input = actions.player(1);
+    let grounded = physics.contacts(entity).iter().any(|c| c.normal.y > GROUND_NORMAL);
+    let mut velocity = v.linear;
+    velocity.x = move_toward(velocity.x, input.value(MOVE) * SPEED, if grounded { GROUND_ACCEL } else { AIR_ACCEL } * dt);
+    if grounded && input.pressed(JUMP_ACTION) {
+        velocity.y = JUMP;
+    }
+    if velocity != v.linear {
+        v.linear = velocity;
+    }
+    if t.translation.y < FALL_LINE {
+        t.translation = home;
+        *v = Velocity::default();
     }
 }
 
@@ -219,7 +279,8 @@ fn build(audio: AudioPlugin) -> App {
         .init_resource::<Sfx>()
         .add_systems(Startup, load_sfx)
         .init_resource::<debug::DebugView>()
-        .add_systems(Update, (reset_on_level_start, control, debug::debug_view, toggle_perf).chain());
+        .add_systems(Update, (reset_on_level_start, control, control_guest, debug::debug_view, toggle_perf).chain());
+    app.world_mut().resource_mut::<Actions>().set_map(default_controls());
     app
 }
 
@@ -350,24 +411,155 @@ mod tests {
         assert!(player(&mut app).0.y > ground);
     }
 
+    /// 一个手柄的整份状态（平台层按设备发的，见 docs/input-actions.md）。
+    fn pad(app: &mut App, id: u32, keys: &[&str], left: [f32; 2]) {
+        app.command("pad", &json!({ "id": id, "keys": keys, "left": left }));
+    }
+
     #[test]
     fn plays_with_a_gamepad() {
         let mut app = app();
         app.prop("scene", Some(&level(None)));
         run(&mut app, 20);
         let (start, ground) = { let p = player(&mut app).0; (p.x, p.y) };
-        key(&mut app, "GamepadLeftStickRight", true);
+        pad(&mut app, 0, &["GamepadLeftStickRight"], [1.0, 0.0]);
         run(&mut app, 30);
         assert!(player(&mut app).0.x > start + 50.0, "左摇杆往右跑");
-        key(&mut app, "GamepadLeftStickRight", false);
-        key(&mut app, "GamepadLeft", true);
+        pad(&mut app, 0, &["GamepadLeft"], [0.0; 2]);
         run(&mut app, 60);
         assert!(player(&mut app).1.x < -200.0, "十字键往左跑");
-        key(&mut app, "GamepadLeft", false);
+        pad(&mut app, 0, &[], [0.0; 2]);
         run(&mut app, 30);
-        key(&mut app, "GamepadA", true);
+        pad(&mut app, 0, &["GamepadA"], [0.0; 2]);
         run(&mut app, 10);
         assert!(player(&mut app).0.y > ground + 50.0, "A 跳");
+    }
+
+    #[test]
+    fn a_stick_pushed_a_little_walks_slowly() {
+        let mut app = app();
+        app.prop("scene", Some(&level(None)));
+        run(&mut app, 20);
+        pad(&mut app, 0, &[], [0.25, 0.0]);
+        run(&mut app, 60);
+        let speed = player(&mut app).1.x;
+        assert!((speed - 0.25 * SPEED).abs() < 2.0, "推四分之一，走四分之一的速度：{speed}");
+    }
+
+    /// 默认绑定是 controls.json（TSX 读的同一份）；TSX 发来的 `actions` 换掉它。
+    #[test]
+    fn controls_follow_the_bindings() {
+        let defaults = default_controls();
+        assert_eq!(defaults.players.len(), 2, "两个玩家的表");
+        for action in ["move", "jump", "restart"] {
+            assert!(defaults.players[0].contains_key(action), "{action}");
+        }
+        let mut app = app();
+        app.prop("scene", Some(&level(None)));
+        run(&mut app, 20);
+        let ground = player(&mut app).0.y;
+        let mut rebound: Value = serde_json::from_str(include_str!("../controls.json")).unwrap();
+        rebound["players"][0]["jump"]["keys"] = json!(["KeyX"]);
+        app.prop("actions", Some(&rebound));
+        key(&mut app, "Space", true);
+        run(&mut app, 10);
+        assert!((player(&mut app).0.y - ground).abs() < 1.0, "空格不再是跳");
+        key(&mut app, "KeyX", true);
+        run(&mut app, 10);
+        assert!(player(&mut app).0.y > ground + 50.0, "改成 X 跳");
+    }
+
+    /// 地面上两个角色：`player` 和右边 100 处的 `player2`。
+    fn two_players() -> Value {
+        let mut scene = level(None);
+        scene["sprites"].as_array_mut().unwrap().push(json!({ "id": GUEST, "x": 100, "y": 16, "w": 24, "h": 32, "body": { "kind": "character", "friction": 0 } }));
+        scene
+    }
+
+    fn guest(app: &mut App) -> (Vec2, Vec2) {
+        let world = app.world_mut();
+        let (_, t, v) = world.query::<(&SceneId, &Transform2d, &Velocity)>().iter(world).find(|(id, ..)| id.0 == GUEST).unwrap();
+        (t.translation, v.linear)
+    }
+
+    #[test]
+    fn the_second_pad_moves_the_second_player() {
+        let mut app = app();
+        app.prop("scene", Some(&two_players()));
+        pad(&mut app, 0, &[], [0.0; 2]);
+        pad(&mut app, 1, &[], [0.0; 2]);
+        run(&mut app, 20);
+        let (first, second) = (player(&mut app).0, guest(&mut app).0);
+        pad(&mut app, 1, &["GamepadLeftStickRight"], [1.0, 0.0]);
+        run(&mut app, 30);
+        assert!(guest(&mut app).0.x > second.x + 50.0, "第二个手柄让第二个角色跑");
+        assert!((player(&mut app).0.x - first.x).abs() < 1.0, "第一个角色不动");
+        pad(&mut app, 1, &["GamepadA"], [0.0; 2]);
+        run(&mut app, 8);
+        assert!(guest(&mut app).0.y > second.y + 40.0, "第二个手柄的 A 让它跳");
+        assert!((player(&mut app).0.y - first.y).abs() < 1.0);
+        // 第一个手柄只管第一个角色
+        pad(&mut app, 1, &[], [0.0; 2]);
+        run(&mut app, 60);
+        let rest = guest(&mut app).0;
+        pad(&mut app, 0, &["GamepadLeft"], [0.0; 2]);
+        run(&mut app, 30);
+        assert!(player(&mut app).0.x < first.x - 50.0);
+        assert!((guest(&mut app).0.x - rest.x).abs() < 1.0);
+    }
+
+    #[test]
+    fn the_second_player_also_has_keys_and_comes_back_after_a_fall() {
+        let mut app = app();
+        let mut scene = level(Some((22, 24)));
+        // 第二个角色站在坑的左边
+        scene["sprites"].as_array_mut().unwrap().push(json!({ "id": GUEST, "x": 0, "y": 16, "w": 24, "h": 32, "body": { "kind": "character", "friction": 0 } }));
+        scene["sprites"][0]["x"] = json!(-200);
+        app.prop("scene", Some(&scene));
+        run(&mut app, 20);
+        let start = guest(&mut app).0;
+        key(&mut app, "KeyH", true);
+        let fell = (0..180).any(|_| {
+            run(&mut app, 1);
+            guest(&mut app).0.y < -100.0
+        });
+        assert!(fell, "H 往右走进坑里");
+        key(&mut app, "KeyH", false);
+        let events = run(&mut app, 60);
+        assert!((guest(&mut app).0 - start).length() < 1.0, "回到出现的地方 {:?}", guest(&mut app));
+        assert!(events.iter().all(|(n, _)| n != "respawn"), "不算第一个玩家的失手");
+    }
+
+    fn rumbles(events: &[(String, Value)]) -> Vec<&Value> {
+        events.iter().filter(|(n, _)| n == "nge.rumble").map(|(_, e)| e).collect()
+    }
+
+    #[test]
+    fn landing_and_getting_hurt_rumble_the_first_players_pad() {
+        let mut app = app();
+        app.prop("scene", Some(&level(Some((22, 24)))));
+        pad(&mut app, 3, &[], [0.0; 2]);
+        let events = run(&mut app, 20);
+        assert!(rumbles(&events).is_empty(), "站着、刚开始不震");
+        // 跳一下再落地
+        key(&mut app, "Space", true);
+        let events = run(&mut app, 60);
+        key(&mut app, "Space", false);
+        let landed = rumbles(&events);
+        assert_eq!(landed.len(), 1, "落地震一下：{events:?}");
+        assert_eq!(landed[0]["pad"], json!(3), "第一个玩家的手柄");
+        // 掉进坑里：重一点
+        key(&mut app, "ArrowRight", true);
+        let mut events = Vec::new();
+        for _ in 0..120 {
+            events.extend(run(&mut app, 1));
+            if events.iter().any(|(n, _)| n == "respawn") {
+                break;
+            }
+        }
+        let hurt = rumbles(&events);
+        assert_eq!(hurt.len(), 1, "{events:?}");
+        assert!(hurt[0]["low"].as_f64().unwrap() > landed[0]["low"].as_f64().unwrap(), "受伤比落地重");
     }
 
     /// 地面上方一块 kinematic 平台（顶边 y = 100），角色站在上面；返回平台实体。

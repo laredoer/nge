@@ -3273,6 +3273,7 @@ name = "platformer"
 version = "0.1.0"
 dependencies = [
  "bevy_ecs",
+ "log",
  "nge-assets",
  "nge-audio",
  "nge-core",

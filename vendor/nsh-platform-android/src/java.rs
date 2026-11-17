@@ -36,6 +36,8 @@ pub(crate) struct Java {
     pub(crate) view_submit: JMethodID,
     pub(crate) view_report_error: JMethodID,
     pub(crate) view_read_asset: JMethodID,
+    /// `vibratePad(int, int, int, int)`（本仓库加的）：让手柄震动（任意线程）。
+    pub(crate) view_vibrate_pad: JMethodID,
     pub(crate) view_request_frame: JMethodID,
     /// `shaderFrame(int, ByteBuffer, int, int, boolean, float)`: a shader
     /// view's new frame, whether it replaces the view's children and the
@@ -124,6 +126,7 @@ pub(crate) fn init(vm: JavaVM) -> jni::errors::Result<()> {
         view_submit: env.get_method_id(view_class, "submit", "([B[Ljava/lang/Object;J)V")?,
         view_report_error: env.get_method_id(view_class, "reportError", "(Ljava/lang/String;)V")?,
         view_read_asset: env.get_method_id(view_class, "readAsset", "(Ljava/lang/String;)[B")?,
+        view_vibrate_pad: env.get_method_id(view_class, "vibratePad", "(IIII)V")?,
         view_request_frame: env.get_method_id(view_class, "requestJsFrame", "()V")?,
         view_shader_frame: env.get_method_id(
             view_class,

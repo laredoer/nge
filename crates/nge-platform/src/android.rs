@@ -7,7 +7,7 @@ use std::ffi::c_void;
 use std::ptr::NonNull;
 use std::sync::{Arc, Once};
 
-use nge_core::bridge::{GAMEPAD, GamepadInput, KEY, KEY_EVENT, KeyInput, SUSPEND, Suspend};
+use nge_core::bridge::{GAMEPAD, KEY, KEY_EVENT, KeyInput, PAD, RUMBLE_OUT, SUSPEND, Suspend};
 use nge_core::{Engine, GameFactory, Msg, wgpu};
 use nsh::{ComponentContext, ComponentFactory, Key, NativeComponent, Surface, register_component};
 use raw_window_handle::{AndroidDisplayHandle, DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawDisplayHandle, WindowHandle};
@@ -17,6 +17,7 @@ use crate::android_keys::{PadInput, from_gamepad, key_name, shortcut};
 use crate::android_state::{Pending, viewport};
 use crate::input::{self, CAPTURE_KEYS, capture_keys};
 use crate::pad;
+use crate::rumble::{amplitude, millis};
 use crate::shared::Proxy;
 
 /// 把游戏视图注册成 `nge.game` 组件。在应用的 `#[native_module]` 里调（生成的宿主不调组件注册函数）。
@@ -100,6 +101,8 @@ pub struct GameView {
     keys: BTreeSet<&'static str>,
     /// 手柄：按钮和轴合起来。
     pads: PadInput,
+    /// 每个手柄上次发出去的状态（按设备的那条路，见 docs/input-actions.md）。
+    devices: pad::Devices,
     /// 画面没了时停过游戏（声音），回来时恢复。
     suspended: bool,
 }
@@ -122,6 +125,7 @@ impl GameView {
             capture: None,
             keys: BTreeSet::new(),
             pads: PadInput::default(),
+            devices: pad::Devices::default(),
             suspended: false,
         }
     }
@@ -142,7 +146,16 @@ impl GameView {
     /// 第一次有画面：起引擎，把攒着的消息发过去。
     fn start(&mut self, surface: wgpu::Surface<'static>) {
         let ctx = self.ctx.clone();
-        let emit = Box::new(move |n: &str, d| ctx.emit(n, d));
+        // 引擎发的震动不交给 NSH，直接让手柄震（渲染线程上调 Java）
+        let emit = Box::new(move |n: &str, d: JsonValue| {
+            if n != RUMBLE_OUT.name() {
+                return ctx.emit(n, d);
+            }
+            match RUMBLE_OUT.decode(&d) {
+                Ok(r) => ctx.vibrate_pad(r.pad.map(|id| id as i32), amplitude(r.low), amplitude(r.high), millis(r.duration)),
+                Err(e) => log::warn!("{e}"),
+            }
+        });
         match Engine::spawn(self.instance.clone(), surface, emit, self.factory.clone(), Box::new(())) {
             Ok(engine) => {
                 let proxy = Proxy::new(engine, true);
@@ -171,6 +184,17 @@ impl GameView {
         }
         let changes = self.pads.clear();
         self.forward_pads(changes);
+        // 手柄还算连着，只是都松开了
+        for input in self.devices.release() {
+            self.send(Msg::Command(PAD.name().to_owned(), PAD.encode(&input)));
+        }
+    }
+
+    /// 设备 `device` 的状态变了：按设备发一份（第一次就是接入）。
+    fn forward_device(&mut self, device: i32) {
+        if let Some(input) = self.devices.set(device as u32, self.pads.state(device)) {
+            self.send(Msg::Command(PAD.name().to_owned(), PAD.encode(&input)));
+        }
     }
 
     /// 停下、恢复游戏（声音）：渲染线程停着也当场处理。
@@ -191,8 +215,8 @@ impl GameView {
         for code in changes.pressed {
             self.forward(code, true, false);
         }
-        if let (Some([left, right]), Some(proxy)) = (changes.sticks, &self.proxy) {
-            proxy.command(GAMEPAD.name(), &GAMEPAD.encode(&GamepadInput { left, right }));
+        if let (Some(analog), Some(proxy)) = (changes.analog, &self.proxy) {
+            proxy.command(GAMEPAD.name(), &GAMEPAD.encode(&analog.input()));
         }
     }
 }
@@ -264,6 +288,7 @@ impl NativeComponent for GameView {
             // 手柄的键总是给游戏（不然 B 会被系统当成返回）；自动重复、轴那边已经按着的不再发
             let changes = self.pads.button(key.device, code, key.down);
             self.forward_pads(changes);
+            self.forward_device(key.device);
             return true;
         }
         let facts = input::Facts {
@@ -285,6 +310,7 @@ impl NativeComponent for GameView {
     fn motion(&mut self, device: i32, axes: &[f32]) -> bool {
         let changes = self.pads.motion(device, axes);
         self.forward_pads(changes);
+        self.forward_device(device);
         true
     }
 
@@ -293,6 +319,9 @@ impl NativeComponent for GameView {
             Some(device) => {
                 let changes = self.pads.remove(device);
                 self.forward_pads(changes);
+                if let Some(input) = self.devices.remove(device as u32) {
+                    self.send(Msg::Command(PAD.name().to_owned(), PAD.encode(&input)));
+                }
             }
             None => self.release_input(),
         }

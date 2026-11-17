@@ -8,7 +8,7 @@ use std::ptr::NonNull;
 use std::rc::{Rc, Weak};
 
 use block2::RcBlock;
-use nge_core::bridge::{GAMEPAD, GamepadInput, KEY, KEY_EVENT, KeyInput};
+use nge_core::bridge::{GAMEPAD, KEY, KEY_EVENT, KeyInput, PAD, PadInput};
 use nge_core::{Engine, GameFactory, Viewport, create_surface};
 use nsh_platform_macos::{ComponentContext, ComponentFactory, NativeComponent};
 use objc2::rc::Retained;
@@ -21,7 +21,7 @@ use raw_window_handle::{AppKitDisplayHandle, AppKitWindowHandle, RawDisplayHandl
 use serde_json::{Value as JsonValue, json};
 
 use crate::input::{self, CAPTURE_KEYS, capture_keys};
-use crate::{gc, keys, pad};
+use crate::{gc, keys, pad, rumble};
 use crate::shared::Proxy;
 
 /// 把 `factory` 包成 NSH 原生组件工厂，注册到 `AppOptions.components`。
@@ -38,9 +38,14 @@ struct Shared {
     keys: RefCell<BTreeSet<&'static str>>,
     /// prop `captureKeys`：游戏要吞的键；`None` 时用 [`input::default_capture`]。
     capture: RefCell<Option<Vec<String>>>,
-    /// 上一帧按着的手柄键和摇杆。
+    /// 上一帧按着的手柄键、摇杆和扳机（几个手柄合起来的）。
     pad_keys: RefCell<BTreeSet<&'static str>>,
-    sticks: Cell<[[f32; 2]; 2]>,
+    analog: Cell<pad::Analog>,
+    /// 连着的手柄（编号、震动）和每个手柄上次发出去的状态。
+    pads: RefCell<gc::Pads>,
+    devices: RefCell<pad::Devices>,
+    /// 引擎要震的，每帧取出来放。
+    rumbles: rumble::Queue,
 }
 
 impl Shared {
@@ -75,7 +80,7 @@ impl Shared {
             if !self.keys.borrow().is_empty() {
                 self.release_keys();
             }
-            self.update_pads(&[]);
+            self.release_pads();
         }
     }
 
@@ -83,25 +88,51 @@ impl Shared {
     fn poll_pads(&self) {
         let key = self.view.window().is_some_and(|w| w.isKeyWindow());
         if key && !self.view.isHiddenOrHasHiddenAncestor() {
-            self.update_pads(&gc::read_pads());
+            let readings = self.pads.borrow_mut().read();
+            self.update_pads(&readings.iter().map(|(_, r)| *r).collect::<Vec<_>>());
+            let states = readings.iter().map(|(id, r)| (*id, r.state())).collect();
+            let changed = self.devices.borrow_mut().update(states);
+            self.forward_devices(changed);
         } else {
-            self.update_pads(&[]);
+            self.release_pads();
+        }
+    }
+
+    /// 手柄按着的全部松开、摇杆归零；手柄还算连着。
+    fn release_pads(&self) {
+        self.update_pads(&[]);
+        let released = self.devices.borrow_mut().release();
+        self.forward_devices(released);
+    }
+
+    /// 每个手柄各自的状态（按设备的那条路）。
+    fn forward_devices(&self, changed: Vec<PadInput>) {
+        let Some(proxy) = &self.proxy else { return };
+        for input in changed {
+            proxy.command(PAD.name(), &PAD.encode(&input));
+        }
+    }
+
+    /// 引擎要震的手柄。
+    fn play_rumbles(&self) {
+        for rumble in self.rumbles.take() {
+            self.pads.borrow_mut().rumble(&rumble);
         }
     }
 
     fn update_pads(&self, readings: &[pad::Reading]) {
-        let (now, sticks) = pad::merge(readings);
-        let changes = pad::diff(&self.pad_keys.borrow(), &now, self.sticks.get(), sticks);
+        let (now, analog) = pad::merge(readings);
+        let changes = pad::diff(&self.pad_keys.borrow(), &now, self.analog.get(), analog);
         *self.pad_keys.borrow_mut() = now;
-        self.sticks.set(sticks);
+        self.analog.set(analog);
         for code in changes.released {
             self.forward(code, false, false);
         }
         for code in changes.pressed {
             self.forward(code, true, false);
         }
-        if let (Some([left, right]), Some(proxy)) = (changes.sticks, &self.proxy) {
-            proxy.command(GAMEPAD.name(), &GAMEPAD.encode(&GamepadInput { left, right }));
+        if let (Some(analog), Some(proxy)) = (changes.analog, &self.proxy) {
+            proxy.command(GAMEPAD.name(), &GAMEPAD.encode(&analog.input()));
         }
     }
 
@@ -163,7 +194,7 @@ define_class!(
             self.set_in_window(false);
             if let Some(shared) = self.ivars().get().and_then(Weak::upgrade) {
                 shared.release_keys();
-                shared.update_pads(&[]);
+                shared.release_pads();
             }
             let _: () = unsafe { msg_send![super(self), viewWillMoveToWindow: window] };
         }
@@ -182,7 +213,7 @@ define_class!(
         fn view_did_hide(&self) {
             let _: () = unsafe { msg_send![super(self), viewDidHide] };
             if let Some(shared) = self.ivars().get().and_then(Weak::upgrade) {
-                shared.update_pads(&[]);
+                shared.release_pads();
             }
         }
 
@@ -220,6 +251,7 @@ define_class!(
             let shared = self.ivars();
             shared.check_focus();
             shared.poll_pads();
+            shared.play_rumbles();
             if let Some(proxy) = &shared.proxy {
                 proxy.tick(shared.viewport());
             }
@@ -247,13 +279,15 @@ impl GameView {
         let view = HostView::new(mtm);
         view.setWantsLayer(true);
 
+        let rumbles = rumble::Queue::default();
         let window = RawWindowHandle::AppKit(AppKitWindowHandle::new(NonNull::from(&*view).cast()));
         let display = RawDisplayHandle::AppKit(AppKitDisplayHandle::new());
         // SAFETY: view 由 Shared 持有，且 Shared 先释放 proxy（Engine）再释放 view
         let proxy = match unsafe { create_surface(window, display) } {
             Ok((instance, surface)) => {
                 let emit_ctx = ctx.clone();
-                let emit = Box::new(move |n: &str, d| emit_ctx.emit(n, d));
+                // 引擎发的震动截下来，不交给 NSH
+                let emit = rumbles.wrap(Box::new(move |n: &str, d| emit_ctx.emit(n, d)));
                 match Engine::spawn(instance, surface, emit, factory, Box::new(view.clone())) {
                     Ok(engine) => Some(Proxy::new(engine, true)),
                     Err(e) => {
@@ -269,7 +303,18 @@ impl GameView {
                 None
             }
         };
-        let shared = Rc::new(Shared { proxy, view, ctx, keys: RefCell::default(), capture: RefCell::default(), pad_keys: RefCell::default(), sticks: Cell::default() });
+        let shared = Rc::new(Shared {
+            proxy,
+            view,
+            ctx,
+            keys: RefCell::default(),
+            capture: RefCell::default(),
+            pad_keys: RefCell::default(),
+            analog: Cell::default(),
+            pads: RefCell::default(),
+            devices: RefCell::default(),
+            rumbles,
+        });
         let _ = shared.view.ivars().set(Rc::downgrade(&shared));
 
         let ticker = Ticker::new(mtm, shared.clone());

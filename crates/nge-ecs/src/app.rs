@@ -8,10 +8,11 @@ use bevy_ecs::prelude::*;
 use bevy_ecs::schedule::{IntoScheduleConfigs, ScheduleLabel};
 use bevy_ecs::system::ScheduleSystem;
 use glam::Vec2;
-use nge_core::bridge::{GAMEPAD, KEY, SUSPEND, TOUCH};
+use nge_core::bridge::{ACTIONS_PROP, GAMEPAD, KEY, PAD, RUMBLE, SUSPEND, TOUCH};
 use nge_core::{Ctx, FrameTiming, Game, GameFactory, Gfx, Viewport, wgpu};
 use serde_json::Value as JsonValue;
 
+use crate::actions::{ActionMap, Actions, Rumble, flush_rumble, update_actions};
 use crate::input::Input;
 use crate::perf::Perf;
 use crate::render::{ClearColor, Interleave, RenderFrame};
@@ -89,6 +90,8 @@ impl App {
         world.init_resource::<Props>();
         world.init_resource::<Outbox>();
         world.init_resource::<Input>();
+        world.init_resource::<Actions>();
+        world.init_resource::<Rumble>();
         world.init_resource::<ClearColor>();
         world.init_resource::<RenderFrame>();
         world.init_resource::<Interleave>();
@@ -110,6 +113,8 @@ impl App {
             started: false,
         };
         app.add_message::<NshCommand>();
+        // 动作在游戏逻辑之前算好；要震的帧末发给平台层
+        app.add_systems(PreUpdate, update_actions).add_systems(Last, flush_rumble);
         app
     }
 
@@ -193,7 +198,7 @@ impl App {
         self
     }
 
-    /// 收到 NSH 的 command：触摸、按键和手柄摇杆进 Input，注册过的变成类型化消息，其余变成 [`NshCommand`]。
+    /// 收到 NSH 的 command：触摸、按键、手柄（合并的摇杆扳机、每个手柄的状态）进 Input，震动进 [`Rumble`]，注册过的变成类型化消息，其余变成 [`NshCommand`]。
     pub fn command(&mut self, name: &str, args: &JsonValue) {
         if name == TOUCH.name() {
             match TOUCH.decode(args) {
@@ -207,7 +212,22 @@ impl App {
             }
         } else if name == GAMEPAD.name() {
             match GAMEPAD.decode(args) {
-                Ok(g) => self.world.resource_mut::<Input>().sticks(g.left, g.right),
+                Ok(g) => {
+                    let mut input = self.world.resource_mut::<Input>();
+                    input.sticks(g.left, g.right);
+                    input.triggers(g.l2, g.r2);
+                }
+                Err(e) => log::warn!("{e}"),
+            }
+        } else if name == PAD.name() {
+            match PAD.decode(args) {
+                Ok(p) if p.connected => self.world.resource_mut::<Input>().pad_state(p.id, &p.keys, p.left, p.right, p.l2, p.r2),
+                Ok(p) => self.world.resource_mut::<Input>().pad_removed(p.id),
+                Err(e) => log::warn!("{e}"),
+            }
+        } else if name == RUMBLE.name() {
+            match RUMBLE.decode(args) {
+                Ok(r) => self.world.resource_mut::<Rumble>().play(r.player, r.low, r.high, r.duration),
                 Err(e) => log::warn!("{e}"),
             }
         } else if name == SUSPEND.name() {
@@ -232,6 +252,14 @@ impl App {
             Some(v) => props.0.insert(name.to_owned(), v.clone()),
             None => props.0.remove(name),
         };
+        if name == ACTIONS_PROP {
+            // 去掉 prop、坏的表：原来的绑定留着
+            match value.map(|v| serde_json::from_value::<ActionMap>(v.clone())) {
+                Some(Ok(map)) => self.world.resource_mut::<Actions>().set_map(map),
+                Some(Err(e)) => log::warn!("prop {ACTIONS_PROP} 解析失败: {e}"),
+                None => {}
+            }
+        }
         if let Some(handler) = self.props.get(name) {
             handler(&mut self.world, value);
         }
@@ -514,6 +542,21 @@ mod tests {
         assert_eq!((input.stick(Stick::Left), input.stick(Stick::Right)), (Vec2::new(0.5, -0.5), Vec2::new(0.0, 1.0)), "摇杆是状态，不在帧末清掉");
         app.command("gamepad", &json!({ "left": "nope" }));
         assert_eq!(app.world().resource::<Input>().stick(Stick::Left), Vec2::new(0.5, -0.5), "坏的命令丢掉");
+    }
+
+    #[test]
+    fn pad_states_and_triggers_go_to_input() {
+        use crate::input::Trigger;
+        let mut app = App::new();
+        app.command("pad", &json!({ "id": 2, "keys": ["GamepadX"], "l2": 0.5 }));
+        app.command("gamepad", &json!({ "left": [0.0, 0.0], "r2": 0.75 }));
+        let input = app.world().resource::<Input>();
+        assert!(input.pad(2).is_some_and(|p| p.key_down("GamepadX") && p.trigger(Trigger::L2) == 0.5));
+        assert_eq!(input.trigger(Trigger::R2), 0.75);
+        app.command("pad", &json!({ "keys": [] }));
+        assert_eq!(app.world().resource::<Input>().pads().count(), 1, "坏的命令丢掉");
+        app.command("pad", &json!({ "id": 2, "connected": false }));
+        assert!(app.world().resource::<Input>().pad(2).is_none());
     }
 
     #[derive(Message)]

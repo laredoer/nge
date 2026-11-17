@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 use std::ptr::NonNull;
 use std::rc::{Rc, Weak};
 
-use nge_core::bridge::{GAMEPAD, GamepadInput, KEY, KEY_EVENT, KeyInput};
+use nge_core::bridge::{GAMEPAD, KEY, KEY_EVENT, KeyInput, PAD, PadInput};
 use nge_core::{Engine, GameFactory, Viewport, create_surface};
 use nsh_platform_ios::{ComponentContext, ComponentFactory, NativeComponent};
 use objc2::rc::Retained;
@@ -20,7 +20,7 @@ use raw_window_handle::{RawDisplayHandle, RawWindowHandle, UiKitDisplayHandle, U
 use serde_json::{Value as JsonValue, json};
 
 use crate::shared::Proxy;
-use crate::{gc, hid, pad};
+use crate::{gc, hid, pad, rumble};
 
 /// 把 `factory` 包成 NSH 原生组件工厂，注册到宿主的 `Components`。
 pub fn component(factory: GameFactory) -> ComponentFactory {
@@ -77,9 +77,14 @@ struct Shared {
     ctx: ComponentContext,
     /// 转发过的硬件键盘按键。
     keyboard: RefCell<hid::Keyboard>,
-    /// 上一帧按着的手柄键和摇杆。
+    /// 上一帧按着的手柄键、摇杆和扳机（几个手柄合起来的）。
     pad_keys: RefCell<BTreeSet<&'static str>>,
-    sticks: Cell<[[f32; 2]; 2]>,
+    analog: Cell<pad::Analog>,
+    /// 连着的手柄（编号、震动）和每个手柄上次发出去的状态。
+    pads: RefCell<gc::Pads>,
+    devices: RefCell<pad::Devices>,
+    /// 引擎要震的，每帧取出来放。
+    rumbles: rumble::Queue,
 }
 
 thread_local! {
@@ -141,13 +146,31 @@ impl Shared {
         let mut keys = BTreeSet::new();
         gc::read_keyboard(&mut keys);
         self.update_keyboard(&keys);
-        self.update_pads(&gc::read_pads());
+        let readings = self.pads.borrow_mut().read();
+        self.update_pads(&readings.iter().map(|(_, r)| *r).collect::<Vec<_>>());
+        let states = readings.iter().map(|(id, r)| (*id, r.state())).collect();
+        let changed = self.devices.borrow_mut().update(states);
+        self.forward_devices(changed);
+        for rumble in self.rumbles.take() {
+            self.pads.borrow_mut().rumble(&rumble);
+        }
     }
 
-    /// 按着的键、手柄全部补发松开，摇杆归零。
+    /// 按着的键、手柄全部补发松开，摇杆归零；手柄还算连着。这时候要震的不震了。
     fn release_input(&self) {
         self.update_keyboard(&BTreeSet::new());
         self.update_pads(&[]);
+        let released = self.devices.borrow_mut().release();
+        self.forward_devices(released);
+        self.rumbles.take();
+    }
+
+    /// 每个手柄各自的状态（按设备的那条路）。
+    fn forward_devices(&self, changed: Vec<PadInput>) {
+        let Some(proxy) = &self.proxy else { return };
+        for input in changed {
+            proxy.command(PAD.name(), &PAD.encode(&input));
+        }
     }
 
     fn update_keyboard(&self, now: &BTreeSet<&'static str>) {
@@ -158,18 +181,18 @@ impl Shared {
     }
 
     fn update_pads(&self, readings: &[pad::Reading]) {
-        let (now, sticks) = pad::merge(readings);
-        let changes = pad::diff(&self.pad_keys.borrow(), &now, self.sticks.get(), sticks);
+        let (now, analog) = pad::merge(readings);
+        let changes = pad::diff(&self.pad_keys.borrow(), &now, self.analog.get(), analog);
         *self.pad_keys.borrow_mut() = now;
-        self.sticks.set(sticks);
+        self.analog.set(analog);
         for code in changes.released {
             self.forward(code, false);
         }
         for code in changes.pressed {
             self.forward(code, true);
         }
-        if let (Some([left, right]), Some(proxy)) = (changes.sticks, &self.proxy) {
-            proxy.command(GAMEPAD.name(), &GAMEPAD.encode(&GamepadInput { left, right }));
+        if let (Some(analog), Some(proxy)) = (changes.analog, &self.proxy) {
+            proxy.command(GAMEPAD.name(), &GAMEPAD.encode(&analog.input()));
         }
     }
 
@@ -258,13 +281,15 @@ impl GameView {
         let mtm = MainThreadMarker::new().expect("原生组件必须在主线程创建");
         let view = HostView::new(mtm);
 
+        let rumbles = rumble::Queue::default();
         let window = RawWindowHandle::UiKit(UiKitWindowHandle::new(NonNull::from(&*view).cast()));
         let display = RawDisplayHandle::UiKit(UiKitDisplayHandle::new());
         // SAFETY: view 由 Shared 持有，且 Shared 先释放 proxy（Engine）再释放 view
         let proxy = match unsafe { create_surface(window, display) } {
             Ok((instance, surface)) => {
                 let emit_ctx = ctx.clone();
-                let emit = Box::new(move |n: &str, d| emit_ctx.emit(n, d));
+                // 引擎发的震动截下来，不交给 NSH
+                let emit = rumbles.wrap(Box::new(move |n: &str, d| emit_ctx.emit(n, d)));
                 match Engine::spawn(instance, surface, emit, factory, Box::new(view.clone())) {
                     Ok(engine) => Some(Proxy::new(engine, APP_ACTIVE.with(Cell::get))),
                     Err(e) => {
@@ -280,7 +305,17 @@ impl GameView {
                 None
             }
         };
-        let shared = Rc::new(Shared { proxy, view, ctx, keyboard: RefCell::default(), pad_keys: RefCell::default(), sticks: Cell::default() });
+        let shared = Rc::new(Shared {
+            proxy,
+            view,
+            ctx,
+            keyboard: RefCell::default(),
+            pad_keys: RefCell::default(),
+            analog: Cell::default(),
+            pads: RefCell::default(),
+            devices: RefCell::default(),
+            rumbles,
+        });
         let _ = shared.view.ivars().set(Rc::downgrade(&shared));
         LIVE.with(|live| {
             let mut live = live.borrow_mut();

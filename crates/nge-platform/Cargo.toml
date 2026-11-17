@@ -42,4 +42,4 @@ nge-audio.workspace = true
 wasm-bindgen.workspace = true
 wasm-bindgen-futures.workspace = true
 js-sys.workspace = true
-web-sys = { workspace = true, features = ["Window", "Document", "Element", "HtmlCanvasElement", "Navigator", "EventTarget", "Event", "CustomEvent", "CustomEventInit", "Response", "Headers", "KeyboardEvent", "PointerEvent"] }
+web-sys = { workspace = true, features = ["Window", "Document", "Element", "HtmlCanvasElement", "Navigator", "EventTarget", "Event", "CustomEvent", "CustomEventInit", "Response", "Headers", "KeyboardEvent", "PointerEvent", "Gamepad", "GamepadButton"] }

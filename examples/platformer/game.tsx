@@ -1,10 +1,13 @@
 import { batch, effect, keymap, type NativeComponentRef, platform, safeArea, signal, Text, View } from "nsh";
-import { floatText, gameView, httpClient, KeyButton, netRoom, push, saved, saveSlots, sound, tween, type Scene, type SpriteNode } from "../../ts/nge";
+import { Button } from "nsh/base";
+import { floatText, gameView, httpClient, inputMap, KeyButton, netRoom, push, saved, saveSlots, sound, tween, type ActionEvent, type Scene, type SpriteNode } from "../../ts/nge";
+import { DEFAULT_CONTROLS, guestSprite } from "./controls";
+import { RemapPanel } from "./remap";
 import { COIN_SHADER, FLASH, FLASH_MS, levelAudio, night, portalOver, POST, SHADERS, stonesNear } from "./effects";
 import { levelKey, otherLocale, strings } from "./strings";
 import { NEW_SAVE, nextSlot, SAVE_MIGRATIONS, SAVE_VERSION, saveDataOf, saveSummary, SLOTS } from "./savefile";
 import { hpBar, outOfHearts, padPlace, TITLE_HOLD_MS, titleBubble } from "./hud";
-import { boardOf, leaderOf, nameTags, NET_KEY, netLabel, netNode, netSetting, playerName, remotePlayers, scoresUrl, submitUrl, type Leader } from "./online";
+import { boardOf, leaderOf, nameTags, netLabel, netNode, netSetting, playerName, remotePlayers, scoresUrl, submitUrl, type Leader } from "./online";
 import { campfireAt, finish, flagOn, JELLY_ZONE, jellyAt, LEVELS, TILE, TOWER_TRIGGER, towerAt, towerSpot, type Built, type Progress } from "./levels";
 
 /** Rust 发的事件：掉出关卡或被敌人撞到送回起点、按 R 重新开始、踩到敌人。 */
@@ -62,6 +65,13 @@ export function Game(props: GameProps = {}) {
   const chosenLang = saved<string | null>("lang", null);
   effect(() => lang.setLocale(chosenLang()));
   let game: NativeComponentRef | undefined;
+  /** 操作（见 docs/input-actions.md）：绑定存在设备上，引擎按它算动作；改键面板按 K 开关。 */
+  const input = inputMap({ key: "platformer", defaults: DEFAULT_CONTROLS });
+  const remapping = signal(false);
+  const closeRemap = () => {
+    input.cancel();
+    remapping.set(false);
+  };
   /** 第几关（从 0 数）、第几次开始：选同一关也算新的一局，引擎照样重建。 */
   /** 局数从启动时间起数：开发时只重载 JS、引擎还留着时，第一局的 level 也和上次不同，照样换关。 */
   const current = signal({ index: 0, round: Date.now() });
@@ -241,6 +251,8 @@ export function Game(props: GameProps = {}) {
       ...(levels[level()].night ? stonesNear(3 * TILE) : []),
       ...remotePlayers(room.peers()),
       { id: "player", x: now().spawn[0], y: now().spawn[1], w: 24, h: 32, z: 5, color: "#ff7a59", body: { kind: "character", friction: 0, collide: true }, ...(flashing() ? FLASH : {}) },
+      // 第二个手柄接入时多一个角色，拔掉就去掉
+      ...(input.padOf(1) === null ? [] : [guestSprite(now().spawn)]),
       // 金币自己发光，夜里也不暗
       ...now().coins.filter((c) => !taken().includes(c.id)).map(
         (c): SpriteNode => ({ id: c.id, x: c.x, y: c.y, w: 14, z: 2, rotation: 45, color: "#ffd93d", body: { kind: "fixed", sensor: true }, ...COIN_SHADER, unlit: true }),
@@ -293,6 +305,17 @@ export function Game(props: GameProps = {}) {
         class="flex-1"
         ref={(n: NativeComponentRef) => (game = n)}
         scene={scene()}
+        actions={input.prop()}
+        onPad={input.handlePad}
+        onAction={(e: ActionEvent) => {
+          input.handle(e);
+          if (!e.down || e.player !== 0) return;
+          if (e.action === "remap") return remapping() ? closeRemap() : remapping.set(true);
+          if (trial !== undefined) return;
+          if (e.action === "slot") return pick(nextSlot(target));
+          if (e.action === "lang") return chosenLang.set(otherLocale(lang.locale()));
+          if (e.action === "net") return online.toggle();
+        }}
         onLevelStart={(e) => {
           // 连着选了两次关：前一次的 levelStart 晚到，不算
           if (e.level !== levelId()) return;
@@ -328,14 +351,13 @@ export function Game(props: GameProps = {}) {
           }
         }}
         onKey={(e) => {
+          // 正在等按键来绑：这次按键拿去绑了
+          if (input.handleKey(e)) return;
           if (trial !== undefined) {
             if (e.down && e.code === "Escape") props.onExit?.();
             return;
           }
-          if (e.down && !e.repeat && e.code === "KeyS") return pick(nextSlot(target));
-          if (e.down && !e.repeat && e.code === "KeyL") return chosenLang.set(otherLocale(lang.locale()));
-          if (e.down && !e.repeat && e.code === NET_KEY) return online.toggle();
-          // Digit1 … Digit9：选已经解锁的关
+          // 换存档、语言、联网是动作（onAction）；Digit1 … Digit9：选已经解锁的关
           const n = /^Digit([1-9])$/.exec(e.code)?.[1];
           if (!e.down || e.repeat || n === undefined) return;
           const index = Number(n) - 1;
@@ -381,6 +403,10 @@ export function Game(props: GameProps = {}) {
         }}
       />
       {platform.desktop ? null : <TouchPad game={() => game} />}
+      <Button testID="remap-open" class="absolute right-4 rounded bg-white/20 px-3 py-1 active:bg-white/40" style={{ top: safeArea().top + 40 }} onPress={() => (remapping() ? closeRemap() : remapping.set(true))}>
+        <Text class="text-white text-sm">{t("remapOpen")}</Text>
+      </Button>
+      {remapping() ? <RemapPanel input={input} t={t} onClose={closeRemap} /> : null}
     </View>
   );
 }

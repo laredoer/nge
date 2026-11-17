@@ -94,7 +94,7 @@ wasm32 上没有线程、`std::time::Instant::now` 会 panic、主线程不能�
 - Web Worker + OffscreenCanvas（要 SharedArrayBuffer 和 COOP / COEP 响应头，nsh 的 web 运行时不支持）；现在 NSH 布局、TSX、ECS、渲染、WebAudio 都在主线程上。
 - 资源按需加载：现在启动时一次取完，长坂坡全部资源不到 0.5 MB。
 - 给 DOM 的 HUD 打包中文字体。
-- 手柄、触屏按钮。
+- 触屏按钮。手柄后来加了（`navigator.getGamepads()`，标准布局），见 [input-actions.md](input-actions.md)。
 - `nsh run --target web` 的热更新。
 
 ## 验收

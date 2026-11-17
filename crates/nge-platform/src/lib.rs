@@ -12,8 +12,17 @@ mod hid;
 mod keys;
 #[cfg(any(target_os = "macos", target_arch = "wasm32", target_os = "android", test))]
 mod input;
-#[cfg(any(target_os = "macos", target_os = "ios", target_os = "android", test))]
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "android", target_arch = "wasm32", test))]
+// Android 按事件一个设备一个设备地更新、用系统的设备号，`Devices::update` 和 `Ids` 用不上
+#[cfg_attr(any(target_arch = "wasm32", target_os = "android"), allow(dead_code))]
 mod pad;
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "android", target_arch = "wasm32", test))]
+#[cfg_attr(not(test), allow(dead_code))]
+mod rumble;
+// 浏览器的手柄：纯函数，Mac 上也测
+#[cfg(any(target_arch = "wasm32", test))]
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+mod web_pad;
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 mod gc;
 #[cfg(target_os = "macos")]

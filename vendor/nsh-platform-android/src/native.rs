@@ -131,6 +131,22 @@ impl ComponentContext {
         bytes.ok_or_else(|| format!("读不到 {uri}"))
     }
 
+    /// 让手柄震动（`NshView.vibratePad`）：`device` 是 `InputDevice` 的号，`None` 是所有手柄；`low`、`high` 是
+    /// 低频、高频马达的振幅（0 … 255，0 不震），`millis` 毫秒。可以在任意线程上调。
+    pub fn vibrate_pad(&self, device: Option<i32>, low: i32, high: i32, millis: u32) {
+        let args = [device.unwrap_or(-1), low, high, i32::try_from(millis).unwrap_or(i32::MAX)].map(|v| JValue::Int(v).as_jni());
+        let done: Option<()> = with_env(|env| {
+            // SAFETY: 和 `java::init` 里查过的签名一致。
+            unsafe {
+                env.call_method_unchecked(self.host.view.as_obj(), java().view_vibrate_pad, ReturnType::Primitive(jni::signature::Primitive::Void), &args)
+            }?;
+            Ok(Some(()))
+        });
+        if done.is_none() {
+            log::warn!("手柄震动没发出去");
+        }
+    }
+
     /// 进程的 `JavaVM*`。
     pub fn java_vm(&self) -> *mut c_void {
         java().vm.get_java_vm_pointer().cast()

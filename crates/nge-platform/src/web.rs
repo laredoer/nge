@@ -5,6 +5,7 @@
 //! 页面被按键、点按时在事件回调里建音频设备（[`nge_audio::unlock`]），之前浏览器不让出声；
 //! 页面隐藏时挂起音频设备，回来时恢复（`web_audio.rs`）。
 //! 画布藏起来（大小是 0）时发空视口，引擎不更新也不画（`nge_core` 的 `phase.rs`）。
+//! 手柄每帧读一遍 `navigator.getGamepads()`（标准布局的），震动用 `vibrationActuator`（`web_pad.rs`，见 docs/input-actions.md）。
 
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
@@ -13,18 +14,18 @@ use std::sync::Arc;
 
 use nge_assets::MemorySource;
 
-use nge_core::bridge::{ENGINE_ERROR, EngineError, KEY, KEY_EVENT, KeyInput, READY as ENGINE_READY};
+use nge_core::bridge::{ENGINE_ERROR, EngineError, GAMEPAD, KEY, KEY_EVENT, KeyInput, PAD, PadInput, READY as ENGINE_READY, RUMBLE_OUT, RumbleOut};
 use nge_core::{Engine, GAME_COMPONENT, GameFactory, Msg, Viewport};
 use nsh_platform_web::{ComponentContext, ComponentFactory, NativeComponent};
 use serde_json::Value as JsonValue;
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
-use web_sys::{CustomEvent, CustomEventInit, Document, Element, HtmlCanvasElement, KeyboardEvent, PointerEvent, Response, Window};
+use web_sys::{CustomEvent, CustomEventInit, Document, Element, Gamepad, GamepadButton, HtmlCanvasElement, KeyboardEvent, PointerEvent, Response, Window};
 
 use crate::input::{self, CAPTURE_KEYS, capture_keys};
 use crate::loading::{self, ERROR, PROGRESS, READY};
-use crate::web_audio;
+use crate::{pad, web_audio, web_pad};
 
 /// 把游戏视图注册成 `nge.game` 组件。在应用的 `#[native_module]` 里调用（生成的 web 运行时只调用它）。
 /// `assets`：应用登记的资源（`assets!()` 的 uri），建游戏之前全部取进内存。
@@ -54,6 +55,51 @@ struct Shared {
     keys: RefCell<BTreeSet<&'static str>>,
     /// prop `captureKeys`：游戏要吞的键；`None` 时用 [`input::default_capture`]。
     capture: RefCell<Option<Vec<String>>>,
+    /// 上一帧按着的手柄键、摇杆和扳机（几个手柄合起来的），每个手柄上次发出去的状态。
+    pad_keys: RefCell<BTreeSet<&'static str>>,
+    analog: Cell<pad::Analog>,
+    devices: RefCell<pad::Devices>,
+}
+
+/// 这一帧连着的、标准布局的手柄的读数，号是 `Gamepad.index`。页面不让读（权限策略）时是空的。
+fn read_pads(window: &Window) -> Vec<(u32, pad::Reading)> {
+    gamepads(window)
+        .into_iter()
+        .map(|g| {
+            // 有的浏览器数字按钮只给 pressed，不给 value
+            let value = |b: GamepadButton| if b.value() == 0.0 && b.pressed() { 1.0 } else { b.value() as f32 };
+            let buttons: Vec<f32> = g.buttons().iter().map(|b| value(b.unchecked_into())).collect();
+            let axes: Vec<f32> = g.axes().iter().map(|a| a.as_f64().unwrap_or(0.0) as f32).collect();
+            (g.index(), web_pad::reading(&buttons, &axes))
+        })
+        .collect()
+}
+
+fn gamepads(window: &Window) -> Vec<Gamepad> {
+    let Ok(list) = window.navigator().get_gamepads() else { return Vec::new() };
+    let mapping = |g: &Gamepad| js_sys::Reflect::get(g, &"mapping".into()).ok().and_then(|m| m.as_string()).unwrap_or_default();
+    list.iter().filter_map(|g| g.dyn_into::<Gamepad>().ok()).filter(|g| web_pad::usable(&mapping(g), g.connected())).collect()
+}
+
+thread_local! {
+    /// 震不了时（页面没焦点、手柄不支持）`playEffect` 的 Promise 会拒绝：接住，不让控制台报没人处理的错。
+    static IGNORE: Closure<dyn FnMut(JsValue)> = Closure::new(|_| {});
+}
+
+/// 让手柄震一下（指定的那个，或者全部）；没有 `vibrationActuator` 的不震。
+fn rumble_pads(window: &Window, rumble: &RumbleOut) {
+    let effect = web_pad::effect(rumble);
+    for g in gamepads(window).into_iter().filter(|g| rumble.pad.is_none_or(|id| id == g.index())) {
+        let Ok(actuator) = js_sys::Reflect::get(&g, &"vibrationActuator".into()) else { continue };
+        let Ok(play) = js_sys::Reflect::get(&actuator, &"playEffect".into()).and_then(|f| f.dyn_into::<js_sys::Function>()) else { continue };
+        let params = js_sys::Object::new();
+        for (name, value) in [("startDelay", 0.0), ("duration", effect.duration_ms), ("strongMagnitude", effect.strong), ("weakMagnitude", effect.weak)] {
+            let _ = js_sys::Reflect::set(&params, &name.into(), &value.into());
+        }
+        if let Ok(promise) = play.call2(&actuator, &"dual-rumble".into(), &params).and_then(|p| p.dyn_into::<js_sys::Promise>()) {
+            IGNORE.with(|ignore| drop(promise.catch(ignore)));
+        }
+    }
 }
 
 impl Shared {
@@ -70,7 +116,52 @@ impl Shared {
         if viewport != self.viewport.replace(viewport) {
             engine.send(Msg::Viewport(viewport));
         }
+        self.poll_pads();
         engine.frame();
+    }
+
+    /// 每帧读一遍手柄；画布不在页面里、页面隐藏或没焦点时按「什么都没按」算。
+    fn poll_pads(&self) {
+        let document = self.document();
+        if !self.canvas.is_connected() || document.hidden() || !document.has_focus().unwrap_or(true) {
+            return self.release_pads();
+        }
+        let readings = read_pads(&self.window);
+        self.update_pads(&readings.iter().map(|(_, r)| *r).collect::<Vec<_>>());
+        let states = readings.iter().map(|(id, r)| (*id, r.state())).collect();
+        let changed = self.devices.borrow_mut().update(states);
+        self.forward_devices(changed);
+    }
+
+    /// 手柄按着的全部松开、摇杆归零；手柄还算连着。
+    fn release_pads(&self) {
+        self.update_pads(&[]);
+        let released = self.devices.borrow_mut().release();
+        self.forward_devices(released);
+    }
+
+    fn forward_devices(&self, changed: Vec<PadInput>) {
+        let Some(engine) = &self.engine else { return };
+        for input in changed {
+            engine.send(Msg::Command(PAD.name().to_owned(), PAD.encode(&input)));
+        }
+    }
+
+    /// 几个手柄合起来的那条路：按下、松开走 `key`，模拟量走 `gamepad`（和 macOS 一样）。
+    fn update_pads(&self, readings: &[pad::Reading]) {
+        let (now, analog) = pad::merge(readings);
+        let changes = pad::diff(&self.pad_keys.borrow(), &now, self.analog.get(), analog);
+        *self.pad_keys.borrow_mut() = now;
+        self.analog.set(analog);
+        for code in changes.released {
+            self.forward(code, false, false);
+        }
+        for code in changes.pressed {
+            self.forward(code, true, false);
+        }
+        if let (Some(analog), Some(engine)) = (changes.analog, &self.engine) {
+            engine.send(Msg::Command(GAMEPAD.name().to_owned(), GAMEPAD.encode(&analog.input())));
+        }
     }
 
     fn forward(&self, code: &'static str, down: bool, repeat: bool) {
@@ -165,6 +256,9 @@ impl GameView {
             ctx,
             keys: RefCell::default(),
             capture: RefCell::default(),
+            pad_keys: RefCell::default(),
+            analog: Cell::default(),
+            devices: RefCell::default(),
         });
         if shared.engine.is_some() {
             let weak = Rc::downgrade(&shared);
@@ -188,6 +282,14 @@ fn start(window: &Window, canvas: HtmlCanvasElement, ctx: &ComponentContext, fac
     let emit_ctx = ctx.clone();
     let page = window.clone();
     let emit = Box::new(move |n: &str, d: JsonValue| {
+        // 引擎发的震动不交给 NSH，直接让手柄震
+        if n == RUMBLE_OUT.name() {
+            match RUMBLE_OUT.decode(&d) {
+                Ok(rumble) => rumble_pads(&page, &rumble),
+                Err(e) => log::warn!("{e}"),
+            }
+            return;
+        }
         if n == ENGINE_ERROR.name() {
             dispatch(&page, ERROR, &d);
         } else if n == ENGINE_READY.name() {
@@ -309,6 +411,7 @@ fn window_listeners(shared: &Rc<Shared>) -> Vec<(&'static str, bool, Listener)> 
                 shared.on_key(key);
             } else if event.type_() == "blur" {
                 shared.release_keys();
+                shared.release_pads();
             }
         });
         if shared.window.add_event_listener_with_callback_and_bool(name, listener.as_ref().unchecked_ref(), capture).is_ok() {
@@ -326,6 +429,7 @@ fn visibility_listener(document: &Document, shared: Weak<Shared>) -> Option<Clos
         let Some(engine) = &shared.engine else { return };
         if doc.hidden() {
             shared.release_keys();
+            shared.release_pads();
             engine.pause();
             web_audio::suspend();
         } else {

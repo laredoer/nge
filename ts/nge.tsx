@@ -1,6 +1,7 @@
 // nge 的 TSX 绑定：<GameView> 组件和场景类型（和 crates/nge-scene 的协议一一对应）。
 import { nativeComponent, signal, Storage, Text, untracked, View, type GestureResponderEvent, type NativeComponentProps, type NativeComponentRef, type Signal } from "nsh";
 import type { HttpReply } from "./http";
+import type { ActionEvent, ActionMap, PadEvent } from "./input";
 import type { NetEvent, NetNode } from "./net";
 
 /** 一个精灵。坐标是世界坐标（point，y 朝上，原点在视口中心），角度用度（逆时针）。 */
@@ -717,6 +718,19 @@ export function floatText(game: NativeComponentRef | undefined, args: FloatText)
   game?.command("floatText", args);
 }
 
+/** 手柄震动：第 `player` 个玩家（不填是第一个）的手柄，`low` 低频（重）马达、`high` 高频（轻）马达的强度 0 … 1，`duration` 秒（不填 0.2，最多 5）。 */
+export interface RumbleArgs {
+  player?: number;
+  low?: number;
+  high?: number;
+  duration?: number;
+}
+
+/** 让手柄震一下（见 docs/input-actions.md）；没有手柄、手柄不会震时什么都不发生。 */
+export function rumble(game: NativeComponentRef | undefined, args: RumbleArgs) {
+  game?.command("rumble", args);
+}
+
 /** 发一次按键给引擎，和键盘、手柄一样进 `Input`（见 docs/touch-controls.md）。 */
 export function key(game: NativeComponentRef | undefined, code: string, down: boolean) {
   game?.command("key", { code, down, repeat: false });
@@ -783,6 +797,8 @@ interface BuiltinProps {
    * 不填时是字母、数字、方向键、Space、Enter；用到别的键（如 Esc 暂停）要自己列上，不然 NSH 不处理时会「咚」一声。
    */
   captureKeys: string[];
+  /** 动作的绑定表（`inputMap().prop()`，见 docs/input-actions.md）：引擎按它算动作的状态，Rust 用 `Actions` 问，TSX 收 `action` 事件。 */
+  actions: ActionMap;
   /** Android：锁住屏幕方向（跟着传感器转 180°），游戏视图没了时放开。不填时跟着系统转。别的平台不管。 */
   screenOrientation: "landscape" | "portrait";
 }
@@ -793,6 +809,10 @@ interface BuiltinEvents {
   animEnd: AnimEnd;
   tweenEnd: TweenEnd;
   key: KeyInput;
+  /** 动作变了：按钮按下 / 松开，轴的方向变了。 */
+  action: ActionEvent;
+  /** 手柄接入、拔出、换了玩家。 */
+  pad: PadEvent;
   /** 换关（场景的 `level` 换了值）后新关卡的实体建好了：要对新关卡发的命令（补间等）在这里发。 */
   levelStart: { level: string };
   chase: ChaseEvent;
@@ -814,14 +834,14 @@ export type GameViewProps<P, E> = NativeComponentProps<Partial<BuiltinProps> & P
 
 /**
  * 生成游戏视图组件。`props` / `events` 是游戏自己的通道名（Rust 侧 `add_prop` / `add_state` / `add_event`），
- * 类型由泛型给出；内置 prop `scene`、事件 `tap` / `collide` / `animEnd` / `tweenEnd` / `key` / `levelStart` / `chase` / `typed` / `fps` / `error` / `ready` / `net` / `http`，触摸自动转成引擎的 `touch` command。
+ * 类型由泛型给出；内置 prop `scene` / `actions`、事件 `tap` / `collide` / `animEnd` / `tweenEnd` / `key` / `action` / `pad` / `levelStart` / `chase` / `typed` / `fps` / `error` / `ready` / `net` / `http`，触摸自动转成引擎的 `touch` command。
  */
 export function gameView<P extends object = {}, E extends object = {}>(
   spec: { props?: readonly (keyof P & string)[]; events?: readonly (keyof E & string)[] } = {},
 ) {
   const Native = nativeComponent<BuiltinProps & P, BuiltinEvents & E>("nge.game", {
-    props: [...new Set(["scene", "captureKeys", "screenOrientation", ...(spec.props ?? [])])] as (keyof (BuiltinProps & P) & string)[],
-    events: [...new Set(["tap", "collide", "animEnd", "tweenEnd", "key", "levelStart", "chase", "typed", "fps", "error", "ready", "net", "http", ...(spec.events ?? [])])] as (keyof (BuiltinEvents & E) & string)[],
+    props: [...new Set(["scene", "captureKeys", "actions", "screenOrientation", ...(spec.props ?? [])])] as (keyof (BuiltinProps & P) & string)[],
+    events: [...new Set(["tap", "collide", "animEnd", "tweenEnd", "key", "action", "pad", "levelStart", "chase", "typed", "fps", "error", "ready", "net", "http", ...(spec.events ?? [])])] as (keyof (BuiltinEvents & E) & string)[],
   });
 
   return (props: GameViewProps<P, E>) => {
@@ -858,6 +878,8 @@ export { i18n, missing, plural, resolveLocale, type I18n, type I18nOptions, type
 // 联网见 docs/networking.md
 export { netRoom, netSend, relayHttp, remoteId, type NetEvent, type NetNode, type NetPeer, type NetRoom, type NetStatus } from "./net";
 export { httpClient, json, type HttpClient, type HttpOptions, type HttpReply, type HttpResult } from "./http";
+// 输入映射见 docs/input-actions.md
+export { bindingsOf, conflictsOf, inputMap, keyAt, slotsOf, withKey, type ActionEvent, type ActionMap, type AnalogAxis, type AnalogStick, type Binding, type Bindings, type InputMap, type InputMapOptions, type InputStore, type PadEvent, type Part, type PendingBind, type Slot } from "./input";
 // 存档槽见 docs/saves.md
 export { saveSlots, type LoadResult, type SaveSlots, type SaveSlotsOptions, type SaveStore, type SlotInfo } from "./saves";
 

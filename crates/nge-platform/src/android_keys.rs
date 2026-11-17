@@ -95,6 +95,11 @@ impl Pads {
     pub fn readings(&self) -> Vec<Reading> {
         self.0.values().copied().collect()
     }
+
+    /// 设备 `device` 最近一次的轴；没来过事件的是全 0。
+    pub fn reading(&self, device: i32) -> Reading {
+        self.0.get(&device).copied().unwrap_or_default()
+    }
 }
 
 /// 手柄的按钮（按键事件）和轴合起来：两路来的同一个键（扳机的 L2 / R2、十字键）只算一次。
@@ -102,9 +107,9 @@ impl Pads {
 pub struct PadInput {
     buttons: BTreeMap<i32, BTreeSet<&'static str>>,
     pads: Pads,
-    /// 转发过的：按着的键名和摇杆。
+    /// 转发过的：按着的键名、摇杆和扳机。
     held: BTreeSet<&'static str>,
-    sticks: [[f32; 2]; 2],
+    analog: pad::Analog,
 }
 
 impl PadInput {
@@ -139,12 +144,19 @@ impl PadInput {
         self.changes()
     }
 
+    /// 设备 `device` 自己的状态：轴的读数加上它按着的按钮（按设备发，见 docs/input-actions.md）。
+    pub fn state(&self, device: i32) -> pad::State {
+        let mut state = self.pads.reading(device).state();
+        state.keys.extend(self.buttons.get(&device).into_iter().flatten().copied());
+        state
+    }
+
     fn changes(&mut self) -> pad::Changes {
-        let (mut now, sticks) = pad::merge(&self.pads.readings());
+        let (mut now, analog) = pad::merge(&self.pads.readings());
         now.extend(self.buttons.values().flatten().copied());
-        let changes = pad::diff(&self.held, &now, self.sticks, sticks);
+        let changes = pad::diff(&self.held, &now, self.analog, analog);
         self.held = now;
-        self.sticks = sticks;
+        self.analog = analog;
         changes
     }
 }
@@ -263,13 +275,28 @@ mod tests {
         pads.button(2, "GamepadB", true);
         let c = pads.motion(1, &axes(&[(0, -1.0)]));
         assert_eq!(c.pressed, ["GamepadLeftStickLeft"]);
-        assert_eq!(c.sticks, Some([[-1.0, 0.0], [0.0, 0.0]]));
+        assert_eq!(c.analog.map(|a| a.sticks), Some([[-1.0, 0.0], [0.0, 0.0]]));
         let c = pads.remove(1);
         assert_eq!(c.released, ["GamepadA", "GamepadLeftStickLeft"], "拔掉的手柄松开");
-        assert_eq!(c.sticks, Some([[0.0; 2]; 2]), "摇杆归零");
+        assert_eq!(c.analog.map(|a| a.sticks), Some([[0.0; 2]; 2]), "摇杆归零");
         let c = pads.clear();
         assert_eq!(c.released, ["GamepadB"], "失焦：全部松开");
         assert!(pads.clear().released.is_empty());
+    }
+
+    #[test]
+    fn each_device_has_its_own_state_from_buttons_and_axes() {
+        let mut pads = PadInput::default();
+        pads.button(1, "GamepadA", true);
+        pads.button(2, "GamepadL2", true);
+        pads.motion(1, &axes(&[(0, -1.0), (7, 0.25)]));
+        let one = pads.state(1);
+        assert_eq!(one.keys.iter().copied().collect::<Vec<_>>(), ["GamepadA", "GamepadLeftStickLeft"], "按钮和轴合起来");
+        assert_eq!((one.analog.sticks[0], one.analog.triggers), ([-1.0, 0.0], [0.0, 0.25]));
+        let two = pads.state(2);
+        assert_eq!(two.keys.iter().copied().collect::<Vec<_>>(), ["GamepadL2"], "别的手柄的不混进来");
+        assert_eq!(two.analog, crate::pad::Analog::default(), "只有按键事件的扳机没有模拟量");
+        assert!(pads.state(9).keys.is_empty());
     }
 
     #[test]

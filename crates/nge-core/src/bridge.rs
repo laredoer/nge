@@ -25,6 +25,18 @@ pub const KEY: CommandKey<KeyInput> = CommandKey::new("key");
 pub const KEY_EVENT: EventKey<KeyInput> = EventKey::new("key");
 /// 内置：手柄摇杆的模拟量（Mac），平台层在值变了时发给游戏；按钮走 [`KEY`]。
 pub const GAMEPAD: CommandKey<GamepadInput> = CommandKey::new("gamepad");
+/// 内置（平台层发）：一个手柄的整份状态，变了才发；第一次发就是接入（见 docs/input-actions.md）。
+pub const PAD: CommandKey<PadInput> = CommandKey::new("pad");
+/// 内置：TSX 让手柄震动；引擎按玩家找到手柄，换成 [`RUMBLE_OUT`]。
+pub const RUMBLE: CommandKey<RumbleRequest> = CommandKey::new("rumble");
+/// 内置（引擎 → 平台层）：让手柄震动。平台层截下来，不交给 NSH。
+pub const RUMBLE_OUT: EventKey<RumbleOut> = EventKey::new("nge.rumble");
+/// 内置：动作的状态变了（按钮按下 / 松开，轴的方向变了），TSX 的 `onAction`。
+pub const ACTION_EVENT: EventKey<ActionEvent> = EventKey::new("action");
+/// 内置：手柄接入、拔出、换了玩家，TSX 的 `onPad`。
+pub const PAD_EVENT: EventKey<PadEvent> = EventKey::new("pad");
+/// 内置 prop：动作的绑定表（`nge-ecs` 的 `ActionMap`）。
+pub const ACTIONS_PROP: &str = "actions";
 /// 内置（平台层发）：画面没了、App 进了后台（`true`）或者回来了（`false`）。渲染线程停着时也会当场处理，
 /// 游戏用 `App::on_suspend` 接（比如停掉声音）。
 pub const SUSPEND: CommandKey<Suspend> = CommandKey::new("nge.suspend");
@@ -48,9 +60,10 @@ pub struct EngineError {
 /// 游戏不能用来注册的通道名：`outbound` 为 true 指游戏 → NSH（State / Event），否则指 command。
 pub fn is_reserved(name: &str, outbound: bool) -> bool {
     if outbound {
-        name == FRAME_STATS.name() || name == ENGINE_ERROR.name() || name == KEY_EVENT.name() || name == READY.name()
+        [FRAME_STATS.name(), ENGINE_ERROR.name(), KEY_EVENT.name(), READY.name(), ACTION_EVENT.name(), PAD_EVENT.name()].contains(&name)
+            || name.starts_with(RESERVED_COMMAND_PREFIX)
     } else {
-        name == TOUCH.name() || name == KEY.name() || name == GAMEPAD.name() || name.starts_with(RESERVED_COMMAND_PREFIX)
+        [TOUCH.name(), KEY.name(), GAMEPAD.name(), PAD.name(), RUMBLE.name()].contains(&name) || name.starts_with(RESERVED_COMMAND_PREFIX)
     }
 }
 
@@ -91,12 +104,82 @@ pub struct Suspend {
     pub suspended: bool,
 }
 
-/// 两根摇杆，x 向右、y 向上，各在 −1 … 1，已经去掉死区。
+/// 两根摇杆，x 向右、y 向上，各在 −1 … 1，已经去掉死区；两个扳机 0 … 1。几个手柄合起来的。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GamepadInput {
     pub left: [f32; 2],
     pub right: [f32; 2],
+    pub l2: f32,
+    pub r2: f32,
+}
+
+fn yes() -> bool {
+    true
+}
+
+/// 一个手柄的整份状态：按着的键名（`GamepadA`、`GamepadLeftStickLeft`…）、去掉死区的摇杆、扳机。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PadInput {
+    /// 平台层给的手柄号。
+    pub id: u32,
+    /// false：拔掉了，别的字段不看。
+    #[serde(default = "yes")]
+    pub connected: bool,
+    #[serde(default)]
+    pub keys: Vec<String>,
+    #[serde(default)]
+    pub left: [f32; 2],
+    #[serde(default)]
+    pub right: [f32; 2],
+    #[serde(default)]
+    pub l2: f32,
+    #[serde(default)]
+    pub r2: f32,
+}
+
+fn rumble_duration() -> f32 {
+    0.2
+}
+
+/// TSX 的 `rumble` command：第 `player` 个玩家的手柄，低频（重）、高频（轻）马达的强度 0 … 1，`duration` 秒。
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct RumbleRequest {
+    #[serde(default)]
+    pub player: usize,
+    #[serde(default)]
+    pub low: f32,
+    #[serde(default)]
+    pub high: f32,
+    #[serde(default = "rumble_duration")]
+    pub duration: f32,
+}
+
+/// [`RUMBLE_OUT`]：`pad` 是手柄号，`None` 是所有连着的手柄。
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct RumbleOut {
+    pub pad: Option<u32>,
+    pub low: f32,
+    pub high: f32,
+    pub duration: f32,
+}
+
+/// [`ACTION_EVENT`]：`down` 是按着（轴是推过一半）；`x`、`y` 是方向（−1 / 0 / 1，按钮按着时 x 是 1）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActionEvent {
+    pub action: String,
+    pub player: usize,
+    pub down: bool,
+    pub x: i8,
+    pub y: i8,
+}
+
+/// [`PAD_EVENT`]：`player` 是这个手柄归第几个玩家（从 0 数），没分给谁是 `None`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PadEvent {
+    pub id: u32,
+    pub connected: bool,
+    pub player: Option<usize>,
 }
 
 macro_rules! key {
@@ -239,11 +322,37 @@ mod tests {
     #[test]
     fn gamepad_wire_format() {
         let g = GAMEPAD.decode(&json!({ "left": [0.5, -1.0], "right": [0.0, 0.25] })).unwrap();
-        assert_eq!(g, GamepadInput { left: [0.5, -1.0], right: [0.0, 0.25] });
+        assert_eq!(g, GamepadInput { left: [0.5, -1.0], right: [0.0, 0.25], ..Default::default() });
         assert_eq!(GAMEPAD.decode(&json!({})).unwrap(), GamepadInput::default(), "缺的摇杆是 0");
         assert!(is_reserved("gamepad", false));
         assert!(is_reserved("ready", true) && !is_reserved("ready", false));
         assert_eq!(READY.encode(&Ready {}), serde_json::json!({}));
+    }
+
+    #[test]
+    fn pad_and_rumble_wire_formats() {
+        let p = PAD.decode(&json!({ "id": 2, "keys": ["GamepadA"], "left": [0.5, 0.0], "l2": 0.25 })).unwrap();
+        assert_eq!(p, PadInput { id: 2, connected: true, keys: vec!["GamepadA".into()], left: [0.5, 0.0], right: [0.0; 2], l2: 0.25, r2: 0.0 }, "缺的是默认值，connected 默认连着");
+        assert!(!PAD.decode(&json!({ "id": 2, "connected": false })).unwrap().connected);
+        assert!(PAD.decode(&json!({ "keys": [] })).is_err(), "手柄号不能缺");
+        let g = GAMEPAD.decode(&json!({ "left": [0.0, 0.0], "l2": 0.75 })).unwrap();
+        assert_eq!((g.l2, g.r2), (0.75, 0.0), "gamepad 带上合并后的扳机");
+        let r = RUMBLE.decode(&json!({ "low": 1.0 })).unwrap();
+        assert_eq!(r, RumbleRequest { player: 0, low: 1.0, high: 0.0, duration: 0.2 });
+        let out = RumbleOut { pad: None, low: 0.5, high: 0.25, duration: 0.5 };
+        assert_eq!(RUMBLE_OUT.encode(&out), json!({ "pad": null, "low": 0.5, "high": 0.25, "duration": 0.5 }));
+        assert_eq!(RUMBLE_OUT.decode(&json!({ "pad": 3, "low": 0.5, "high": 0.25, "duration": 0.1 })).unwrap().pad, Some(3));
+        let a = ActionEvent { action: "jump".into(), player: 1, down: true, x: 1, y: 0 };
+        assert_eq!(ACTION_EVENT.encode(&a), json!({ "action": "jump", "player": 1, "down": true, "x": 1, "y": 0 }));
+        assert_eq!(PAD_EVENT.encode(&PadEvent { id: 0, connected: true, player: None }), json!({ "id": 0, "connected": true, "player": null }));
+    }
+
+    #[test]
+    fn input_channels_are_reserved() {
+        assert!(is_reserved("pad", false) && is_reserved("rumble", false));
+        assert!(is_reserved("action", true) && is_reserved("pad", true) && is_reserved("nge.rumble", true));
+        assert!(!is_reserved("action", false) && !is_reserved("rumble", true));
+        assert_eq!(ACTIONS_PROP, "actions");
     }
 
     #[test]
