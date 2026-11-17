@@ -6,7 +6,7 @@ import { copy, nextId, pasted } from "./clipboard";
 import { boxSelect, hitTest, prune, toggle } from "./select";
 import { snapPoint, snapValue } from "./snap";
 import { cellAt, cellsBetween, layerWith, strokeAdd, NEW_STROKE } from "./tiles";
-import { MAX_ZOOM, MIN_ZOOM, pan, zoomAt } from "./view";
+import { MAX_ZOOM, MIN_ZOOM, pan, pinchView, zoomAt } from "./view";
 
 const SIZE: [number, number] = [400, 300];
 
@@ -31,6 +31,21 @@ test("视图：拖动平移跟手，以指针为中心缩放时指针下的点�
   expect(after.map((v) => Math.round(v * 1000) / 1000)).toEqual(before.map((v) => Math.round(v * 1000) / 1000));
   expect(zoomAt(view, SIZE, at, 100).zoom).toBe(MAX_ZOOM);
   expect(zoomAt(view, SIZE, at, 0.0001).zoom).toBe(MIN_ZOOM);
+});
+
+test("双指捏合：以两指中点缩放，中点挪了多少画面跟着挪多少", () => {
+  const view = { x: 0, y: 0, zoom: 1 };
+  const at: [number, number] = [100, 100];
+  const before = screenToWorld(view, SIZE, at);
+  // 只缩放：中点下的世界坐标不动
+  const zoomed = pinchView(view, SIZE, { x: 100, y: 100, factor: 2, dx: 0, dy: 0 });
+  expect(zoomed.zoom).toBe(2);
+  expect(screenToWorld(zoomed, SIZE, at).map((v) => Math.round(v * 1000) / 1000)).toEqual(before.map((v) => Math.round(v * 1000) / 1000));
+  // 缩放加平移：原来中点下的世界坐标跟着手指到了新的中点
+  const moved = pinchView(view, SIZE, { x: 130, y: 90, factor: 2, dx: 30, dy: -10 });
+  expect(screenToWorld(moved, SIZE, [130, 90]).map((v) => Math.round(v * 1000) / 1000)).toEqual(screenToWorld(view, SIZE, [100, 100]).map((v) => Math.round(v * 1000) / 1000));
+  // 只平移
+  expect(pinchView(view, SIZE, { x: 0, y: 0, factor: 1, dx: 20, dy: -10 })).toEqual(pan(view, 20, -10));
 });
 
 const box = (e: Entity) => ({ left: e.x - (e.w ?? 10) / 2, right: e.x + (e.w ?? 10) / 2, bottom: e.y - (e.h ?? 10) / 2, top: e.y + (e.h ?? 10) / 2 });

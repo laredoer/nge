@@ -3,12 +3,13 @@ import { expect, open, test } from "nsh/test";
 import { act, actionButtonId, heldKey, rumble, rumbleStop } from "../../ts/nge";
 import { campfireAt, finish, JELLY_FADE, JELLY_Z, JELLY_ZONE, jellyAt, LEVELS, NEW_PROGRESS, progressOf, rampOf, ROWS, TOWER_BOX, TOWER_TRIGGER, towerAt, towerSpot } from "./levels";
 
-// 触屏按钮按动作发，不发键名：改了键也照样管用（见 docs/input-actions.md）
-const BUTTONS = ["id:act-move-left", "id:act-move-right", "id:act-jump", "id:act-restart"];
+// 触屏按钮按动作发，不发键名：改了键也照样管用（见 docs/input-actions.md）；走路是虚拟摇杆（docs/touch-input.md）
+const BUTTONS = ["id:stick-move", "id:act-jump", "id:act-restart"];
 
-test("手机上有触屏按钮", async () => {
+test("手机上有摇杆和触屏按钮，← → 换成了摇杆", async () => {
   const app = await open(".", { platform: "ios" });
   for (const button of BUTTONS) expect(app.count(button)).toBe(1);
+  expect(app.count("id:act-move-left") + app.count("id:act-move-right")).toBe(0);
 });
 
 test("Mac 上没有触屏按钮", async () => {

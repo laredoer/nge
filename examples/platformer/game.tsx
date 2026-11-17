@@ -1,12 +1,12 @@
 import { batch, effect, keymap, type NativeComponentRef, platform, safeArea, signal, Text, View } from "nsh";
 import { Button } from "nsh/base";
-import { ActionButton, floatText, gameView, httpClient, inputMap, netRoom, push, saved, saveSlots, sound, tween, type ActionEvent, type Scene, type SpriteNode } from "../../ts/nge";
+import { ActionButton, floatText, gameView, gestureHandlers, httpClient, inputMap, netRoom, push, saved, saveSlots, sound, tween, VirtualStick, type ActionEvent, type Gesture, type Scene, type SpriteNode } from "../../ts/nge";
 import { DEFAULT_CONTROLS, guestSprite, PLAYER_GROUP } from "./controls";
 import { remapPlace, RemapPanel } from "./remap";
 import { COIN_SHADER, FLASH, FLASH_MS, levelAudio, night, portalOver, POST, SHADERS, stonesNear } from "./effects";
 import { levelKey, otherLocale, strings } from "./strings";
 import { NEW_SAVE, nextSlot, SAVE_MIGRATIONS, SAVE_VERSION, saveDataOf, saveSummary, SLOTS } from "./savefile";
-import { hpBar, outOfHearts, padPlace, TITLE_HOLD_MS, titleBubble } from "./hud";
+import { hpBar, outOfHearts, padPlace, stickPlace, TITLE_HOLD_MS, titleBubble, zoomBy } from "./hud";
 import { boardOf, leaderOf, nameTags, netLabel, netNode, netSetting, playerName, remotePlayers, scoresUrl, submitUrl, type Leader } from "./online";
 import { campfireAt, finish, flagOn, JELLY_ZONE, jellyAt, LEVELS, TILE, TOWER_TRIGGER, towerAt, towerSpot, type Built, type Progress } from "./levels";
 
@@ -68,6 +68,9 @@ export function Game(props: GameProps = {}) {
   /** 操作（见 docs/input-actions.md）：绑定存在设备上，引擎按它算动作；改键面板按 K 开关。 */
   const input = inputMap({ key: "platformer", defaults: DEFAULT_CONTROLS });
   const remapping = signal(false);
+  /** 镜头缩放：手机上双指捏合（见 docs/touch-input.md）。 */
+  const zoom = signal(1);
+  const touchGestures = platform.desktop ? {} : gestureHandlers((g: Gesture) => g.kind === "pinch" && zoom.set(zoomBy(zoom(), g.factor)));
   const closeRemap = () => {
     input.cancel();
     remapping.set(false);
@@ -232,7 +235,7 @@ export function Game(props: GameProps = {}) {
     post: [...(levels[level()].night ? night(now().goal).post : []), ...POST],
     audio: { preload: [COIN_SOUND, WIN_SOUND], ...levelAudio(levels[level()].night ?? false) },
     physics: { gravity: [0, -1800] },
-    camera: { follow: "player", y: 60, smooth: 0.15, bounds: { left: 0, right: now().right, bottom: -160, top: now().top } },
+    camera: { follow: "player", y: 60, smooth: 0.15, zoom: zoom(), bounds: { left: 0, right: now().right, bottom: -160, top: now().top } },
     camera3d: { match2d: true, interleave: true },
     // 箱子顶上的小箱子在大箱子顶面投下影子；有箱子堆的关再加一盏照着它的聚光灯
     lights: [{ id: "sun", kind: "directional", direction: [-1, -2, -1.5], shadows: true }, ...(now().tower === null ? [] : [towerSpot(now().tower!)]), ...now().lights],
@@ -303,6 +306,7 @@ export function Game(props: GameProps = {}) {
       </Text>
       <GameView
         class="flex-1"
+        {...touchGestures}
         ref={(n: NativeComponentRef) => (game = n)}
         scene={scene()}
         actions={input.prop()}
@@ -411,17 +415,19 @@ export function Game(props: GameProps = {}) {
   );
 }
 
-/** 手机上的触屏按钮，叠在游戏视图下方：左边跑，右边跳和重来。按动作发，不发键名：改了键也管用（见 docs/input-actions.md）。 */
+/**
+ * 手机上的触屏操作，叠在游戏视图上：左下是摇杆（推多少走多快），右边跳和重来。按动作发，不发键名：改了键也管用
+ * （见 docs/input-actions.md、docs/touch-input.md）。
+ */
 function TouchPad(props: { game: () => NativeComponentRef | undefined }) {
   return (
-    <View class="absolute flex-row justify-between items-end" style={padPlace(safeArea())}>
-      <View class="flex-row gap-4">
-        <ActionButton game={props.game} action="move" x={-1} label="←" />
-        <ActionButton game={props.game} action="move" x={1} label="→" />
-      </View>
-      <View class="flex-row gap-4 items-end">
-        <ActionButton game={props.game} action="restart" label="↺" class="w-12 h-12" />
-        <ActionButton game={props.game} action="jump" label={t("jump")} class="w-20 h-20" />
+    <View style={{ pointerEvents: "box-none" }} class="absolute top-0 left-0 right-0 bottom-0">
+      <VirtualStick game={props.game} action="move" class="absolute" style={stickPlace(safeArea())} />
+      <View class="absolute flex-row justify-end items-end" style={{ pointerEvents: "box-none", ...padPlace(safeArea()) }}>
+        <View class="flex-row gap-4 items-end">
+          <ActionButton game={props.game} action="restart" label="↺" class="w-12 h-12" />
+          <ActionButton game={props.game} action="jump" label={t("jump")} class="w-20 h-20" />
+        </View>
       </View>
     </View>
   );

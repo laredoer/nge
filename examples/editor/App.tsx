@@ -1,13 +1,14 @@
 // 关卡编辑器（docs/editor.md）：左边场景树和物件库，中间游戏视图，右边属性；⌘R 试玩，Esc 回来。
-import { effect, keymap, mount, signal, Text, View } from "nsh";
+import { createAnimatedValue, effect, keymap, mount, signal, Text, View, type GestureResponderEvent } from "nsh";
 import { AlertDialog } from "nsh/base";
 import { Window } from "nsh/desktop";
-import { gameView } from "../../ts/nge";
+import { gameView, gestureHandlers, type Gesture } from "../../ts/nge";
 import { Game } from "../platformer/game";
 import { pickStore, type Picked } from "./fsstore";
 import { FilePanel, Inspector, Library, SceneTree, Toolbar } from "./panels";
 import { editorScene } from "./scene";
 import { createStore, type Store } from "./store";
+import { pinchView, zoomAt } from "./view";
 
 const GameView = gameView();
 
@@ -78,27 +79,85 @@ function Editing(p: { store: Store }) {
   /** 鼠标在画布上时 shift 按没按着（点选时加选）。 */
   const shift = signal(false);
   const at = (e: { locationX: number; locationY: number }): [number, number] => [e.locationX, e.locationY];
+  const trackpad = trackpadZoom(s);
+  // 触屏：第二根手指按下时取消正在进行的工具操作，双指捏合缩放、平移（docs/touch-input.md）
+  const touch = gestureHandlers((g: Gesture) => {
+    if (g.kind === "pinchStart") s.pointer("cancel", [g.x, g.y]);
+    if (g.kind === "pinch") s.view.set(pinchView(s.view(), s.size(), g));
+  });
+  const single = (e: GestureResponderEvent) => e.touches.length < 2;
   return (
     <View class="flex-1 flex-row">
       <View class="w-56 bg-neutral-800">
         <SceneTree store={s} shift={shift} />
         <Library store={s} />
       </View>
-      <View class="flex-1" onMouseMove={(e) => shift.set(e.modifiers.shift)}>
+      <View
+        class="flex-1"
+        onMouseMove={(e) => {
+          shift.set(e.modifiers.shift);
+          trackpad.mouse = [e.position.x, e.position.y];
+        }}
+        pinch={{ scale: trackpad.scale }}
+        onPinchStart={trackpad.start}
+        onPinchEnd={trackpad.end}
+      >
         <GameView
           class="flex-1"
           scene={editorScene(s.sceneInput())}
           captureKeys={[]}
           onLayout={(e) => s.size.set([e.bounds.size.width, e.bounds.size.height])}
-          onTouchStart={(e) => s.pointer("down", at(e), shift())}
-          onTouchMove={(e) => s.pointer("move", at(e), shift())}
-          onTouchEnd={(e) => s.pointer("up", at(e), shift())}
-          onTouchCancel={(e) => s.pointer("cancel", at(e))}
+          onTouchStart={(e) => {
+            touch.onTouchStart(e);
+            if (single(e)) s.pointer("down", at(e), shift());
+          }}
+          onTouchMove={(e) => {
+            touch.onTouchMove(e);
+            if (single(e)) s.pointer("move", at(e), shift());
+          }}
+          onTouchEnd={(e) => {
+            touch.onTouchEnd(e);
+            s.pointer("up", at(e), shift());
+          }}
+          onTouchCancel={(e) => {
+            touch.onTouchCancel(e);
+            s.pointer("cancel", at(e));
+          }}
         />
       </View>
       <Inspector store={s} />
     </View>
   );
+}
+
+/**
+ * Mac 触控板的捏合（和 Control + 滚轮）：nsh 只在开始、结束时告诉 JS，中间的倍数在 `pinch` 的动画值里，
+ * 捏的时候每 33 ms 读一次，以鼠标最后在画布上的位置为中心缩放（docs/touch-input.md）。
+ */
+function trackpadZoom(s: Store) {
+  const scale = createAnimatedValue(1);
+  let base = s.view();
+  let center: [number, number] = [0, 0];
+  let timer: number | undefined;
+  const apply = (v: number) => s.view.set(zoomAt(base, s.size(), center, v));
+  const t = {
+    scale,
+    /** 鼠标最后在画布上的位置；没进过画布时用中心。 */
+    mouse: null as [number, number] | null,
+    start() {
+      base = s.view();
+      center = t.mouse ?? [s.size()[0] / 2, s.size()[1] / 2];
+      clearInterval(timer);
+      timer = setInterval(() => void scale.getValue().then((v) => timer !== undefined && apply(v)), 33);
+    },
+    end(e: { scale: number }) {
+      clearInterval(timer);
+      timer = undefined;
+      apply(e.scale);
+      scale.set(1);
+    },
+  };
+  return t;
 }
 
 export function App() {

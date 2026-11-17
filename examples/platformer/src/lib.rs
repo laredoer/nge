@@ -850,14 +850,15 @@ mod tests {
         assert!(run(&mut app, 5).iter().all(|(n, _)| n != "restart"), "暂停时不重来");
     }
 
-    /// TSX 那边的接线：触屏按钮按动作发，两个角色同一个碰撞分组。
+    /// TSX 那边的接线：触屏按钮和摇杆按动作发，两个角色同一个碰撞分组。
     #[test]
     fn tsx_uses_action_buttons_and_groups_the_players() {
         let tsx = include_str!("../game.tsx");
         assert!(!tsx.contains("KeyButton"), "触屏按钮不发死键名");
-        for button in [r#"action="move" x={-1}"#, r#"action="move" x={1}"#, r#"action="restart""#, r#"action="jump""#] {
+        for button in [r#"action="restart""#, r#"action="jump""#] {
             assert!(tsx.contains(&format!("<ActionButton game={{props.game}} {button}")), "{button}");
         }
+        assert!(tsx.contains(r#"<VirtualStick game={props.game} action="move""#), "走路是摇杆，驱动 move");
         assert!(tsx.contains(r#"id: "player""#) && tsx.contains("collide: true, group: PLAYER_GROUP }"), "第一个角色带分组");
         assert!(include_str!("../controls.ts").contains(&format!("export const GUEST = \"{GUEST}\"")));
     }

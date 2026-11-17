@@ -21,6 +21,10 @@ export const ZH = {
   lost: "力竭倒下",
   lostInfo: "斩敌 {count} · 打到第{n}段",
   restart: "按 R 重新开始",
+  restartTouch: "点一下重新开始",
+  attackKey: "攻",
+  thrustKey: "刺",
+  jumpKey: "跳",
   paused: "暂停 · 按 P 继续",
   help: "←→↑↓ / WASD 移动 · J 攻击（连按三段） · K 突刺 · L 跳（空中按 J 下劈） · P 暂停 · R 重开",
 };
@@ -45,6 +49,10 @@ export const EN: Messages<typeof ZH> = {
   lost: "Fallen",
   lostInfo: "{count} kills · reached stage {n}",
   restart: "Press R to restart",
+  restartTouch: "Tap to restart",
+  attackKey: "Atk",
+  thrustKey: "Lunge",
+  jumpKey: "Jump",
   paused: "Paused · press P to resume",
   help: "←→↑↓ / WASD move · J attack (press up to 3 times) · K lunge · L jump (J in the air: plunge) · P pause · R restart",
 };

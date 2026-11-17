@@ -16,3 +16,8 @@ export function zoomAt(view: CameraView, size: [number, number], at: [number, nu
   // 缩放后 at 处的世界坐标要还是 (wx, wy)
   return { zoom, x: wx - (at[0] - size[0] / 2) / zoom, y: wy + (at[1] - size[1] / 2) / zoom };
 }
+
+/** 双指捏合（`pinch` 手势，docs/touch-input.md）：以挪动前的两指中点缩放 `factor` 倍，再跟着中点平移 (dx, dy)。 */
+export function pinchView(view: CameraView, size: [number, number], g: { x: number; y: number; factor: number; dx: number; dy: number }): CameraView {
+  return pan(zoomAt(view, size, [g.x - g.dx, g.y - g.dy], g.factor), g.dx, g.dy);
+}

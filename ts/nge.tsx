@@ -3,6 +3,7 @@ import { nativeComponent, signal, Storage, Text, untracked, View, type GestureRe
 import type { HttpReply } from "./http";
 import type { ActionEvent, ActionMap, PadEvent } from "./input";
 import type { NetEvent, NetNode } from "./net";
+import { heldKey } from "./touch";
 
 /** 一个精灵。坐标是世界坐标（point，y 朝上，原点在视口中心），角度用度（逆时针）。 */
 export interface SpriteNode {
@@ -738,67 +739,9 @@ export function rumbleStop(game: NativeComponentRef | undefined, player = 0) {
   game?.command("rumble", { player, stop: true });
 }
 
-/**
- * 直接让一个动作按下 / 松开（触屏按钮、虚拟摇杆，见 docs/input-actions.md）：不经过键和绑定表，改键管不到它，也不参与冲突检查。
- * `x`、`y` 是方向（按钮不用填）；同一个动作的几个来源（`source`，比如左、右两个按钮）各自按下松开，方向加起来。
- */
-export function act(game: NativeComponentRef | undefined, action: string, down: boolean, options: { player?: number; x?: number; y?: number; source?: string } = {}) {
-  game?.command("action", { action, down, ...options });
-}
-
-/** 方向的名字（"left"、"up"、"left-down"…）；没有方向是 ""。 */
-function directionName(x = 0, y = 0): string {
-  return [x < 0 ? "left" : x > 0 ? "right" : "", y > 0 ? "up" : y < 0 ? "down" : ""].filter((s) => s !== "").join("-");
-}
-
-/** `<ActionButton>` 的 testID：`act-<动作>`，带方向的是 `act-<动作>-<方向>`。 */
-export function actionButtonId(action: string, x?: number, y?: number): string {
-  const direction = directionName(x, y);
-  return direction === "" ? `act-${action}` : `act-${action}-${direction}`;
-}
-
-/**
- * 按住就让一个动作按着的屏幕按钮。按钮（跳）只填 `action`；方向键（往左走）再填 `x` / `y`，同一个动作的几个方向键各算一个来源。
- * 用触摸而不是 press：同时按住两个按钮（跑着跳）要靠各自的手指。
- */
-export function ActionButton(props: { game: () => NativeComponentRef | undefined; action: string; label: string; x?: number; y?: number; player?: number; class?: string }) {
-  const direction = directionName(props.x, props.y);
-  const options = { ...(props.player === undefined ? {} : { player: props.player }), ...(direction === "" ? {} : { x: props.x ?? 0, y: props.y ?? 0, source: direction }) };
-  const held = heldKey((down) => act(props.game(), props.action, down, options));
-  const ids = (e: GestureResponderEvent) => e.changedTouches.map((t) => t.identifier);
-  return (
-    <View
-      testID={actionButtonId(props.action, props.x, props.y)}
-      class={`w-16 h-16 rounded-full bg-white/20 items-center justify-center active:bg-white/40 ${props.class ?? ""}`}
-      onTouchStart={(e: GestureResponderEvent) => held.start(ids(e))}
-      onTouchEnd={(e: GestureResponderEvent) => held.end(ids(e))}
-      onTouchCancel={(e: GestureResponderEvent) => held.end(ids(e))}
-    >
-      <Text class="text-white text-2xl">{props.label}</Text>
-    </View>
-  );
-}
-
 /** 发一次按键给引擎，和键盘、手柄一样进 `Input`（见 docs/touch-controls.md）。改键以后键名对应的动作会变，触屏按钮用 `<ActionButton>`。 */
 export function key(game: NativeComponentRef | undefined, code: string, down: boolean) {
   game?.command("key", { code, down, repeat: false });
-}
-
-/** 一个屏幕按钮上按着的手指：第一根按下时 `send(true)`，最后一根松开时 `send(false)`；没按着时的松开不发。 */
-export function heldKey(send: (down: boolean) => void) {
-  const fingers = new Set<number>();
-  return {
-    start(ids: number[]) {
-      const was = fingers.size;
-      for (const id of ids) fingers.add(id);
-      if (was === 0 && fingers.size > 0) send(true);
-    },
-    end(ids: number[]) {
-      const was = fingers.size;
-      for (const id of ids) fingers.delete(id);
-      if (was > 0 && fingers.size === 0) send(false);
-    },
-  };
 }
 
 /** 按住发按键的屏幕按钮（testID 是 `key-<code>`）。用触摸而不是 press：同时按住两个按钮（跑着跳）要靠各自的手指。 */
@@ -928,6 +871,10 @@ export { netRoom, netSend, relayHttp, remoteId, type NetEvent, type NetNode, typ
 export { httpClient, json, type HttpClient, type HttpOptions, type HttpReply, type HttpResult } from "./http";
 // 输入映射见 docs/input-actions.md
 export { bindingsOf, conflictsOf, inputMap, KEY_NAMES, keyAt, slotsOf, withKey, type ActionEvent, type ActionMap, type AnalogAxis, type AnalogStick, type Binding, type Bindings, type InputMap, type InputMapOptions, type InputStore, type PadEvent, type Part, type PendingBind, type Slot } from "./input";
+// 触屏控制见 docs/touch-input.md
+export { act, ActionButton, actionButtonId, cooldownFill, heldKey, pressedLook, repeater, VirtualStick } from "./touch";
+export { knobOffset, snapDirection, STICK_DEFAULTS, stickCommand, stickOutput, stickStep, stickValue, type Directions, type StickFinger, type StickShape, type StickState, type StickTouch } from "./stick";
+export { GESTURE_DEFAULTS, GESTURE_IDLE, gestureHandlers, gestureStep, type Gesture, type GestureInput, type GestureOptions, type GestureState, type GestureTimers, type SwipeDirection } from "./gestures";
 // 存档槽见 docs/saves.md
 export { saveSlots, type LoadResult, type SaveSlots, type SaveSlotsOptions, type SaveStore, type SlotInfo } from "./saves";
 

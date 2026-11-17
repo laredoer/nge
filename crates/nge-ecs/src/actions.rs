@@ -345,6 +345,7 @@ impl Actions {
                 };
                 *state = if map.capturing { ActionState { released: state.down, ..Default::default() } } else { evaluate(binding, &reader, direct, *state) };
                 let mut told = false;
+                let told_down = sent.0;
                 let mut tell = |now: Sent, again: bool| {
                     if *sent != now || (again && now.0 && !told) {
                         *sent = now;
@@ -352,8 +353,11 @@ impl Actions {
                         outbox.send(ACTION_EVENT, &ActionEvent { action: name.clone(), player, down: now.0, x: now.1, y: now.2 });
                     }
                 };
-                // 一帧里按下又松开的按钮：两个都告诉
+                // 一帧里按下又松开的按钮：两个都告诉；TSX 以为还按着时（一帧里松开又按下）先告诉松开
                 if state.pressed && matches!(binding, Binding::Button { .. }) {
+                    if told_down {
+                        tell((false, 0, 0), false);
+                    }
                     tell((true, 1, 0), false);
                 }
                 // 换了表：按着的再报一遍
@@ -505,7 +509,9 @@ fn evaluate(binding: &Binding, r: &Reader, direct: Driven, prev: ActionState) ->
         Binding::Button { keys } => {
             let down = r.any(keys, Edge::Down) || direct.value.is_some();
             let (prs, rel) = (r.any(keys, Edge::Pressed) || direct.pressed, r.any(keys, Edge::Released) || direct.released);
-            let (pressed, released) = edges(prev.down, down, prs, rel, r.repressed(keys), false);
+            // 直接驱动的按钮（按住连发）上一帧按着、这一帧松开过又按下，和键一样算重按
+            let repress = r.repressed(keys) || (prev.down && direct.pressed && direct.released);
+            let (pressed, released) = edges(prev.down, down, prs, rel, repress, false);
             let held = f32::from(u8::from(direct.value.is_some()));
             ActionState { down, pressed, released, value: Vec2::new(keys.iter().map(|k| r.key_value(k)).fold(held, f32::max), 0.0) }
         }
@@ -899,6 +905,35 @@ mod tests {
         tick(&mut app);
         tick(&mut app);
         assert!(actions(&app).down("jump") && !actions(&app).pressed("jump"));
+    }
+
+    #[test]
+    fn a_driven_button_released_and_pressed_again_within_one_frame_is_a_new_press() {
+        let mut app = app(map());
+        act(&mut app, json!({ "action": "jump", "down": true }));
+        tick(&mut app);
+        // 按住连发：同一帧里松开又按下
+        act(&mut app, json!({ "action": "jump", "down": false }));
+        act(&mut app, json!({ "action": "jump", "down": true }));
+        let events = tick(&mut app);
+        let a = actions(&app);
+        assert!(a.down("jump") && a.pressed("jump") && a.released("jump"), "和键一样：这一帧松开过又按下");
+        assert_eq!(
+            action_events(&events),
+            [json!({ "action": "jump", "player": 0, "down": false, "x": 0, "y": 0 }), json!({ "action": "jump", "player": 0, "down": true, "x": 1, "y": 0 })],
+            "TSX 也收到一对松开、按下"
+        );
+        tick(&mut app);
+        assert!(actions(&app).down("jump") && !actions(&app).pressed("jump"));
+        // 键也一样补发给 TSX
+        key(&mut app, "Space", true);
+        tick(&mut app);
+        act(&mut app, json!({ "action": "jump", "down": false }));
+        tick(&mut app);
+        key(&mut app, "Space", false);
+        key(&mut app, "Space", true);
+        let events = tick(&mut app);
+        assert_eq!(action_events(&events).len(), 2, "键在一帧里松开又按下也补发");
     }
 
     #[test]
