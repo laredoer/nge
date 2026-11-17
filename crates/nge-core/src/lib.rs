@@ -8,6 +8,8 @@ pub mod game;
 pub mod pipeline_cache;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod runtime;
+#[cfg(not(target_arch = "wasm32"))]
+mod startup;
 pub mod stats;
 #[cfg(target_arch = "wasm32")]
 pub mod web;

@@ -27,6 +27,7 @@ mod host;
 mod java;
 mod keymap;
 mod logger;
+mod guard;
 mod native;
 mod net;
 #[cfg(feature = "js")]

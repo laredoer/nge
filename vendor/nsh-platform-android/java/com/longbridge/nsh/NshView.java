@@ -129,6 +129,13 @@ public class NshView extends FrameLayout {
         return super.dispatchKeyEvent(e);
     }
 
+    /** 本仓库加的：窗口失焦时 Rust 组件（游戏）按着的键、手柄都松开（松开的事件不会再来）。 */
+    @Override
+    public void onWindowFocusChanged(boolean hasWindowFocus) {
+        super.onWindowFocusChanged(hasWindowFocus);
+        if (!hasWindowFocus) RustComponent.focusLost(this);
+    }
+
     /** 本仓库加的：手柄的摇杆、扳机、十字键的轴先给 Rust 组件。 */
     @Override
     public boolean dispatchGenericMotionEvent(android.view.MotionEvent e) {
@@ -1035,6 +1042,13 @@ public class NshView extends FrameLayout {
     /** Bytes of an `asset:/…` URI, or null. Blocking: engine and image threads. */
     byte[] readAsset(String uri) {
         String path = uri.startsWith("asset:/") ? uri.substring(7) : uri;
+        // 本仓库加的：不读资源目录外面的文件
+        for (String part : path.split("/")) {
+            if (part.equals("..")) {
+                android.util.Log.w("nsh", "cannot read " + uri + ": `..` in an asset path");
+                return null;
+            }
+        }
         try {
             String http = assetHttp;
             File dir = assetDir;

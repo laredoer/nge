@@ -7,13 +7,13 @@ use std::ffi::c_void;
 use std::ptr::NonNull;
 use std::sync::{Arc, Once};
 
-use nge_core::bridge::{GAMEPAD, GamepadInput, KEY, KEY_EVENT, KeyInput};
+use nge_core::bridge::{GAMEPAD, GamepadInput, KEY, KEY_EVENT, KeyInput, SUSPEND, Suspend};
 use nge_core::{Engine, GameFactory, Msg, wgpu};
 use nsh::{ComponentContext, ComponentFactory, Key, NativeComponent, Surface, register_component};
 use raw_window_handle::{AndroidDisplayHandle, DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawDisplayHandle, WindowHandle};
 use serde_json::{Value as JsonValue, json};
 
-use crate::android_keys::{Pads, from_gamepad, key_name, shortcut};
+use crate::android_keys::{PadInput, from_gamepad, key_name, shortcut};
 use crate::android_state::{Pending, viewport};
 use crate::input::{self, CAPTURE_KEYS, capture_keys};
 use crate::pad;
@@ -25,22 +25,21 @@ pub fn register(factory: GameFactory) {
 }
 
 pub fn component(factory: GameFactory) -> ComponentFactory {
-    Arc::new(move |ctx| {
-        setup(&ctx);
-        Box::new(GameView::new(ctx, factory.clone()))
-    })
+    Arc::new(move |ctx| Box::new(GameView::new(ctx, factory.clone())))
 }
 
-/// 第一次建游戏视图时：资源从 `NshView` 读，管线缓存放 `codeCacheDir/nge`，cpal 要的 `ndk-context`。
+/// 建游戏视图时：管线缓存放 `codeCacheDir/nge`；第一次时给 cpal 要的 `ndk-context`。
 fn setup(ctx: &ComponentContext) {
-    let source = Arc::new(ViewAssets(ctx.clone()));
-    nge_assets::set_source(source);
     nge_core::pipeline_cache::set_dir(ctx.code_cache_dir().join("nge"));
     static CONTEXT: Once = Once::new();
     CONTEXT.call_once(|| {
-        // SAFETY: VM 是进程的；Context 是全局引用，和进程一样长（组件的上下文不会全释放掉：泄漏一份）
-        let context = std::mem::ManuallyDrop::new(ctx.clone());
-        unsafe { ndk_context::initialize_android_context(context.java_vm(), context.android_context()) };
+        // 只要 VM 和应用的 Context：另建一份 Context 的全局引用交出去，和进程一样长（不拿着视图和 Activity）
+        let context = ctx.new_android_context_ref();
+        if context.is_null() {
+            return log::error!("拿不到应用的 Context，声音可能出不来");
+        }
+        // SAFETY: VM 是进程的；`context` 是全局引用，不释放
+        unsafe { ndk_context::initialize_android_context(ctx.java_vm(), context) };
     });
 }
 
@@ -84,6 +83,8 @@ fn surface(instance: &wgpu::Instance, window: NonNull<c_void>) -> Result<wgpu::S
 
 pub struct GameView {
     ctx: ComponentContext,
+    /// 给 `nge_assets` 的资源来源（视图没了时放掉）。
+    assets: Arc<dyn nge_assets::AssetSource>,
     factory: GameFactory,
     instance: wgpu::Instance,
     proxy: Option<Proxy>,
@@ -95,18 +96,23 @@ pub struct GameView {
     pending: Pending,
     /// prop `captureKeys`。
     capture: Option<Vec<String>>,
-    /// 转发过按下、还没松开的键盘的键和手柄按钮。
+    /// 转发过按下、还没松开的键盘的键。
     keys: BTreeSet<&'static str>,
-    pads: Pads,
-    /// 摇杆、十字键、扳机的轴算出来的、上一次按着的键名和摇杆。
-    pad_keys: BTreeSet<&'static str>,
-    sticks: [[f32; 2]; 2],
+    /// 手柄：按钮和轴合起来。
+    pads: PadInput,
+    /// 画面没了时停过游戏（声音），回来时恢复。
+    suspended: bool,
 }
 
 impl GameView {
     pub fn new(ctx: ComponentContext, factory: GameFactory) -> Self {
+        setup(&ctx);
+        // `asset:/` 从 `NshView` 读
+        let assets: Arc<dyn nge_assets::AssetSource> = Arc::new(ViewAssets(ctx.clone()));
+        nge_assets::set_source(assets.clone());
         Self {
             ctx,
+            assets,
             factory,
             instance: instance(),
             proxy: None,
@@ -115,9 +121,8 @@ impl GameView {
             pending: Pending::default(),
             capture: None,
             keys: BTreeSet::new(),
-            pads: Pads::default(),
-            pad_keys: BTreeSet::new(),
-            sticks: [[0.0; 2]; 2],
+            pads: PadInput::default(),
+            suspended: false,
         }
     }
 
@@ -158,21 +163,28 @@ impl GameView {
         self.ctx.emit(KEY_EVENT.name(), KEY_EVENT.encode(&key));
     }
 
-    /// 按着的键、手柄全部补发松开，摇杆归零（画面没了时）。
+    /// 按着的键、手柄全部补发松开，摇杆归零（画面没了、窗口失焦时）。
     fn release_input(&mut self) {
         let held = std::mem::take(&mut self.keys);
         for code in held {
             self.forward(code, false, false);
         }
-        self.pads.clear();
-        self.update_pads();
+        let changes = self.pads.clear();
+        self.forward_pads(changes);
     }
 
-    fn update_pads(&mut self) {
-        let (now, sticks) = pad::merge(&self.pads.readings());
-        let changes = pad::diff(&self.pad_keys, &now, self.sticks, sticks);
-        self.pad_keys = now;
-        self.sticks = sticks;
+    /// 停下、恢复游戏（声音）：渲染线程停着也当场处理。
+    fn suspend(&mut self, suspended: bool) {
+        if self.suspended == suspended {
+            return;
+        }
+        self.suspended = suspended;
+        if let Some(proxy) = &self.proxy {
+            proxy.command(SUSPEND.name(), &SUSPEND.encode(&Suspend { suspended }));
+        }
+    }
+
+    fn forward_pads(&self, changes: pad::Changes) {
         for code in changes.released {
             self.forward(code, false, false);
         }
@@ -208,6 +220,7 @@ impl NativeComponent for GameView {
             if let Some(proxy) = &self.proxy {
                 proxy.set_in_window(false);
             }
+            self.suspend(true);
             return;
         };
         let view = viewport(width, height, self.ctx.density());
@@ -237,6 +250,7 @@ impl NativeComponent for GameView {
             proxy.set_in_window(false);
             proxy.send(Msg::Surface(new));
         }
+        self.suspend(false);
         if let Some(proxy) = &self.proxy {
             proxy.tick(view);
             proxy.set_in_window(true);
@@ -247,11 +261,9 @@ impl NativeComponent for GameView {
         let gamepad = from_gamepad(key.source);
         let Some(code) = key_name(key.code, gamepad) else { return false };
         if code.starts_with("Gamepad") {
-            // 手柄的键总是给游戏（不然 B 会被系统当成返回）；自动重复不再发
-            let changed = if key.down { self.keys.insert(code) } else { self.keys.remove(code) };
-            if changed {
-                self.forward(code, key.down, false);
-            }
+            // 手柄的键总是给游戏（不然 B 会被系统当成返回）；自动重复、轴那边已经按着的不再发
+            let changes = self.pads.button(key.device, code, key.down);
+            self.forward_pads(changes);
             return true;
         }
         let facts = input::Facts {
@@ -271,8 +283,25 @@ impl NativeComponent for GameView {
     }
 
     fn motion(&mut self, device: i32, axes: &[f32]) -> bool {
-        self.pads.update(device, axes);
-        self.update_pads();
+        let changes = self.pads.motion(device, axes);
+        self.forward_pads(changes);
         true
+    }
+
+    fn input_lost(&mut self, device: Option<i32>) {
+        match device {
+            Some(device) => {
+                let changes = self.pads.remove(device);
+                self.forward_pads(changes);
+            }
+            None => self.release_input(),
+        }
+    }
+}
+
+impl Drop for GameView {
+    fn drop(&mut self) {
+        // 不让全局的资源来源拿着这个视图（和它的 Activity）
+        nge_assets::unset_source(&self.assets);
     }
 }

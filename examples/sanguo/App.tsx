@@ -1,4 +1,4 @@
-import { mount, type NativeComponentRef, platform, signal, Text, View } from "nsh";
+import { mount, type NativeComponentRef, platform, safeArea, signal, Text, View } from "nsh";
 import { burst, floatText, gameView, shake, sound } from "../../ts/nge";
 import { footY, zOf } from "./belt";
 import { newGame, step, type Game, type GameEvent } from "./game";
@@ -95,6 +95,8 @@ function App() {
     <View class="flex-1 bg-black">
       <GameView
         class="flex-1"
+        // 横版过关：手机上锁成横屏
+        screenOrientation="landscape"
         ref={(n: NativeComponentRef) => (game = n)}
         scene={sceneOf(state(), paused(), round())}
         onReady={() => (ready = true)}
@@ -116,7 +118,8 @@ function App() {
 function Hud(props: { hud: () => ReturnType<typeof hudOf> }) {
   const h = props.hud;
   return (
-    <View class="absolute top-0 left-0 right-0 bottom-0">
+    // 让开系统栏和刘海（横屏时刘海在左右）
+    <View class="absolute" style={{ top: safeArea().top, left: safeArea().left, right: safeArea().right, bottom: safeArea().bottom }}>
       <View class="absolute top-4 left-4 w-56 gap-1">
         <Text class="text-white text-sm font-bold">{t("hero")}</Text>
         <View class="flex-row items-center gap-2">

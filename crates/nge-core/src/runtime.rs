@@ -7,7 +7,7 @@
 use std::any::Any;
 use std::panic::AssertUnwindSafe;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender, TryRecvError};
 use std::thread::JoinHandle;
@@ -18,12 +18,15 @@ use web_time::Instant;
 
 use crate::bridge::{ENGINE_ERROR, EngineError};
 use crate::frame::{Core, Flow, Gate, Msg, configure, request_gpu};
+use crate::startup::{start, wait_unlocked};
 use crate::game::{Emit, GameFactory};
 
 /// 拿不到 drawable（被遮挡、最小化）时的退避。
 const IDLE_BACKOFF: Duration = Duration::from_millis(16);
 /// 等渲染线程确认暂停的上限（正常情况下最多一帧）。
 const PAUSE_TIMEOUT: Duration = Duration::from_millis(250);
+/// 还没进帧循环时，等渲染线程用完画面（请求 GPU、配置）的上限。
+const START_PAUSE_TIMEOUT: Duration = Duration::from_secs(2);
 /// 等渲染线程退出的上限。
 const QUIT_TIMEOUT: Duration = Duration::from_millis(500);
 
@@ -32,8 +35,10 @@ pub struct Engine {
     tx: Sender<Msg>,
     thread: Option<JoinHandle<()>>,
     done: Receiver<()>,
-    /// 渲染线程已进入帧循环。之前它不会碰 View，暂停时不必等确认（GPU 初始化可能要几百毫秒）。
+    /// 渲染线程已进入帧循环：暂停时等它确认。
     in_frames: Arc<AtomicBool>,
+    /// 进帧循环之前，渲染线程只在拿着它时碰画面（请求 GPU、配置），拿到后先看一遍消息。
+    window: Arc<Mutex<()>>,
     /// 渲染线程退出超时时故意泄漏的对象（通常是 View），避免它在线程还在用时被释放。
     keep_alive: Option<Box<dyn Any>>,
 }
@@ -69,11 +74,13 @@ impl Engine {
         let (done_tx, done) = mpsc::sync_channel(1);
         let in_frames = Arc::new(AtomicBool::new(false));
         let flag = in_frames.clone();
+        let window = Arc::new(Mutex::new(()));
+        let touching = window.clone();
         let thread = std::thread::Builder::new()
             .name("nge-render".into())
             .spawn(move || {
                 let emit = Rc::new(emit);
-                let result = std::panic::catch_unwind(AssertUnwindSafe(|| run(instance, surface, emit.clone(), factory, rx, &flag)));
+                let result = std::panic::catch_unwind(AssertUnwindSafe(|| run(instance, surface, emit.clone(), factory, rx, &flag, &touching)));
                 let error = match result {
                     Ok(Ok(())) => None,
                     Ok(Err(e)) => Some(e),
@@ -86,7 +93,7 @@ impl Engine {
                 let _ = done_tx.send(());
             })
             .map_err(|e| format!("创建渲染线程失败: {e}"))?;
-        Ok(Self { tx, thread: Some(thread), done, in_frames, keep_alive: Some(keep_alive) })
+        Ok(Self { tx, thread: Some(thread), done, in_frames, window, keep_alive: Some(keep_alive) })
     }
 
     pub fn send(&self, msg: Msg) {
@@ -100,9 +107,13 @@ impl Engine {
         if self.tx.send(Msg::Pause(ack_tx)).is_err() {
             return true; // 线程已退出，本来就不在渲染
         }
-        // 还没进帧循环：Pause 已排在队列里，帧循环取画面前一定会先处理它
+        // 还没进帧循环：等它用完画面。Pause 已排在队列里，它再拿锁、进帧循环取画面前都会先看到
         if !self.in_frames.load(Ordering::SeqCst) {
-            return true;
+            if wait_unlocked(&self.window, START_PAUSE_TIMEOUT) {
+                return true;
+            }
+            log::error!("渲染线程 {}ms 内没有用完画面", START_PAUSE_TIMEOUT.as_millis());
+            return false;
         }
         match ack.recv_timeout(PAUSE_TIMEOUT) {
             Ok(()) | Err(RecvTimeoutError::Disconnected) => true,
@@ -159,22 +170,19 @@ fn run(
     factory: GameFactory,
     rx: Receiver<Msg>,
     in_frames: &AtomicBool,
+    window: &Mutex<()>,
 ) -> Result<(), String> {
-    // 等到第一个有效视口、且没有处于暂停时再初始化 GPU；期间收到的消息先攒着
+    // 等到第一个有效视口、且没有处于暂停时再初始化 GPU；期间收到的消息先攒着，换过画面（Android 切了一次后台）就用新的
     let mut gate = Gate::default();
-    let viewport = loop {
-        if let Some(viewport) = gate.ready() {
-            break viewport;
-        }
-        if !gate.push(rx.recv().map_err(|_| "主线程已断开".to_string())?) {
-            return Ok(());
-        }
-    };
-
-    // 等的时候换过画面（Android 切了一次后台）就用新的
-    let surface = gate.surface.take().unwrap_or(surface);
-    let gpu = pollster::block_on(request_gpu(&instance, surface))?;
-    let (gfx, surface, cache) = configure(gpu, viewport)?;
+    let started = start(
+        &mut gate,
+        &rx,
+        window,
+        surface,
+        |surface| pollster::block_on(request_gpu(&instance, surface)),
+        |gpu, surface, viewport| configure(gpu.with_surface(surface), viewport),
+    )?;
+    let Some((gfx, surface, cache)) = started else { return Ok(()) };
     let game = factory(&gfx);
     let mut state = Loop { core: Core::new(game, gfx, surface, emit, cache), rx };
     for msg in gate.take() {
@@ -235,7 +243,9 @@ impl Loop {
 
     /// 暂停：确认后阻塞到 Resume。返回 false 表示期间收到了 Quit。
     fn paused(&mut self, ack: SyncSender<()>) -> bool {
+        // 先确认再存管线缓存：写盘不挡着平台层
         let _ = ack.send(());
+        self.core.save_pipeline_cache();
         loop {
             match self.rx.recv() {
                 Ok(Msg::Resume) => return true,

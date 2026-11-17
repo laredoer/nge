@@ -19,6 +19,7 @@ use nsh_core::{EventKind, EventPayload, JsonValue, NodeId};
 
 use crate::host::{Host, host};
 use crate::java::{java, with_env};
+use crate::guard::guard;
 use crate::registry::Registry;
 
 /// 一个 Rust 写的原生组件。
@@ -42,15 +43,20 @@ pub trait NativeComponent {
         false
     }
 
-    /// 手柄的轴（[`AXES`] 的顺序）；返回 true 吞掉。
+    /// 手柄的轴（[`AXES`] 的顺序，设备没有的轴是 NaN）；返回 true 吞掉。
     fn motion(&mut self, device: i32, axes: &[f32]) -> bool {
         let _ = (device, axes);
         false
     }
+
+    /// 按着的键可能再也等不到松开：手柄 `device` 拔掉了（`Some`），或者窗口失焦了（`None`：全部）。
+    fn input_lost(&mut self, device: Option<i32>) {
+        let _ = device;
+    }
 }
 
-/// `motion` 收到的轴：`MotionEvent.AXIS_X`、`Y`、`Z`、`RZ`、`HAT_X`、`HAT_Y`、`LTRIGGER`、`RTRIGGER`、`BRAKE`、`GAS`。
-pub const AXES: [i32; 10] = [0, 1, 11, 14, 15, 16, 17, 18, 23, 22];
+/// `motion` 收到的轴：`MotionEvent.AXIS_X`、`Y`、`Z`、`RZ`、`HAT_X`、`HAT_Y`、`LTRIGGER`、`RTRIGGER`、`BRAKE`、`GAS`、`RX`、`RY`。
+pub const AXES: [i32; 12] = [0, 1, 11, 14, 15, 16, 17, 18, 23, 22, 12, 13];
 
 /// 一个按键事件（`KeyEvent`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,6 +71,8 @@ pub struct Key {
     pub repeat: i32,
     /// `getMetaState()`。
     pub meta: i32,
+    /// `getDeviceId()`。
+    pub device: i32,
     /// 焦点在输入框（或别的组件）里：在打字。
     pub editing: bool,
 }
@@ -133,6 +141,20 @@ impl ComponentContext {
         self.shared.context.as_obj().as_raw().cast()
     }
 
+    /// 应用的 `Context` 新的一份全局引用，归调用方（比如交给 `ndk-context`、和进程一样长）；拿不到时是空指针。
+    /// 只引用应用的 `Context`，不拿着组件所在的视图和 Activity。
+    pub fn new_android_context_ref(&self) -> *mut c_void {
+        let global = with_env(|env| env.new_global_ref(self.shared.context.as_obj()).map(Some));
+        match global {
+            Some(global) => {
+                let raw = global.as_obj().as_raw().cast();
+                std::mem::forget(global);
+                raw
+            }
+            None => std::ptr::null_mut(),
+        }
+    }
+
     /// `Context.getCodeCacheDir()`：放编好的代码的缓存目录，App 更新后系统会清掉。
     pub fn code_cache_dir(&self) -> &Path {
         &self.shared.code_cache_dir
@@ -180,8 +202,10 @@ unsafe fn component<'a>(ptr: jlong) -> Option<&'a mut Box<dyn NativeComponent>> 
 
 #[unsafe(no_mangle)]
 extern "system" fn Java_com_longbridge_nsh_Native_rustComponentExists(mut env: JNIEnv<'_>, _: JClass<'_>, name: JString<'_>) -> jboolean {
-    let Some(name) = string(&mut env, &name) else { return JNI_FALSE };
-    if registry().get(&name).is_some() { JNI_TRUE } else { JNI_FALSE }
+    guard("rustComponentExists", JNI_FALSE, || {
+        let Some(name) = string(&mut env, &name) else { return JNI_FALSE };
+        if registry().get(&name).is_some() { JNI_TRUE } else { JNI_FALSE }
+    })
 }
 
 #[unsafe(no_mangle)]
@@ -195,39 +219,45 @@ extern "system" fn Java_com_longbridge_nsh_Native_rustComponentCreate(
     code_cache_dir: JString<'_>,
     density: jfloat,
 ) -> jlong {
-    let Some(name) = string(&mut env, &name) else { return 0 };
-    let Some(factory) = registry().get(&name) else {
-        if registry().first_miss(&name) {
-            log::warn!("没有叫 `{name}` 的 Rust 组件");
-        }
-        return 0;
-    };
-    let Ok(context) = env.new_global_ref(context) else { return 0 };
-    let code_cache_dir = string(&mut env, &code_cache_dir).map(PathBuf::from).unwrap_or_default();
-    // SAFETY: Java 传的是活着的 handle。
-    let host = unsafe { host(handle) }.clone();
-    let ctx = ComponentContext { host, id: id as NodeId, shared: Arc::new(Shared { context, code_cache_dir, density }) };
-    Box::into_raw(Box::new(factory(ctx))) as jlong
+    guard("rustComponentCreate", 0, || {
+        let Some(name) = string(&mut env, &name) else { return 0 };
+        let Some(factory) = registry().get(&name) else {
+            if registry().first_miss(&name) {
+                log::warn!("没有叫 `{name}` 的 Rust 组件");
+            }
+            return 0;
+        };
+        let Ok(context) = env.new_global_ref(context) else { return 0 };
+        let code_cache_dir = string(&mut env, &code_cache_dir).map(PathBuf::from).unwrap_or_default();
+        // SAFETY: Java 传的是活着的 handle。
+        let host = unsafe { host(handle) }.clone();
+        let ctx = ComponentContext { host, id: id as NodeId, shared: Arc::new(Shared { context, code_cache_dir, density }) };
+        Box::into_raw(Box::new(factory(ctx))) as jlong
+    })
 }
 
 #[unsafe(no_mangle)]
 extern "system" fn Java_com_longbridge_nsh_Native_rustComponentProp(mut env: JNIEnv<'_>, _: JClass<'_>, ptr: jlong, name: JString<'_>, value: JString<'_>) {
-    let Some(name) = string(&mut env, &name) else { return };
-    let value = json(&mut env, &value).filter(|v| !v.is_null());
-    // SAFETY: Java 传的是活着的指针。
-    if let Some(c) = unsafe { component(ptr) } {
-        c.set_prop(&name, value.as_ref());
-    }
+    guard("rustComponentProp", (), || {
+        let Some(name) = string(&mut env, &name) else { return };
+        let value = json(&mut env, &value).filter(|v| !v.is_null());
+        // SAFETY: Java 传的是活着的指针。
+        if let Some(c) = unsafe { component(ptr) } {
+            c.set_prop(&name, value.as_ref());
+        }
+    })
 }
 
 #[unsafe(no_mangle)]
 extern "system" fn Java_com_longbridge_nsh_Native_rustComponentCommand(mut env: JNIEnv<'_>, _: JClass<'_>, ptr: jlong, name: JString<'_>, args: JString<'_>) {
-    let Some(name) = string(&mut env, &name) else { return };
-    let args = json(&mut env, &args).unwrap_or(JsonValue::Null);
-    // SAFETY: Java 传的是活着的指针。
-    if let Some(c) = unsafe { component(ptr) } {
-        c.command(&name, &args);
-    }
+    guard("rustComponentCommand", (), || {
+        let Some(name) = string(&mut env, &name) else { return };
+        let args = json(&mut env, &args).unwrap_or(JsonValue::Null);
+        // SAFETY: Java 传的是活着的指针。
+        if let Some(c) = unsafe { component(ptr) } {
+            c.command(&name, &args);
+        }
+    })
 }
 
 #[link(name = "android")]
@@ -237,17 +267,19 @@ unsafe extern "C" {
 
 #[unsafe(no_mangle)]
 extern "system" fn Java_com_longbridge_nsh_Native_rustComponentSurface(env: JNIEnv<'_>, _: JClass<'_>, ptr: jlong, surface: JObject<'_>, width: jint, height: jint) {
-    // SAFETY: Java 传的是活着的指针。
-    let Some(c) = (unsafe { component(ptr) }) else { return };
-    if surface.is_null() {
-        return c.surface(None);
-    }
-    // SAFETY: `surface` 是一个 `android.view.Surface`。
-    let window = unsafe { ANativeWindow_fromSurface(env.get_raw(), surface.as_raw()) };
-    match NonNull::new(window) {
-        Some(window) => c.surface(Some(Surface { window, width: width.max(0) as u32, height: height.max(0) as u32 })),
-        None => log::error!("ANativeWindow_fromSurface 没拿到窗口"),
-    }
+    guard("rustComponentSurface", (), || {
+        // SAFETY: Java 传的是活着的指针。
+        let Some(c) = (unsafe { component(ptr) }) else { return };
+        if surface.is_null() {
+            return c.surface(None);
+        }
+        // SAFETY: `surface` 是一个 `android.view.Surface`。
+        let window = unsafe { ANativeWindow_fromSurface(env.get_raw(), surface.as_raw()) };
+        match NonNull::new(window) {
+            Some(window) => c.surface(Some(Surface { window, width: width.max(0) as u32, height: height.max(0) as u32 })),
+            None => log::error!("ANativeWindow_fromSurface 没拿到窗口"),
+        }
+    })
 }
 
 #[unsafe(no_mangle)]
@@ -260,29 +292,46 @@ extern "system" fn Java_com_longbridge_nsh_Native_rustComponentKey(
     down: jboolean,
     repeat: jint,
     meta: jint,
+    device: jint,
     editing: jboolean,
 ) -> jboolean {
-    // SAFETY: Java 传的是活着的指针。
-    let Some(c) = (unsafe { component(ptr) }) else { return JNI_FALSE };
-    let key = Key { code, source, down: down == JNI_TRUE, repeat, meta, editing: editing == JNI_TRUE };
-    if c.key(&key) { JNI_TRUE } else { JNI_FALSE }
+    guard("rustComponentKey", JNI_FALSE, || {
+        // SAFETY: Java 传的是活着的指针。
+        let Some(c) = (unsafe { component(ptr) }) else { return JNI_FALSE };
+        let key = Key { code, source, down: down == JNI_TRUE, repeat, meta, device, editing: editing == JNI_TRUE };
+        if c.key(&key) { JNI_TRUE } else { JNI_FALSE }
+    })
 }
 
 #[unsafe(no_mangle)]
 extern "system" fn Java_com_longbridge_nsh_Native_rustComponentMotion(env: JNIEnv<'_>, _: JClass<'_>, ptr: jlong, device: jint, axes: JFloatArray<'_>) -> jboolean {
-    // SAFETY: Java 传的是活着的指针。
-    let Some(c) = (unsafe { component(ptr) }) else { return JNI_FALSE };
-    let mut values = [0.0; AXES.len()];
-    if env.get_float_array_region(&axes, 0, &mut values).is_err() {
-        return JNI_FALSE;
-    }
-    if c.motion(device, &values) { JNI_TRUE } else { JNI_FALSE }
+    guard("rustComponentMotion", JNI_FALSE, || {
+        // SAFETY: Java 传的是活着的指针。
+        let Some(c) = (unsafe { component(ptr) }) else { return JNI_FALSE };
+        let mut values = [f32::NAN; AXES.len()];
+        if env.get_float_array_region(&axes, 0, &mut values).is_err() {
+            return JNI_FALSE;
+        }
+        if c.motion(device, &values) { JNI_TRUE } else { JNI_FALSE }
+    })
+}
+
+#[unsafe(no_mangle)]
+extern "system" fn Java_com_longbridge_nsh_Native_rustComponentInputLost(_: JNIEnv<'_>, _: JClass<'_>, ptr: jlong, device: jint, all: jboolean) {
+    guard("rustComponentInputLost", (), || {
+        // SAFETY: Java 传的是活着的指针。
+        if let Some(c) = unsafe { component(ptr) } {
+            c.input_lost(if all == JNI_TRUE { None } else { Some(device) });
+        }
+    })
 }
 
 #[unsafe(no_mangle)]
 extern "system" fn Java_com_longbridge_nsh_Native_rustComponentDestroy(_: JNIEnv<'_>, _: JClass<'_>, ptr: jlong) {
-    if ptr != 0 {
-        // SAFETY: `rustComponentCreate` 给的，Java 只释放一次。
-        drop(unsafe { Box::from_raw(ptr as *mut Box<dyn NativeComponent>) });
-    }
+    guard("rustComponentDestroy", (), || {
+        if ptr != 0 {
+            // SAFETY: `rustComponentCreate` 给的，Java 只释放一次。
+            drop(unsafe { Box::from_raw(ptr as *mut Box<dyn NativeComponent>) });
+        }
+    })
 }

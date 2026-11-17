@@ -8,7 +8,7 @@ use bevy_ecs::prelude::*;
 use bevy_ecs::schedule::{IntoScheduleConfigs, ScheduleLabel};
 use bevy_ecs::system::ScheduleSystem;
 use glam::Vec2;
-use nge_core::bridge::{GAMEPAD, KEY, TOUCH};
+use nge_core::bridge::{GAMEPAD, KEY, SUSPEND, TOUCH};
 use nge_core::{Ctx, FrameTiming, Game, GameFactory, Gfx, Viewport, wgpu};
 use serde_json::Value as JsonValue;
 
@@ -36,6 +36,7 @@ pub(crate) struct Last;
 /// 收到某个 prop / command 时把它转成类型化资源 / 消息。
 pub(crate) type PropHandler = Box<dyn Fn(&mut World, Option<&JsonValue>)>;
 pub(crate) type CommandHandler = Box<dyn Fn(&mut World, &JsonValue)>;
+type SuspendHook = Box<dyn Fn(&mut World, bool)>;
 
 pub trait Plugin: 'static {
     fn build(&self, app: &mut App);
@@ -66,6 +67,8 @@ pub struct App {
     message_updaters: Vec<fn(&mut World)>,
     pub(crate) props: HashMap<&'static str, PropHandler>,
     pub(crate) commands: HashMap<&'static str, CommandHandler>,
+    /// 收到 [`SUSPEND`] 时当场跑（渲染线程停着，没有帧）。
+    suspend_hooks: Vec<SuspendHook>,
     /// 已注册的游戏 → NSH 通道名（State 和 Event 共用 NSH 的事件名空间）。
     pub(crate) outbound: HashSet<&'static str>,
     plugins: HashSet<std::any::TypeId>,
@@ -101,6 +104,7 @@ impl App {
             message_updaters: Vec::new(),
             props: HashMap::new(),
             commands: HashMap::new(),
+            suspend_hooks: Vec::new(),
             outbound: HashSet::new(),
             plugins: HashSet::new(),
             started: false,
@@ -183,6 +187,12 @@ impl App {
         &mut self.world
     }
 
+    /// 画面没了、App 进了后台（`true`）或者回来了（`false`）时当场调 `hook`（平台层发 [`SUSPEND`]）。
+    pub fn on_suspend(&mut self, hook: impl Fn(&mut World, bool) + 'static) -> &mut Self {
+        self.suspend_hooks.push(Box::new(hook));
+        self
+    }
+
     /// 收到 NSH 的 command：触摸、按键和手柄摇杆进 Input，注册过的变成类型化消息，其余变成 [`NshCommand`]。
     pub fn command(&mut self, name: &str, args: &JsonValue) {
         if name == TOUCH.name() {
@@ -198,6 +208,15 @@ impl App {
         } else if name == GAMEPAD.name() {
             match GAMEPAD.decode(args) {
                 Ok(g) => self.world.resource_mut::<Input>().sticks(g.left, g.right),
+                Err(e) => log::warn!("{e}"),
+            }
+        } else if name == SUSPEND.name() {
+            match SUSPEND.decode(args) {
+                Ok(s) => {
+                    for hook in &self.suspend_hooks {
+                        hook(&mut self.world, s.suspended);
+                    }
+                }
                 Err(e) => log::warn!("{e}"),
             }
         } else if let Some(handler) = self.commands.get(name) {
@@ -426,6 +445,19 @@ mod tests {
         assert_eq!((time.delta, time.elapsed, time.frame), (0.25, 0.75, 2));
         let screen = *app.world().resource::<Screen>();
         assert_eq!((screen.size, screen.scale), (Vec2::new(400.0, 300.0), 2.0));
+    }
+
+    #[test]
+    fn suspend_runs_the_hooks_at_once_without_a_frame() {
+        let mut app = App::new();
+        app.insert_resource(Outbox::default());
+        app.on_suspend(|world, suspended| world.resource_mut::<Outbox>().emit("suspended", json!(suspended)));
+        app.command("nge.suspend", &json!({ "suspended": true }));
+        assert_eq!(app.world_mut().resource_mut::<Outbox>().drain().collect::<Vec<_>>(), vec![("suspended".to_owned(), json!(true))], "暂停时没有帧，当场跑");
+        app.command("nge.suspend", &json!({ "suspended": false }));
+        assert_eq!(app.world_mut().resource_mut::<Outbox>().drain().collect::<Vec<_>>(), vec![("suspended".to_owned(), json!(false))]);
+        app.command("nge.suspend", &json!("坏的"));
+        assert!(app.world_mut().resource_mut::<Outbox>().drain().next().is_none(), "解不出来的不跑");
     }
 
     #[test]

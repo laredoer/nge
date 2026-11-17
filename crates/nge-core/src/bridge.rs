@@ -25,6 +25,9 @@ pub const KEY: CommandKey<KeyInput> = CommandKey::new("key");
 pub const KEY_EVENT: EventKey<KeyInput> = EventKey::new("key");
 /// 内置：手柄摇杆的模拟量（Mac），平台层在值变了时发给游戏；按钮走 [`KEY`]。
 pub const GAMEPAD: CommandKey<GamepadInput> = CommandKey::new("gamepad");
+/// 内置（平台层发）：画面没了、App 进了后台（`true`）或者回来了（`false`）。渲染线程停着时也会当场处理，
+/// 游戏用 `App::on_suspend` 接（比如停掉声音）。
+pub const SUSPEND: CommandKey<Suspend> = CommandKey::new("nge.suspend");
 /// 内置：每秒一次的帧率和最长帧间隔。
 pub const FRAME_STATS: EventKey<FrameReport> = EventKey::new("fps");
 /// 内置：渲染线程出错（初始化失败、panic、surface 丢失）。`game_view()` 默认记日志。
@@ -80,6 +83,12 @@ pub struct KeyInput {
     /// 按住不放时系统自动重复的按下。
     #[serde(default)]
     pub repeat: bool,
+}
+
+/// [`SUSPEND`] 的参数。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Suspend {
+    pub suspended: bool,
 }
 
 /// 两根摇杆，x 向右、y 向上，各在 −1 … 1，已经去掉死区。
