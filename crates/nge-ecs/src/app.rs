@@ -238,6 +238,10 @@ impl App {
         } else if name == SUSPEND.name() {
             match SUSPEND.decode(args) {
                 Ok(s) => {
+                    // 切后台时按着的触屏按钮、摇杆可能等不到松开
+                    if s.suspended {
+                        self.world.resource_mut::<Actions>().release_driven();
+                    }
                     for hook in &self.suspend_hooks {
                         hook(&mut self.world, s.suspended);
                     }

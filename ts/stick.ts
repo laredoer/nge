@@ -26,13 +26,18 @@ export function stickValue(dx: number, dy: number, shape: StickShape = STICK_DEF
   return [dx * k, -dy * k];
 }
 
-/** 八方向按 45° 一格取最近的方向，四方向取绝对值大的轴。 */
+/** tan 22.5°：八方向里离轴不到 22.5° 的算正方向。 */
+const OCTANT_EDGE = Math.SQRT2 - 1;
+const sign = (v: number) => (v > 0 ? 1 : v < 0 ? -1 : 0);
+
+/** 八方向按 45° 一格取最近的方向（边界按绝对值比，上下左右镜像对称），四方向取绝对值大的轴。 */
 export function snapDirection([x, y]: Vec, directions: "8" | "4"): Vec {
   if (x === 0 && y === 0) return [0, 0];
-  if (directions === "4") return Math.abs(x) >= Math.abs(y) ? [Math.sign(x), 0] : [0, Math.sign(y)];
-  const octant = Math.round(Math.atan2(y, x) / (Math.PI / 4));
-  const angle = (octant * Math.PI) / 4;
-  return [Math.round(Math.cos(angle)), Math.round(Math.sin(angle))].map((v) => v + 0) as Vec;
+  const [ax, ay] = [Math.abs(x), Math.abs(y)];
+  if (directions === "4") return ax >= ay ? [sign(x), 0] : [0, sign(y)];
+  if (ay <= ax * OCTANT_EDGE) return [sign(x), 0];
+  if (ax <= ay * OCTANT_EDGE) return [0, sign(y)];
+  return [sign(x), sign(y)];
 }
 
 /** 摇杆头画在哪：偏移限在半径以内（屏幕坐标）。 */
@@ -58,19 +63,29 @@ export interface StickTouch {
   y: number;
 }
 
+/** 固定摇杆接管离中心多远以内（半径的倍数）按下的手指。 */
+export const STICK_REACH = 1.5;
+
 /**
- * 一次触摸变化之后的状态。没手指时第一根按下的接管（浮动模式中心是按下的点，固定模式是 `center`），
+ * 一次触摸变化之后的状态。没手指时第一根按下的接管（浮动模式中心是按下的点，固定模式是 `center`，只接管离中心 `reach` 以内的），
  * 别的手指不管；接管的那根抬起或被取消时放开；同一个 id 又按下（丢了 end）当新的一次。
  */
-export function stickStep(state: StickState, touch: StickTouch, place: { mode: "float" | "fixed"; center: Vec }): StickState {
+export function stickStep(state: StickState, touch: StickTouch, place: { mode: "float" | "fixed"; center: Vec; reach?: number }): StickState {
   const at: Vec = [touch.x, touch.y];
   const mine = state !== null && state.id === touch.id;
   if (touch.phase === "start") {
     if (state !== null && !mine) return state;
-    return { id: touch.id, center: place.mode === "float" ? at : place.center, at };
+    if (place.mode === "float") return { id: touch.id, center: at, at };
+    const far = place.reach !== undefined && Math.hypot(at[0] - place.center[0], at[1] - place.center[1]) > place.reach;
+    return far ? (mine ? null : state) : { id: touch.id, center: place.center, at };
   }
   if (!mine) return state;
   return touch.phase === "move" ? { ...state, at } : null;
+}
+
+/** 接管的手指不在现在按着的手指（`ids`，事件的 `touches`）里：它的 end 丢了，放开。不知道按着哪些（空的）时不动。 */
+export function stickKeep(state: StickState, ids: number[]): StickState {
+  return state !== null && ids.length > 0 && !ids.includes(state.id) ? null : state;
 }
 
 /** 现在的摇杆值（没手指是 [0, 0]），按方向模式量化。 */

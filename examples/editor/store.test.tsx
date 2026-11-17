@@ -233,6 +233,22 @@ test("画布：刷子画一笔是一步，框选框画在场景里", () => {
   expect(store.sceneInput().box).toBe(null);
 });
 
+test("画布：按下后被取消（第二根手指按下）选中的回到按下之前", () => {
+  const { store } = setup();
+  store.view.set({ x: 0, y: 0, zoom: 1 });
+  store.size.set([800, 600]);
+  const at = (id: string): [number, number] => [400 + store.entity(id)!.x, 300 - store.entity(id)!.y];
+  store.pointer("down", at("e1"));
+  store.pointer("up", at("e1"));
+  store.pointer("down", at("e2"));
+  expect(store.selection()).toEqual(["e2"]);
+  store.pointer("cancel", at("e2"));
+  expect(store.selection()).toEqual(["e1"]);
+  // 没按着时的取消不动选中的
+  store.pointer("cancel", [0, 0]);
+  expect(store.selection()).toEqual(["e1"]);
+});
+
 test("属性：站在地上的不能改高度，固定大小的不能改宽高，名字带控制字符的不改", () => {
   const { store } = setup();
   store.addAtCenter("tower");

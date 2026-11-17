@@ -1,4 +1,5 @@
 // 画布上的纯逻辑：坐标换算、视图、点选和框选、吸附、瓦片刷、复制粘贴（docs/editor.md）。
+import { signal } from "nsh";
 import { expect, test } from "nsh/test";
 import { emptyLevel, type Entity, type LevelFile } from "../../ts/level";
 import { screenToWorld, worldToScreen } from "../../ts/nge";
@@ -6,6 +7,7 @@ import { copy, nextId, pasted } from "./clipboard";
 import { boxSelect, hitTest, prune, toggle } from "./select";
 import { snapPoint, snapValue } from "./snap";
 import { cellAt, cellsBetween, layerWith, strokeAdd, NEW_STROKE } from "./tiles";
+import { trackpadZoom } from "./trackpad";
 import { MAX_ZOOM, MIN_ZOOM, pan, pinchView, zoomAt } from "./view";
 
 const SIZE: [number, number] = [400, 300];
@@ -166,4 +168,39 @@ test("点选按画的先后：深度大的先命中，一样深时列表里靠�
   const depth = (e: Entity) => (e.id === "high" ? 3 : e.id === "mid" ? 2 : 2);
   expect(hitTest(es, b, [0, 0], 0, depth)).toBe("high");
   expect(hitTest(es.filter((e) => e.id !== "high"), b, [0, 0], 0, depth)).toBe("mid");
+});
+
+test("触控板捏合：捏的时候定时读倍数；停掉后不再读，晚到的读数、读失败都不管", async () => {
+  const view = signal({ x: 0, y: 0, zoom: 1 });
+  const reads: { resolve: (v: number) => void; reject: (e: unknown) => void }[] = [];
+  const scale = { getValue: () => new Promise<number>((resolve, reject) => reads.push({ resolve, reject })), set: (_v: number) => {} };
+  const ticks = new Map<number, () => void>();
+  let next = 1;
+  const ticker = { every: (fn: () => void, _ms: number) => (ticks.set(next, fn), next++), stop: (h: number | undefined) => void (h !== undefined && ticks.delete(h)) };
+  const t = trackpadZoom({ view, size: () => SIZE }, scale, ticker);
+  const tick = () => [...ticks.values()].forEach((fn) => fn());
+  const settle = () => new Promise((r) => setTimeout(r, 0));
+  t.start();
+  tick();
+  reads[0].resolve(2);
+  await settle();
+  expect(view().zoom).toBe(2);
+  // 第一次捏的读数晚到：第二次捏已经开始了，不算
+  tick();
+  t.end({ scale: 1.5 });
+  t.start();
+  reads[1].resolve(4);
+  await settle();
+  expect(view().zoom).toBe(1.5);
+  // 读失败不抛出
+  tick();
+  reads[2].reject(new Error("没了"));
+  await settle();
+  // 卸载（⌘R 试玩）：计时器停掉，之后到的读数不管
+  tick();
+  t.stop();
+  expect(ticks.size).toBe(0);
+  reads[3].resolve(3);
+  await settle();
+  expect(view().zoom).toBe(1.5);
 });

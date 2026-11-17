@@ -1,12 +1,13 @@
 import { mount, type NativeComponentRef, platform, safeArea, signal, Text, View } from "nsh";
-import { ActionButton, burst, floatText, gameView, shake, sound, VirtualStick, type ActionEvent } from "../../ts/nge";
+import { burst, floatText, gameView, shake, sound, type ActionEvent } from "../../ts/nge";
+import { EndScreen, TouchLayer } from "./controls";
 import { footY, zOf } from "./belt";
 import { newGame, step, type Game, type GameEvent } from "./game";
 import { hudOf } from "./hud";
 import { pace } from "./pace";
 import { DT, NO_INPUT, type Input } from "./player";
 import { strings } from "./strings";
-import { ATTACK_REPEAT, NO_TOUCH, thrustCooldown, TOUCH_ACTIONS, touchAction, withTouch } from "./touch";
+import { NO_TOUCH, thrustCooldown, TOUCH_ACTIONS, touchAction, withTouch } from "./touch";
 import { sceneOf, SOUNDS } from "./view";
 // 打包时才保留 sanguo 的原生模块（web 上游戏视图在那里注册，见 docs/web.md）
 import "sanguo/native";
@@ -117,7 +118,7 @@ function App() {
         }}
       />
       <Hud hud={hud} onRestart={restart} />
-      {platform.desktop || hud().end !== null ? null : <TouchControls game={() => game} cooldown={() => thrustCooldown(state().player)} />}
+      <TouchLayer hud={hud} game={() => game} cooldown={() => thrustCooldown(state().player)} />
     </View>
   );
 }
@@ -163,35 +164,8 @@ function Hud(props: { hud: () => ReturnType<typeof hudOf>; onRestart: () => void
           <Text class="text-white text-2xl">{h().paused}</Text>
         </View>
       )}
-      {h().end === null ? null : (
-        <View
-          testID="end"
-          class={`absolute top-0 left-0 right-0 bottom-0 items-center justify-center gap-3 ${h().end!.won ? "bg-amber-900/50" : "bg-black/60"}`}
-          onPress={props.onRestart}
-        >
-          <Text class={`text-4xl font-bold ${h().end!.won ? "text-amber-200" : "text-red-300"}`}>{h().end!.title}</Text>
-          <Text class="text-white text-lg">{h().end!.info}</Text>
-          <Text class="text-white/80 text-base">{platform.desktop ? h().end!.restart : t("restartTouch")}</Text>
-        </View>
-      )}
+      <EndScreen end={() => h().end} onRestart={props.onRestart} />
       {platform.desktop ? <Text class="absolute bottom-2 left-4 right-4 text-white/60 text-xs">{t("help")}</Text> : null}
-    </View>
-  );
-}
-
-/**
- * 触屏设备上的操作（docs/touch-input.md）：左半边浮动摇杆（八方向）驱动 `move`，右下攻击（按住连发）、突刺（显示冷却）、跳。
- * 都按动作发给引擎，引擎发回 `action` 事件。
- */
-function TouchControls(props: { game: () => NativeComponentRef | undefined; cooldown: () => number }) {
-  return (
-    <View style={{ pointerEvents: "box-none" }} class="absolute top-0 left-0 right-0 bottom-0">
-      <VirtualStick game={props.game} action="move" directions="8" class="absolute" style={{ left: safeArea().left, bottom: safeArea().bottom, width: "45%", height: "60%" }} />
-      <View class="absolute flex-row items-end gap-4" style={{ pointerEvents: "box-none", right: 24 + safeArea().right, bottom: 24 + safeArea().bottom }}>
-        <ActionButton game={props.game} action="thrust" label={t("thrustKey")} cooldown={props.cooldown} class="w-14 h-14" />
-        <ActionButton game={props.game} action="jump" label={t("jumpKey")} class="w-16 h-16" />
-        <ActionButton game={props.game} action="attack" label={t("attackKey")} repeat={ATTACK_REPEAT} class="w-20 h-20" />
-      </View>
     </View>
   );
 }

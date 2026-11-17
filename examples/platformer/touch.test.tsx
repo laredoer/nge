@@ -1,8 +1,8 @@
 // 触屏控制的纯逻辑（docs/touch-input.md）：摇杆的数学和手指跟踪、手势状态机、按钮的连发和冷却。
 import { expect, test } from "nsh/test";
 import { GESTURE_IDLE, gestureHandlers, gestureStep, type Gesture, type GestureInput, type GestureState } from "../../ts/gestures";
-import { knobOffset, snapDirection, stickCommand, stickOutput, stickStep, stickValue, type StickState, type StickTouch } from "../../ts/stick";
-import { cooldownFill, pressedLook, repeater } from "../../ts/touch";
+import { knobOffset, snapDirection, stickCommand, stickKeep, stickOutput, stickStep, stickValue, type StickState, type StickTouch } from "../../ts/stick";
+import { cooldownFill, heldKey, pressedLook, repeater } from "../../ts/touch";
 
 const near = (a: number[], b: number[], eps = 1e-6) => expect(a.every((v, i) => Math.abs(v - b[i]) < eps)).toBe(true);
 
@@ -131,7 +131,8 @@ test("轻点：没挪出 slop、长按之前抬起；挪一点点也算", () => 
 
 test("长按：计时到了发，抬起时不再发轻点；计时器晚了、抬起时已经超时也补发", () => {
   const r = feed([down(1, 50, 60, 0), move(1, 52, 60, 200), { phase: "hold", id: 1 }]);
-  expect(r.events).toEqual([{ kind: "longPress", x: 52, y: 60 }]);
+  // 位置是按下的地方，和抬起时补发的一样
+  expect(r.events).toEqual([{ kind: "longPress", x: 50, y: 60 }]);
   expect(kinds(feed([up(1, 52, 60, 900)], r.state).events)).toEqual([]);
   const late = feed([down(1, 50, 60, 0), up(1, 50, 60, 600)]);
   expect(late.events).toEqual([{ kind: "longPress", x: 50, y: 60 }]);
@@ -295,5 +296,102 @@ test("按住连发：按下立刻发，等 delay 后每隔 interval 重按一次
 
 test("冷却：截断在 0 … 1，坏的值当 0；按下时的样子和平时不一样", () => {
   expect([cooldownFill(0.4), cooldownFill(-1), cooldownFill(3), cooldownFill(Number.NaN)]).toEqual([0.4, 0, 1, 0]);
-  expect(pressedLook(true) === pressedLook(false)).toBe(false);
+  expect(pressedLook(true)).not.toEqual(pressedLook(false));
+});
+
+// ——— 修过的问题 ———
+
+test("八方向的边界对称：镜像的推法得到镜像的方向，没有 -0", () => {
+  const deg = (d: number): [number, number] => [Math.cos((d * Math.PI) / 180), Math.sin((d * Math.PI) / 180)];
+  for (const d of [22.5, 67.5, 10, 30, 45, 60, 80]) {
+    const [x, y] = deg(d);
+    const a = snapDirection([x, y], "8");
+    expect(snapDirection([x, -y], "8")).toEqual([a[0], -a[1] + 0]);
+    expect(snapDirection([-x, y], "8")).toEqual([-a[0] + 0, a[1]]);
+    expect(snapDirection([y, x], "8")).toEqual([a[1], a[0]]);
+  }
+  for (const v of [[-0.9, 0.01], [-0.9, -0.01], [0.01, -0.9], [-0.01, -0.9]] as [number, number][]) {
+    for (const mode of ["8", "4"] as const) for (const c of snapDirection(v, mode)) expect(Object.is(c, -0)).toBe(false);
+  }
+});
+
+test("固定摇杆只接管按在中心附近（reach 以内）的手指", () => {
+  const place = { mode: "fixed" as const, center: [80, 300] as [number, number], reach: 90 };
+  expect(stickStep(null, { phase: "start", id: 1, x: 180, y: 300 }, place)).toBe(null);
+  expect(stickStep(null, { phase: "start", id: 1, x: 160, y: 300 }, place)).toEqual({ id: 1, center: [80, 300], at: [160, 300] });
+  // 浮动模式不管 reach
+  expect(stickStep(null, { phase: "start", id: 1, x: 500, y: 300 }, { ...place, mode: "float" })?.id).toBe(1);
+});
+
+test("摇杆的手指不在按着的手指里（丢了 end）就放开；不知道按着哪些时不动", () => {
+  const s: StickState = { id: 1, center: [0, 0], at: [30, 0] };
+  expect(stickKeep(s, [2, 3])).toBe(null);
+  expect(stickKeep(s, [1, 2])).toBe(s);
+  expect(stickKeep(s, [])).toBe(s);
+  expect(stickKeep(null, [1])).toBe(null);
+});
+
+test("丢了 end 的 id 又按下：先补上一轮的结束事件（拖动、捏合）", () => {
+  const drag = feed([down(1, 0, 0, 0), move(1, 40, 0, 10), down(1, 200, 200, 100)]);
+  expect(kinds(drag.events)).toEqual(["dragStart", "dragEnd"]);
+  expect((drag.events[1] as Extract<Gesture, { kind: "dragEnd" }>).cancelled).toBe(true);
+  const pinch = feed([down(1, 0, 0, 0), down(2, 100, 0, 0), down(1, 300, 300, 100)]);
+  expect(kinds(pinch.events)).toEqual(["pinchStart", "pinchEnd"]);
+  expect(pinch.events[1]).toMatchObject({ cancelled: true });
+});
+
+test("捏合：两指一度靠得很近，每步的 factor 乘起来还是 scale", () => {
+  const r = feed([down(1, 0, 0, 0), down(2, 100, 0, 0), move(2, 0.001, 0, 10), move(2, 50, 0, 20), move(2, 0, 0, 30), move(2, 120, 0, 40)]);
+  const pinches = r.events.filter((e): e is Extract<Gesture, { kind: "pinch" }> => e.kind === "pinch");
+  let product = 1;
+  for (const p of pinches) {
+    expect(Number.isFinite(p.factor) && Number.isFinite(p.scale)).toBe(true);
+    product *= p.factor;
+    near([product], [p.scale], 1e-9);
+  }
+  near([pinches.at(-1)!.scale], [1.2], 1e-9);
+});
+
+const touchEv = (changed: [number, number, number, number][], touching?: number[]) =>
+  ({
+    changedTouches: changed.map(([identifier, locationX, locationY, timestamp]) => ({ identifier, locationX, locationY, timestamp })),
+    touches: (touching ?? changed.map(([id]) => id)).map((identifier) => ({ identifier })),
+  }) as never;
+
+test("gestureHandlers：按着的手指里没有了的（丢了 end）当取消；reset 取消所有手指、关掉计时", () => {
+  const got: Gesture[] = [];
+  const f = fakeTimers();
+  const h = gestureHandlers((g) => got.push(g), {}, f.timers);
+  h.onTouchStart(touchEv([[1, 0, 0, 0]]));
+  h.onTouchMove(touchEv([[1, 40, 0, 10]]));
+  // 手指 1 的 end 丢了；手指 2 按下时按着的只有 2
+  h.onTouchStart(touchEv([[2, 300, 300, 100]], [2]));
+  expect(kinds(got)).toEqual(["dragStart", "dragEnd"]);
+  expect(got[1]).toMatchObject({ cancelled: true });
+  h.onTouchEnd(touchEv([[2, 300, 300, 150]], []));
+  expect(got.at(-1)).toEqual({ kind: "tap", x: 300, y: 300 });
+  // 拖着时切后台
+  h.onTouchStart(touchEv([[3, 0, 0, 200]]));
+  h.onTouchMove(touchEv([[3, 50, 0, 210]]));
+  h.reset();
+  expect(got.at(-1)).toMatchObject({ kind: "dragEnd", cancelled: true });
+  expect(f.pending.size).toBe(0);
+  // 之后从头开始
+  h.onTouchStart(touchEv([[4, 5, 5, 300]]));
+  h.onTouchEnd(touchEv([[4, 5, 5, 320]], []));
+  expect(got.at(-1)).toEqual({ kind: "tap", x: 5, y: 5 });
+});
+
+test("屏幕按钮：按着的手指里没有了的当松开；reset 松开", () => {
+  const sent: boolean[] = [];
+  const k = heldKey((d) => sent.push(d));
+  k.start([1]);
+  k.keep([2]);
+  expect(sent).toEqual([true, false]);
+  k.start([2]);
+  k.keep([]);
+  expect(sent).toEqual([true, false, true]);
+  k.reset();
+  k.reset();
+  expect(sent).toEqual([true, false, true, false]);
 });

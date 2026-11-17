@@ -6265,6 +6265,10 @@ class Player {
     window.addEventListener("pointermove", (e) => this.pointerMove(e), { passive: false });
     window.addEventListener("pointerup", (e) => this.pointerUp(e, false));
     window.addEventListener("pointercancel", (e) => this.pointerUp(e, true));
+    // 页面藏起来、窗口没了焦点（切后台、来电、切标签页）时浏览器可能不再发 pointerup / pointercancel：
+    // 按着的指针都当取消，收触摸的视图收到 touchcancel（`cancelPointers`）。
+    document.addEventListener("visibilitychange", () => document.hidden && this.cancelPointers());
+    window.addEventListener("blur", () => this.cancelPointers());
     // A drag never drags images or text out of the app.
     root.addEventListener("dragstart", (e) => e.preventDefault());
     // A click leaves the keyboard focus where it is (in a field, too) and
@@ -7091,6 +7095,21 @@ class Player {
       const rect = p.press.getBoundingClientRect();
       const inside = e.clientX >= rect.left - 8 && e.clientX <= rect.right + 8 && e.clientY >= rect.top - 8 && e.clientY <= rect.bottom + 8;
       this.pressOut(p, inside && !cancelled);
+    }
+  }
+
+  /** 取消所有按着的指针：先给每根收触摸的发 touchcancel（双指手势收尾时会清掉别的指针，所以先发完），
+   * 再按 pointercancel 收尾（按下、拖动、双指）。 */
+  cancelPointers() {
+    const all = [...this.pointers];
+    for (const [id, p] of all) {
+      if (!p.touchPath.length) continue;
+      this.touchEvent(3, id);
+      p.touchPath = [];
+    }
+    for (const [pointerId, p] of all) {
+      p.scrolls = null;
+      this.pointerUp({ pointerId, pointerType: "touch", buttons: 0 }, true);
     }
   }
 

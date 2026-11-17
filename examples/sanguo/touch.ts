@@ -19,6 +19,9 @@ export const TOUCH_ACTIONS: ActionMap = {
 /** 攻击按住时每隔多久再按一次（秒）：连段靠它。 */
 export const ATTACK_REPEAT = 0.18;
 
+/** 结束画面出现以后多久（毫秒）才认按下：打到最后一下时还在连按的手指不会马上重开。 */
+export const END_GUARD_MS = 800;
+
 export interface TouchState {
   /** 摇杆的方向（−1 / 0 / 1，y 朝上是往里）。 */
   move: [number, number];
@@ -38,7 +41,10 @@ export function touchAction(s: TouchState, e: ActionEvent, paused: boolean): Tou
   return s;
 }
 
-/** 键盘的输入加上触屏的：键盘按着方向时以键盘为准，按键和触屏有一个按下就算。 */
+/**
+ * 键盘的输入加上触屏的：键盘按着方向时以键盘为准，按键和触屏有一个按下就算。
+ * 方向按分量各自合（有意的）：键盘只按着左右时上下照样听摇杆的，两只手各管一个轴也能走斜线。
+ */
 export function withTouch(input: Input, s: TouchState): Input {
   const has = (p: Press) => s.pressed.includes(p);
   return {

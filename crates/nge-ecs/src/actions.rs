@@ -119,6 +119,8 @@ pub struct Actions {
     driven: BTreeMap<(usize, String), BTreeMap<String, Vec2>>,
     driven_pressed: BTreeSet<(usize, String)>,
     driven_released: BTreeSet<(usize, String)>,
+    /// 上一帧结束时直接驱动按着的：这个来源按着时一帧里松开又按下才算重按。
+    driven_was: BTreeSet<(usize, String)>,
 }
 
 /// 一个玩家的动作。
@@ -235,6 +237,13 @@ impl Actions {
         }
     }
 
+    /// 松开所有直接驱动的动作（切后台：手指的结束事件可能不来了）。下一帧算刚松开、告诉 TSX。
+    pub fn release_driven(&mut self) {
+        let held = std::mem::take(&mut self.driven);
+        self.driven_pressed.clear();
+        self.driven_released.extend(held.into_keys());
+    }
+
     /// 只有一个玩家：不分手柄，读合并后的。
     fn merged(&self) -> bool {
         self.map.players.len() <= 1
@@ -318,7 +327,7 @@ impl Actions {
         self.sent.resize_with(players, BTreeMap::new);
         let merged = self.merged();
         let resend = std::mem::take(&mut self.resend);
-        let Self { map, slots, states, sent, blocked, blocked_pad, driven, driven_pressed, driven_released, .. } = self;
+        let Self { map, slots, states, sent, blocked, blocked_pad, driven, driven_pressed, driven_released, driven_was, .. } = self;
         for (player, bindings) in map.players.iter().enumerate() {
             let pad = if merged { None } else { Some(slots[player].and_then(|id| input.pad(id).map(|pad| (id, pad)))) };
             let reader = Reader { input, pad, blocked, blocked_pad };
@@ -342,6 +351,7 @@ impl Actions {
                     value: driven.get(&key).map(|sources| sources.values().fold(Vec2::ZERO, |sum, v| sum + *v)),
                     pressed: driven_pressed.contains(&key),
                     released: driven_released.contains(&key),
+                    was: driven_was.contains(&key),
                 };
                 *state = if map.capturing { ActionState { released: state.down, ..Default::default() } } else { evaluate(binding, &reader, direct, *state) };
                 let mut told = false;
@@ -366,6 +376,7 @@ impl Actions {
         }
         driven_pressed.clear();
         driven_released.clear();
+        *driven_was = driven.keys().cloned().collect();
     }
 }
 
@@ -380,6 +391,8 @@ struct Driven {
     value: Option<Vec2>,
     pressed: bool,
     released: bool,
+    /// 上一帧结束时按着。
+    was: bool,
 }
 
 /// 一个玩家读输入：键盘大家共用；手柄的键和模拟量，只有一个玩家时读合并后的（`pad` 是 `None`），不然读他自己的手柄（没有就都是 0）。
@@ -509,8 +522,8 @@ fn evaluate(binding: &Binding, r: &Reader, direct: Driven, prev: ActionState) ->
         Binding::Button { keys } => {
             let down = r.any(keys, Edge::Down) || direct.value.is_some();
             let (prs, rel) = (r.any(keys, Edge::Pressed) || direct.pressed, r.any(keys, Edge::Released) || direct.released);
-            // 直接驱动的按钮（按住连发）上一帧按着、这一帧松开过又按下，和键一样算重按
-            let repress = r.repressed(keys) || (prev.down && direct.pressed && direct.released);
+            // 直接驱动的按钮（按住连发）上一帧按着、这一帧松开过又按下，和键一样算重按；别的来源按着时触屏点一下不算
+            let repress = r.repressed(keys) || (direct.was && direct.pressed && direct.released);
             let (pressed, released) = edges(prev.down, down, prs, rel, repress, false);
             let held = f32::from(u8::from(direct.value.is_some()));
             ActionState { down, pressed, released, value: Vec2::new(keys.iter().map(|k| r.key_value(k)).fold(held, f32::max), 0.0) }
@@ -905,6 +918,38 @@ mod tests {
         tick(&mut app);
         tick(&mut app);
         assert!(actions(&app).down("jump") && !actions(&app).pressed("jump"));
+    }
+
+    #[test]
+    fn a_touch_tap_while_the_key_is_held_is_not_a_new_press() {
+        let mut app = app(map());
+        key(&mut app, "Space", true);
+        tick(&mut app);
+        // 键按着，触屏在一帧里点一下：触屏这个来源上一帧没按着，不算重按
+        act(&mut app, json!({ "action": "jump", "down": true }));
+        act(&mut app, json!({ "action": "jump", "down": false }));
+        let events = tick(&mut app);
+        let a = actions(&app);
+        assert!(a.down("jump") && !a.pressed("jump") && !a.released("jump"));
+        assert!(action_events(&events).is_empty(), "TSX 也不收到松开、按下");
+    }
+
+    #[test]
+    fn suspending_releases_what_touch_was_holding() {
+        let mut app = app(map());
+        act(&mut app, json!({ "action": "jump", "down": true }));
+        act(&mut app, json!({ "action": "move", "down": true, "x": -1, "source": "stick" }));
+        tick(&mut app);
+        // 切后台：手指的结束事件可能永远不来
+        app.command("nge.suspend", &json!({ "suspended": true }));
+        app.command("nge.suspend", &json!({ "suspended": false }));
+        let events = tick(&mut app);
+        let a = actions(&app);
+        assert!(!a.down("jump") && a.released("jump") && !a.down("move") && a.value("move") == 0.0);
+        assert_eq!(
+            action_events(&events),
+            [json!({ "action": "jump", "player": 0, "down": false, "x": 0, "y": 0 }), json!({ "action": "move", "player": 0, "down": false, "x": 0, "y": 0 })]
+        );
     }
 
     #[test]

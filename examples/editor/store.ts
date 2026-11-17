@@ -258,11 +258,19 @@ export function createStore(deps: Deps) {
       else if (out.selection !== undefined) selection.set(out.selection);
     });
   };
+  /** 按下之前选中的：按下就改了选中，被取消时（触屏第二根手指按下）改回去。 */
+  let beforeDown: string[] = [];
   const pointer = (phase: "down" | "move" | "up" | "cancel", p: [number, number], shift = false) => {
     const c = ctx();
     const before = drag();
-    if (phase === "cancel") return drag.set(IDLE);
+    if (phase === "cancel") {
+      return batch(() => {
+        if (before.kind !== "idle") selection.set(prune(beforeDown, level()));
+        drag.set(IDLE);
+      });
+    }
     if (phase === "down") {
+      beforeDown = selection();
       const out = pointerDown(c, p);
       return apply(shift ? { drag: out.drag } : out);
     }

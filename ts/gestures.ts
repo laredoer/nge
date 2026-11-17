@@ -74,10 +74,11 @@ export function gestureStep(state: GestureState, input: GestureInput, options: G
   if (input.phase === "hold") return hold(state, input.id);
   const at: Sample = { x: input.x, y: input.y, t: input.t };
   if (input.phase === "start") {
-    // 丢了 end 的 id 又按下：先当它没了
+    // 丢了 end 的 id 又按下：先当它被取消了，补上上一轮的结束事件
     const known = state.fingers.some((f) => f.id === input.id);
-    const base = known ? lift(state, input.id, at, true, options).state : state;
-    return press(base, { id: input.id, start: at, at, recent: [at] });
+    const before = known ? lift(state, input.id, at, true, options) : { state, events: [] };
+    const after = press(before.state, { id: input.id, start: at, at, recent: [at] });
+    return { state: after.state, events: [...before.events, ...after.events] };
   }
   const finger = state.fingers.find((f) => f.id === input.id);
   if (finger === undefined) return { state, events: [] };
@@ -168,8 +169,9 @@ function lift(state: GestureState, id: number, at: Sample, cancelled: boolean, o
 
 function hold(state: GestureState, id: number): Out {
   if (state.mode !== "press" || state.fingers[0]?.id !== id) return { state, events: [] };
-  const { at } = state.fingers[0];
-  return { state: { ...state, mode: "held" }, events: [{ kind: "longPress", x: at.x, y: at.y }] };
+  // 和抬起时补发的一样，用按下的位置
+  const { start } = state.fingers[0];
+  return { state: { ...state, mode: "held" }, events: [{ kind: "longPress", x: start.x, y: start.y }] };
 }
 
 function dragEnd(finger: Finger, cancelled: boolean): Gesture {
@@ -189,8 +191,10 @@ function directionOf(tx: number, ty: number): SwipeDirection {
 const distance = (a: Sample, b: Sample) => Math.hypot(b.x - a.x, b.y - a.y);
 const angleOf = (a: Sample, b: Sample) => (Math.atan2(b.y - a.y, b.x - a.x) * 180) / Math.PI;
 const middle = (a: Sample, b: Sample): [number, number] => [(a.x + b.x) / 2, (a.y + b.y) / 2];
-/** 两个距离的比；开始时叠在一起（距离 0）按 1。 */
-const ratio = (now: number, before: number) => (before > 0 ? now / before : 1);
+/** 两指距离小于这个（point）按这个算：叠在一起不除零，每步的 factor 乘起来正好是 scale。 */
+const MIN_PINCH_DISTANCE = 10;
+/** 两个距离的比。 */
+const ratio = (now: number, before: number) => Math.max(now, MIN_PINCH_DISTANCE) / Math.max(before, MIN_PINCH_DISTANCE);
 
 /** 角度差换到 (−180, 180]。 */
 function wrapDegrees(d: number): number {
@@ -208,6 +212,7 @@ const SYSTEM_TIMERS: GestureTimers = { set: (fn, ms) => setTimeout(fn, ms), clea
 /**
  * 接到视图上：返回 `onTouchStart` / `onTouchMove` / `onTouchEnd` / `onTouchCancel`。坐标用 `locationX/Y`（相对按下时的视图），
  * 所以放在子视图不收触摸的视图上（游戏视图正好）。按下时开一个长按的计时器。
+ * 按下、挪动时跟着的手指不在 `touches` 里（end 丢了）当取消；`reset()` 取消所有手指、关掉计时器（切后台、视图卸载时调，见 `touchGestures`）。
  */
 export function gestureHandlers(onGesture: (g: Gesture) => void, options: Partial<GestureOptions> = {}, timers: GestureTimers = SYSTEM_TIMERS) {
   const opts = { ...GESTURE_DEFAULTS, ...options };
@@ -223,7 +228,17 @@ export function gestureHandlers(onGesture: (g: Gesture) => void, options: Partia
     if (h !== undefined) timers.clear(h);
     holds.delete(id);
   };
+  const cancelAll = (keep: (id: number) => boolean) => {
+    for (const f of state.fingers) {
+      if (keep(f.id)) continue;
+      stopHold(f.id);
+      feed({ phase: "cancel", id: f.id, x: f.at.x, y: f.at.y, t: f.at.t });
+    }
+  };
   const each = (phase: "start" | "move" | "end" | "cancel") => (e: GestureResponderEvent) => {
+    const touching = (e.touches ?? []).map((t) => t.identifier);
+    const changed = e.changedTouches.map((t) => t.identifier);
+    if ((phase === "start" || phase === "move") && touching.length > 0) cancelAll((id) => touching.includes(id) || changed.includes(id));
     for (const t of e.changedTouches) {
       const id = t.identifier;
       if (phase === "end" || phase === "cancel" || phase === "start") stopHold(id);
@@ -231,5 +246,11 @@ export function gestureHandlers(onGesture: (g: Gesture) => void, options: Partia
       if (phase === "start") holds.set(id, timers.set(() => (holds.delete(id), feed({ phase: "hold", id })), opts.longPress));
     }
   };
-  return { onTouchStart: each("start"), onTouchMove: each("move"), onTouchEnd: each("end"), onTouchCancel: each("cancel") };
+  const reset = () => {
+    cancelAll(() => false);
+    for (const h of holds.values()) timers.clear(h);
+    holds.clear();
+    state = GESTURE_IDLE;
+  };
+  return { onTouchStart: each("start"), onTouchMove: each("move"), onTouchEnd: each("end"), onTouchCancel: each("cancel"), reset };
 }

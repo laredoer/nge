@@ -43,17 +43,28 @@
 纯函数（都在 `ts/stick.ts`）：
 
 - `stickValue(dx, dy, { radius, deadZone })`：手指相对中心的偏移（屏幕坐标，y 朝下）→ 摇杆值（y 朝上）。长度在 `deadZone × radius` 以内是 `[0, 0]`；外面按 `(长度 − 死区) / (半径 − 死区)` 重新铺满 0 … 1，超过半径的按 1（方向不变）。死区外一点点就是一点点，不会从 0 跳到死区的值。
-- `snapDirection(v, 8 | 4)`：八方向按 45° 一格取最近的方向，四方向取绝对值大的那个轴；各分量是 −1 / 0 / 1（引擎的二维轴会把 `[1, 1]` 限到长度 1）。`[0, 0]` 还是 `[0, 0]`。
+- `snapDirection(v, 8 | 4)`：八方向按 45° 一格取最近的方向（离轴不到 22.5° 的算正方向，按 `|y| ≤ |x| × tan 22.5°` 比，上下左右镜像对称，不出 `-0`），四方向取绝对值大的那个轴；各分量是 −1 / 0 / 1（引擎的二维轴会把 `[1, 1]` 限到长度 1）。`[0, 0]` 还是 `[0, 0]`。
 - `knobOffset(dx, dy, radius)`：摇杆头画在哪（偏移限在半径以内）。
-- `stickStep(state, touch, { mode, center })`：跟踪一根手指的状态机。没手指时第一根按下的接管（浮动模式中心是按下的点，固定模式是 `center`）；别的手指不管；接管的那根移动更新位置，抬起或被取消（cancel）放开；同一个 id 又按下（丢了 end）当新的一次。
+- `stickStep(state, touch, { mode, center, reach? })`：跟踪一根手指的状态机。没手指时第一根按下的接管（浮动模式中心是按下的点，固定模式是 `center`，只接管离中心 `reach` 以内按下的）；别的手指不管；接管的那根移动更新位置，抬起或被取消（cancel）放开；同一个 id 又按下（丢了 end）当新的一次。
+- `stickKeep(state, ids)`：接管的手指不在现在按着的手指（事件的 `touches`）里，说明它的 end 丢了，放开；`ids` 是空的（平台没给）时不动。
 - `stickCommand(prev, next, …)`：要不要发、发什么。摇杆值变了才发；值是 `[0, 0]`（死区里、抬起）发松开，不然发按下带 `x`、`y`。值保留两位小数，免得手指抖一下就发一条。
 
-组件 `<VirtualStick game action player? mode="float"|"fixed" radius=60 deadZone=0.2 directions="analog"|"8"|"4" center? source="stick" class style>`：
+组件 `<VirtualStick game action player? mode="float"|"fixed" radius=60 deadZone=0.2 directions="analog"|"8"|"4" center? reach=1.5 source="stick" class style>`：
 
 - 自己就是一块收触摸的区域（调用方用 `class` / `style` 摆位置和大小，比如屏幕左下半边）。底座和摇杆头是 `pointerEvents="none"` 的子视图，这样手指的 `target` 总是区域本身，`locationX/Y` 就是区域里的坐标。
 - 每次触摸变化走一遍 `stickStep`，算出的值交给 `stickCommand`，要发时用 `act()`（`action` command，`source` 默认 `"stick"`）。动作是一维轴时引擎只取 `x`。
 - 没按着时，浮动模式把底座淡淡地画在 `center`（不填是区域左下角往里一个半径），固定模式就在 `center`。
-- 组件卸载时还按着就发一次松开。
+- 组件卸载时还按着就发一次松开；App 不在前台（`lifecycle()` 不是 `"active"`）时放开、发松开；按下、挪动时先 `stickKeep`。
+- 固定模式只接管离中心 `reach × radius` 以内按下的手指（默认 1.5 倍半径），区域别处按下的不管。
+
+### 有状态的组件别放在每帧都变的条件里
+
+nsh 的 JSX 表达式（`{cond ? <A/> : null}`）里读到的信号一变，整个表达式重算，里面的组件重建。条件读的是每帧都变的信号（长坂坡的 `state()` 每步是新对象）时，组件每帧重建：按着的摇杆、按钮丢了手指（卸载时发松开，新的组件不知道有手指），结束画面的计时每帧从头算。规则：
+
+- 摇杆、屏幕按钮、手势视图、结束画面这些有状态的组件，显示与否先用 `computed` 算成布尔（值不变不通知），条件只读这个布尔；或者一直挂着，用样式藏起来。
+- 组件里按每帧在变的值显示的东西（冷却的遮罩）也一样：条件用 `computed`，样式里的值照常读。
+
+全仓扫过一遍：长坂坡的触屏操作、结束画面（改了，见「修过的问题」）；`<ActionButton>` 的冷却遮罩（改成 `computed`）；长坂坡 HUD 的横幅、首领血条、暂停遮罩每帧重建，但没有状态，只多花点时间，不改；平台跳跃的 `<TouchPad>`（条件是常量 `platform.desktop`）、改键面板（条件只在开关时变，面板的状态在 `inputMap` 里），编辑器的工具栏、编辑区、文件面板、属性面板里的条件（编辑器的信号不是每帧变），都不用改。
 
 ### 手势（`ts/gestures.ts`）
 
@@ -70,31 +81,43 @@
 - 多指：只认前两根。一根在拖动时第二根按下，拖动以 `cancelled: true` 结束、开始捏合；两根中任一根抬起，捏合结束，剩下的手指不再算任何手势，直到全部抬起。第三根以后的手指不管。
 - 取消（系统拿走触摸、来电）：正在进行的拖动 / 捏合以 `cancelled: true` 结束，不发 `tap` / `swipe`，这一轮剩下的手指都不算，直到全部抬起。
 - 不认识的 id 的 move / end（按在别的视图上的手指出现在 `changedTouches` 里）不管。
-- 两指一开始距离是 0（叠在一起）时，`scale` 按 1 算，不除零。
+- 两指距离不到 10 pt 时按 10 pt 算（`scale`、`factor` 都是），叠在一起不除零，每步的 `factor` 乘起来正好是 `scale`。
+- `longPress` 的位置都是按下的地方（计时到了发的和抬起时补发的一样）。
+- 同一个 id 又按下（丢了 end）：先当它被取消，补上上一轮的结束事件（`dragEnd` / `pinchEnd`，`cancelled: true`），再当新的一次。
 - 旋转角度跨过 ±180° 时按最短的方向算增量。
 
-接到视图上：`gestureHandlers(onGesture, options?)` 返回 `onTouchStart` / `onTouchMove` / `onTouchEnd` / `onTouchCancel`，把 `changedTouches` 的每根手指换成输入喂给状态机，再把事件交给 `onGesture`；按下时开一个 `longPress` 毫秒的 `setTimeout` 喂 `hold`。坐标用 `locationX/Y`，所以要放在子视图不收触摸的视图上（游戏视图正好）。点选世界坐标：`screenToWorld(camera, size, [e.x, e.y])`（TSX 自己管相机时，比如编辑器、策略游戏；相机跟着角色走时 TSX 不知道相机在哪，用引擎的 `tap` 事件或 Rust 的 `Pointer.world`）。
+接到视图上：`gestureHandlers(onGesture, options?)` 返回 `onTouchStart` / `onTouchMove` / `onTouchEnd` / `onTouchCancel` 和 `reset`，把 `changedTouches` 的每根手指换成输入喂给状态机，再把事件交给 `onGesture`；按下时开一个 `longPress` 毫秒的 `setTimeout` 喂 `hold`。按下、挪动时跟着的手指不在 `touches` 里（end 丢了）当取消；`reset()` 取消所有手指、关掉计时器。组件里用 `touchGestures(onGesture, options?)`（`ts/touch.tsx`）：App 不在前台时、组件卸载时自动 `reset`。坐标用 `locationX/Y`，所以要放在子视图不收触摸的视图上（游戏视图正好）。点选世界坐标：`screenToWorld(camera, size, [e.x, e.y])`（TSX 自己管相机时，比如编辑器、策略游戏；相机跟着角色走时 TSX 不知道相机在哪，用引擎的 `tap` 事件或 Rust 的 `Pointer.world`）。
 
 ### 按钮补齐（`<ActionButton>`）
 
 - `repeat`（秒）：按住时每隔这么久再按一次（先等 `repeatDelay`，默认 0.4 秒）。每次重按发一对松开、按下，通常落在同一帧里。
-  - 引擎原来对直接驱动的动作，一帧里「松开又按下」不算刚按下（键盘的键算）。改成和键一样：上一帧按着、这一帧松开过又按下，`pressed`、`released` 都是 true；发给 TSX 的 `action` 事件也补一对松开、按下（键盘的键一帧里松开又按下时也一样补发，原来 TSX 收不到这次按下）。
+  - 引擎原来对直接驱动的动作，一帧里「松开又按下」不算刚按下（键盘的键算）。改成和键一样：直接驱动的来源上一帧结束时按着、这一帧松开过又按下，`pressed`、`released` 都是 true（只看直接驱动自己：键按着时触屏在一帧里点一下不算重按）；发给 TSX 的 `action` 事件也补一对松开、按下（键盘的键一帧里松开又按下时也一样补发，原来 TSX 收不到这次按下）。
   - 计时是 `repeater(send, { delay, interval }, timers)`：按下立刻发按下，然后定时重按，松开时清掉计时器；计时器可以换（测试用假的）。
 - `cooldown`：一个返回 0 … 1 的函数（游戏给，1 是刚用过，0 是好了），按钮上盖一层从下往上退的暗色（`cooldownFill`，超出范围、不是数的截断成 0 … 1）。冷却中照样能按，能不能出招由游戏决定。
-- 按下时的反馈：按着时背景变亮、按钮缩小一点（`pressedLook`），由手指的按下 / 松开驱动，不靠 `active:`（那是 press 的状态，这里收的是原始触摸）。
+- 按下时的反馈：按着时背景变亮、按钮缩小一点、字变黄（`pressedLook`），由手指的按下 / 松开驱动，不靠 `active:`（那是 press 的状态，这里收的是原始触摸）。
+- `dim`：返回布尔的函数，`true` 时盖一层暗色（招式现在用不了，比如怒气不够），照样能按。
+- App 不在前台时、卸载时松开；按下、挪动时不在 `touches` 里的手指当松开（`heldKey` 的 `keep`、`reset`）。
 - 原来的 `ActionButton`、`heldKey`、`actionButtonId`、`act` 挪到 `ts/touch.tsx`，`nge.tsx` 原样导出，用法不变。
 
 ### 示例
 
 - **长坂坡**：
   - 场景加一张只给触屏用的绑定表（`actions` prop）：`move`（二维轴）、`attack`、`thrust`、`jump`（按钮），都不绑键（键盘和手柄照旧走 `onKey`，不改）。
-  - 触屏（`platform.desktop` 是 `false`）时：左半边是浮动摇杆（八方向，驱动 `move`），右下攻击（按住每 0.18 秒连发一次，连段靠这个）、突刺（冷却显示 = 剩余冷却 / 1.5 秒）、跳。
-  - `onAction` 收到的动作和键盘的输入合在一起（`touchInput`，纯函数）：`move` 的方向当成方向键，`attack` / `thrust` / `jump` 按下的那一下算一次。
-  - 结束画面上「按 R 重新开始」在触屏上换成「点一下重新开始」，点结束画面重开。说明文字只在桌面上显示（原来就是）。
+  - 触屏（`platform.desktop` 是 `false`）时：左半边是浮动摇杆（八方向，驱动 `move`），右下攻击（按下以后每 0.18 秒连发一次，第一次也是 0.18 秒，连段靠这个）、突刺（冷却显示 = 剩余冷却 / 1.5 秒，怒气不够时变暗）、跳。组件在 `examples/sanguo/controls.tsx`。
+  - `onAction` 收到的动作和键盘的输入合在一起（`withTouch`，纯函数）：`move` 的方向当成方向键，`attack` / `thrust` / `jump` 按下的那一下算一次。方向按分量各自合（有意的）：键盘只按着左右时上下照样听摇杆的。
+  - 结束画面上「按 R 重新开始」在触屏上换成「点一下重新开始」，点结束画面重开（桌面上点鼠标也行）。出现 0.8 秒以后按下的才算：打到最后一下时还在连按攻击的手指不会马上重开；出现之前就按着的手指不算。说明文字只在桌面上显示（原来就是）。
 - **平台跳跃**：手机上的 ← → 换成摇杆（左下，模拟量：推多少走多快），跳、重来还是按钮；游戏画面上双指捏合缩放镜头（0.6 – 1.6 倍，`zoomBy` 纯函数），只在触屏上。
 - **编辑器**：
-  - 画布外面的视图收 nsh 的捏合（Mac 触控板、Control + 滚轮）：开始时记下视图，捏的时候每 33 ms 读一次 `pinch` 的值，以鼠标最后在画布上的位置为中心缩放（`zoomAt`，鼠标没进过画布时用中心），结束时用最后的倍数。
-  - 触屏：画布的触摸也交给手势；第二根手指按下时取消正在进行的工具操作（框选、拖动），然后双指捏合缩放、中点移动就平移（`pinchView`：先以中点缩放再平移）。
+  - 画布外面的视图收 nsh 的捏合（Mac 触控板、Control + 滚轮）：开始时记下视图，捏的时候每 33 ms 读一次 `pinch` 的值，以鼠标最后在画布上的位置为中心缩放（`zoomAt`，鼠标没进过画布时用中心），结束时用最后的倍数（`examples/editor/trackpad.ts`）。读数是异步的：每次开始、结束、停掉换一个序号，晚到的不算，读失败不管；编辑区卸载（捏到一半 ⌘R 试玩）时停掉计时器。
+  - 触屏：画布的触摸也交给手势；第二根手指按下时取消正在进行的工具操作（框选、拖动），选中的回到按下之前，然后双指捏合缩放、中点移动就平移（`pinchView`：先以中点缩放再平移）。
+
+### 手指的结束事件丢了
+
+切后台、来电、浏览器切标签页时，平台可能不再发手指的 end / cancel，按着的摇杆、按钮会一直按着。几层都兜底：
+
+- TSX：摇杆、按钮、手势按下、挪动时对一下事件的 `touches`，跟着的手指不在里面就当取消；`lifecycle()` 不是 `"active"` 时全部放开。
+- 引擎：收到 `nge.suspend`（切后台）时松开所有直接驱动的动作（`Actions::release_driven`），下一帧算刚松开、告诉 TSX。
+- Web：`vendor/nsh-platform-web/web/nsh.js`（改过的副本）在页面藏起来、窗口没了焦点时取消所有按着的指针，收触摸的视图收到 touchcancel（`cancelPointers`）。
 
 ## 不做
 
@@ -116,7 +139,8 @@
   - 平台跳跃 `App.test.tsx`：手机上有摇杆和跳、重来，没有 ← →；`hud.test.tsx`：摇杆区域让开安全区、镜头缩放的范围和坏的倍数。
   - 长坂坡 `touch.test.tsx`：触屏的表不绑键、摇杆方向和松开、按钮按下才算（连发每一下、暂停不算、只认第一个玩家）、和键盘合并、突刺冷却比例、触屏上有摇杆和三个按钮而 Mac 上没有。
   - 编辑器 `canvas.test.tsx`：`pinchView` 以中点缩放、跟着中点平移。
-- 下面这些都做过变异：把对应的逻辑改坏，测试会失败，再改回来（41 个；第一次有 1 个没抓到：「摇杆松开不归零」，引擎发松开时方向本来就是 0，补了一条带着方向的松开的测试）。
+- 下面这些都做过变异：把对应的逻辑改坏，测试会失败，再改回来（41 个；第一次有 1 个没抓到：「摇杆松开不归零」，引擎发松开时方向本来就是 0，补了一条带着方向的松开的测试）。修问题时（见「修过的问题」）全部重跑了一遍，加上新的一共 73 个，72 个抓到：「攻击连发第一次多等」第一次没抓到（拖动本身就花了一段时间，等 250 ms 分不出来），测试换成手动的钟后抓到；「触控板读失败没接住」抓不到：读失败只是一条没接住的 Promise 拒绝，`nsh test` 不算失败，行为也一样。
+  - `nge-ecs` `actions` 另有 `a_touch_tap_while_the_key_is_held_is_not_a_new_press`、`suspending_releases_what_touch_was_holding`；平台跳跃 `touch-widgets.test.tsx`（`fixtures/touch.tsx`）、长坂坡 `controls.test.tsx`（`fixtures/controls.tsx`）用假的游戏视图看组件发出去的命令。
 
 | 测试 | 改坏（变异） |
 | --- | --- |
@@ -147,7 +171,7 @@
 | `touch.test.tsx › 按住连发…` | 连发不先松开 |
 | `touch.test.tsx › 按住连发…` | 松开时不停连发 |
 | `touch.test.tsx › 冷却…` | 冷却不截断 |
-| `touch.test.tsx › 冷却…` | 按下时没有反馈 |
+| `touch.test.tsx › 冷却…` | 按下时没有反馈（`pressedLook` 两种样子一样） |
 | `a_driven_button_released_and_pressed_again_within_one_frame_is_a_new_press` | 直接驱动一帧里松开又按下不算重按 |
 | `a_driven_button_released_and_pressed_again_within_one_frame_is_a_new_press` | TSX 收不到重按前的松开 |
 | `hud.test.tsx › 双指捏合缩放镜头…` | 镜头缩放不限范围 |
@@ -161,6 +185,58 @@
 | `sanguo touch.test.tsx › 触屏设备上有摇杆和三个按钮，Mac 上没有` | Mac 上也显示触屏操作 |
 | `sanguo touch.test.tsx › 绑定表只有触屏驱动的动作…` | 触屏的表绑了键 |
 | `canvas.test.tsx › 双指捏合…` | 捏合以挪动后的中点缩放 |
+| `a_touch_tap_while_the_key_is_held_is_not_a_new_press` | 键按着时触屏点一下算重按 |
+| `a_driven_button_released_and_pressed_again_within_one_frame_is_a_new_press` | 不记上一帧按着的来源 |
+| `suspending_releases_what_touch_was_holding` | 切后台不松开直接驱动的动作 |
+| `touch.test.tsx › 丢了 end 的 id 又按下…` | 不补结束事件 |
+| `touch.test.tsx › 捏合：两指一度靠得很近…` | factor 不按下限算，乘起来不是 scale |
+| `touch.test.tsx › 长按…` | 长按的位置是现在的位置 |
+| `touch.test.tsx › 八方向的边界对称…` | 八方向按角度四舍五入 |
+| `touch.test.tsx › 固定摇杆只接管…` | 固定摇杆接管远处按下的手指 |
+| `touch.test.tsx › 摇杆的手指不在按着的手指里…` | 摇杆不认丢了 end 的手指 |
+| `touch.test.tsx › gestureHandlers：按着的手指里没有了的…` | 手势不认丢了 end 的手指 |
+| `touch.test.tsx › gestureHandlers：按着的手指里没有了的…` | `reset` 不取消手指 |
+| `touch.test.tsx › 屏幕按钮：按着的手指里没有了的…` | 按钮不认丢了 end 的手指 |
+| `touch-widgets.test.tsx › 摇杆、按钮：按着时 App 切到后台…` | 切后台摇杆不松开 |
+| `touch-widgets.test.tsx › 摇杆、按钮：按着时 App 切到后台…` | 切后台按钮不松开 |
+| `touch-widgets.test.tsx › 摇杆：按着时卸载发松开` | 卸载摇杆不发松开（去掉 `cleanup`） |
+| `touch-widgets.test.tsx › 按钮：按着时样子变了…` | `pressedLook(pressed())` 改成 `pressedLook(false)` |
+| `touch-widgets.test.tsx › 按钮：冷却大于 0 时…` | 冷却不显示 |
+| `touch-widgets.test.tsx › 按钮：按住连发接到 act 上…` | 连发没接上 |
+| `touch-widgets.test.tsx › 按钮：按住连发接到 act 上…` | 卸载按钮不停连发 |
+| `touch-widgets.test.tsx › 手势：卸载时关掉长按计时…` | 卸载手势视图不关长按计时 |
+| `touch-widgets.test.tsx › 手势：拖着时 App 切到后台…` | 切后台手势不取消 |
+| `controls.test.tsx › HUD 每帧变…` | 长坂坡触屏操作的条件不用 `computed`（每帧重建） |
+| `controls.test.tsx › 结束画面：刚出现时点不算…` | 结束画面的条件不用 `computed`（每帧重建） |
+| `controls.test.tsx › 结束画面：刚出现时点不算…` | 结束画面刚出现就认点 |
+| `controls.test.tsx › 结束画面：刚出现时按下…` | 按抬起的时间算 |
+| `controls.test.tsx › 怒气不够时…` | 怒气不够时突刺按钮不变暗 |
+| `controls.test.tsx › 攻击按住连发…` | 攻击连发第一次多等（不传 `repeatDelay`） |
+| `store.test.tsx › 画布：按下后被取消…` | 取消后选中的不回到按下之前 |
+| `canvas.test.tsx › 触控板捏合…` | 晚到的读数也算 |
+| `canvas.test.tsx › 触控板捏合…` | 停掉不关计时器 |
+| `nsh.js` 的 `cancelPointers`（在 node 里单独跑） | 双指时只发一根的 touchcancel |
+
+## 修过的问题
+
+| 问题 | 怎么修的 | 测试 |
+| --- | --- | --- |
+| 长坂坡的触屏操作放在 `{platform.desktop \|\| hud().end !== null ? null : …}` 里，`hud()` 每帧是新对象，摇杆、按钮每帧重建，按着的手指丢了 | `TouchLayer` 先用 `computed` 算显不显示；规则写进本文和 `ts/touch.tsx` | 长坂坡 `controls.test.tsx › HUD 每帧变…` |
+| 结束画面也每帧重建；刚出现时还在连按攻击的手指一抬起就重开了 | `EndScreen` 用 `computed`；出现 0.8 秒以后按下的才算（按 `onPressDown` 的时间），出现之前按着的不算 | `controls.test.tsx › 结束画面…`（三条） |
+| 丢了 end 的 id 又按下，上一轮的 `dragEnd` / `pinchEnd` 丢了 | 补在这次按下的事件前面 | `touch.test.tsx › 丢了 end 的 id 又按下…` |
+| 手指的结束事件丢了（切后台、来电），摇杆、按钮一直按着 | 对 `touches`、看 `lifecycle()`、引擎 `nge.suspend` 时松开、网页取消指针（见「手指的结束事件丢了」） | `touch.test.tsx › …按着的手指里没有了的…`（摇杆、手势、按钮各一条）；`touch-widgets.test.tsx › …切到后台…`；`suspending_releases_what_touch_was_holding` |
+| 组件怎么接到 `act` 上没有测试 | 平台跳跃 `fixtures/touch.tsx`：假的游戏视图记下收到的命令 | `touch-widgets.test.tsx`（摇杆的来源、玩家、方向，卸载、切后台发松开，按下的样子，冷却，连发，卸载停连发） |
+| 编辑器触控板捏合的定时读数：卸载时不停，读失败没接住，晚到的上一次读数也算 | 挪到 `trackpad.ts`：序号丢掉晚到的、接住失败、卸载时 `stop` | `canvas.test.tsx › 触控板捏合…` |
+| 编辑器第二根手指按下取消操作时，按下改了的选中没改回去 | 记下按下之前的选中，取消时改回去 | `store.test.tsx › 画布：按下后被取消…` |
+| 两指一度靠得很近时 `factor` 很大，乘起来不是 `scale` | 距离不到 10 pt 按 10 pt 算 | `touch.test.tsx › 捏合：两指一度靠得很近…` |
+| 长按计时到了发的位置是现在的，抬起时补发的是按下的 | 都用按下的位置 | `touch.test.tsx › 长按…` |
+| 八方向按角度四舍五入，±22.5°、±67.5° 上镜像的推法得到的方向不镜像 | 按 `tan 22.5°` 比分量 | `touch.test.tsx › 八方向的边界对称…` |
+| 固定摇杆接管区域里任何地方按下的手指 | 只接管离中心 `reach`（默认 1.5 倍半径）以内的 | `touch.test.tsx › 固定摇杆只接管…` |
+| 突刺按钮怒气不够时和能用时一样 | `<ActionButton dim>`，怒气不够时变暗 | `controls.test.tsx › 怒气不够时…` |
+| 攻击连发第一次等 0.4 秒，和「每 0.18 秒」对不上 | `repeatDelay` 也是 0.18 秒 | `controls.test.tsx › 攻击按住连发…` |
+| `withTouch` 按分量合方向，看着像漏了 | 有意的，写进注释和本文 | — |
+| 手势视图卸载后长按计时还会到点 | `touchGestures` 卸载时 `reset` | `touch-widgets.test.tsx › 手势：卸载时…` |
+| 键按着时触屏在一帧里点一下，引擎算成重按 | 只看直接驱动的来源上一帧结束时按没按着 | `a_touch_tap_while_the_key_is_held_is_not_a_new_press` |
 
 ## 还没手测
 
@@ -171,4 +247,5 @@
 - 平台跳跃的双指捏合缩放镜头。
 - 编辑器的触控板捏合：nsh 的命中测试会不会把捏合交给游戏视图外面那层（游戏视图是原生组件）；33 ms 读一次 `pinch` 值够不够顺。
 - 编辑器在触屏上的双指平移、缩放（编辑器是桌面应用，没有触屏设备试）。
+- 切后台、来电、浏览器切标签页时摇杆和按钮松开（引擎、TSX 的部分有测试；`nsh.js` 的 `cancelPointers` 只在 node 里把它单独拿出来跑过，没在浏览器里试）。各平台 `touches` 填没填全：没填（空的）时这层兜底不起作用。
 - 浏览器嵌在别的页面里（`nsh-embedded`，`touch-action: pan-x pan-y`）时，双指会不会被页面拿去滚动、缩放。

@@ -1,6 +1,6 @@
 import { batch, effect, keymap, type NativeComponentRef, platform, safeArea, signal, Text, View } from "nsh";
 import { Button } from "nsh/base";
-import { ActionButton, floatText, gameView, gestureHandlers, httpClient, inputMap, netRoom, push, saved, saveSlots, sound, tween, VirtualStick, type ActionEvent, type Gesture, type Scene, type SpriteNode } from "../../ts/nge";
+import { ActionButton, floatText, gameView, httpClient, inputMap, netRoom, push, saved, saveSlots, sound, touchGestures, tween, VirtualStick, type ActionEvent, type Gesture, type Scene, type SpriteNode } from "../../ts/nge";
 import { DEFAULT_CONTROLS, guestSprite, PLAYER_GROUP } from "./controls";
 import { remapPlace, RemapPanel } from "./remap";
 import { COIN_SHADER, FLASH, FLASH_MS, levelAudio, night, portalOver, POST, SHADERS, stonesNear } from "./effects";
@@ -70,7 +70,7 @@ export function Game(props: GameProps = {}) {
   const remapping = signal(false);
   /** 镜头缩放：手机上双指捏合（见 docs/touch-input.md）。 */
   const zoom = signal(1);
-  const touchGestures = platform.desktop ? {} : gestureHandlers((g: Gesture) => g.kind === "pinch" && zoom.set(zoomBy(zoom(), g.factor)));
+  const pinchZoom = platform.desktop ? {} : touchGestures((g: Gesture) => g.kind === "pinch" && zoom.set(zoomBy(zoom(), g.factor)));
   const closeRemap = () => {
     input.cancel();
     remapping.set(false);
@@ -306,7 +306,7 @@ export function Game(props: GameProps = {}) {
       </Text>
       <GameView
         class="flex-1"
-        {...touchGestures}
+        {...pinchZoom}
         ref={(n: NativeComponentRef) => (game = n)}
         scene={scene()}
         actions={input.prop()}

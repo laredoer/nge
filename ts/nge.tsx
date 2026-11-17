@@ -872,8 +872,8 @@ export { httpClient, json, type HttpClient, type HttpOptions, type HttpReply, ty
 // 输入映射见 docs/input-actions.md
 export { bindingsOf, conflictsOf, inputMap, KEY_NAMES, keyAt, slotsOf, withKey, type ActionEvent, type ActionMap, type AnalogAxis, type AnalogStick, type Binding, type Bindings, type InputMap, type InputMapOptions, type InputStore, type PadEvent, type Part, type PendingBind, type Slot } from "./input";
 // 触屏控制见 docs/touch-input.md
-export { act, ActionButton, actionButtonId, cooldownFill, heldKey, pressedLook, repeater, VirtualStick } from "./touch";
-export { knobOffset, snapDirection, STICK_DEFAULTS, stickCommand, stickOutput, stickStep, stickValue, type Directions, type StickFinger, type StickShape, type StickState, type StickTouch } from "./stick";
+export { act, ActionButton, actionButtonId, cooldownFill, heldKey, pressedLook, repeater, touchGestures, VirtualStick } from "./touch";
+export { knobOffset, snapDirection, STICK_DEFAULTS, STICK_REACH, stickCommand, stickKeep, stickOutput, stickStep, stickValue, type Directions, type StickFinger, type StickShape, type StickState, type StickTouch } from "./stick";
 export { GESTURE_DEFAULTS, GESTURE_IDLE, gestureHandlers, gestureStep, type Gesture, type GestureInput, type GestureOptions, type GestureState, type GestureTimers, type SwipeDirection } from "./gestures";
 // 存档槽见 docs/saves.md
 export { saveSlots, type LoadResult, type SaveSlots, type SaveSlotsOptions, type SaveStore, type SlotInfo } from "./saves";
