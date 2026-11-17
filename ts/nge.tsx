@@ -30,6 +30,13 @@ export interface SpriteNode {
   spin?: number;
   /** 帧动画（只对图集有用）；有它时 `frame` 不起作用。节点别的字段变了不会从头播，`anim` 变了才从头播。 */
   anim?: AnimNode;
+  /**
+   * 动画状态机（见 docs/anim-graph.md）：按它选图集的帧，有它时 `anim`、`frame` 不起作用。
+   * 按值比较：每次算场景时新建一个值一样的对象不会重建；定义放在模块顶层的常量里，或者 `import` 一个 JSON 文件。
+   */
+  animGraph?: AnimGraphDef;
+  /** 状态机的参数，和上一次声明不一样时才写进去（Rust 在中间设的不会被盖回去）。 */
+  animParams?: AnimParams;
   /** 可点击：按下时发 tap 事件。 */
   tap?: boolean;
   /** 刚体。有了它位置归物理管：声明的 x / y / rotation 只在生成和改了的时候生效（同时重设初速度）。 */
@@ -293,6 +300,10 @@ export interface ModelNode {
   attach?: string;
   /** 播模型里的一段骨骼 / 节点动画（glTF 的 animations），见 docs/3d-more.md。只改 speed、loop 时不从头播。 */
   animation?: ModelAnimation;
+  /** 动画状态机（见 docs/anim-graph.md）：片段是模型里的动画名，有它时 `animation` 不起作用。按值比较，定义变了才重建。 */
+  animGraph?: AnimGraphDef;
+  /** 状态机的参数，和上一次声明不一样时才写进去。 */
+  animParams?: AnimParams;
   /** 3D 刚体（见 docs/physics3d.md）。有了它位置和旋转归物理管：声明的位置、角度、缩放没变时不拉回去；`attach`、`spin` 不生效。 */
   body?: ModelBody;
   /** 拖尾（见 docs/particles3d.md）：模型走过的地方留一条朝着相机的带子。去掉时马上消失；只改参数时保留已经记下的点。 */
@@ -637,6 +648,94 @@ export function push(game: NativeComponentRef | undefined, args: { id: string; x
   game?.command("push", args);
 }
 
+/** 状态机的参数值：数是 float，true / false 是 bool。 */
+export type AnimParams = Record<string, number | boolean>;
+
+/** 一个转换。 */
+export interface AnimTransition {
+  /** 目标状态。 */
+  to: string;
+  /** 条件，全部成立才转：`"grounded"`（bool 为真或 trigger 被设了）、`"!grounded"`、`"speed > 10"`（`>` `>=` `<` `<=` `==` `!=`，右边是数）。 */
+  when?: string | string[];
+  /** 过渡秒数，默认 0 硬切。 */
+  fade?: number;
+  /** 退出时间（归一化，1 是播完一遍）：进入以后播够这么多才转。 */
+  exit?: number;
+}
+
+/** 混合树：`by` 一个参数是一维（`at` 写数），两个是二维（`at` 写 [x, y]）。子片段共用一个归一化相位。 */
+export interface AnimBlend {
+  by: string | [string, string];
+  clips: { clip: string; at: number | [number, number] }[];
+}
+
+/** 一个状态：`clip` 和 `blend` 写一个。 */
+export interface AnimStateDef {
+  clip?: string;
+  blend?: AnimBlend;
+  /** 默认 1；负数倒放（从尾巴开始）。 */
+  speed?: number;
+  /** 速度再乘上这个 float 参数。 */
+  speedParam?: string;
+  /** 默认 true。 */
+  loop?: boolean;
+  to?: AnimTransition[];
+}
+
+/** 一层（第 0 层是顶层的 `start` / `states` / `any`）。 */
+export interface AnimLayerDef {
+  name?: string;
+  /** 0–1 的数，或 float 参数名；默认 1。 */
+  weight?: number | string;
+  /** 默认 "override"；"additive" 以参考姿势为基准叠差值（只对 3D 有用）。 */
+  mode?: "override" | "additive";
+  /** 骨骼遮罩：节点名，含子孙（只对 3D 有用）。 */
+  mask?: string[];
+  /** 叠加层的参考姿势：这个片段的 0 秒；不写用每个片段自己的 0 秒。 */
+  reference?: string;
+  /** 有好几个状态时要写。 */
+  start?: string;
+  states: Record<string, AnimStateDef>;
+  /** 任意状态的转换：先于状态自己的看，转到现在的状态的跳过。 */
+  any?: AnimTransition[];
+}
+
+/** 片段的事件和 2D 的帧。 */
+export interface AnimClipDef {
+  /** 2D：依次播的图集格子。 */
+  frames?: number[];
+  /** 2D，默认 10。 */
+  fps?: number;
+  /** 片段播到 `t` 秒（片段自己的时间）时发 animEvent。 */
+  events?: { t: number; name: string }[];
+}
+
+/** 动画状态机的定义（见 docs/anim-graph.md）。 */
+export interface AnimGraphDef {
+  /** 参数和初始值：数是 float，true / false 是 bool，"trigger" 是 trigger。 */
+  params?: Record<string, number | boolean | "trigger">;
+  clips?: Record<string, AnimClipDef>;
+  start?: string;
+  states?: Record<string, AnimStateDef>;
+  any?: AnimTransition[];
+  /** 第 1 层起（顶层是第 0 层）。 */
+  layers?: AnimLayerDef[];
+}
+
+/** 动画事件：权重最大的状态里权重最大的片段播到了事件 `name`。 */
+export interface AnimEvent {
+  id: string;
+  layer: string;
+  state: string;
+  clip: string;
+  name: string;
+}
+
+/** 设节点 `id` 的状态机参数、发 trigger（一个名字或数组）。 */
+export function animSet(game: NativeComponentRef | undefined, args: { id: string; params?: AnimParams; trigger?: string | string[] }) {
+  game?.command("animSet", args);
+}
+
 export interface AnimNode {
   /** 依次播的图集格子序号。 */
   frames: number[];
@@ -798,6 +897,8 @@ interface BuiltinEvents {
   tap: Tap;
   collide: Collide;
   animEnd: AnimEnd;
+  /** 动画状态机的事件（见 docs/anim-graph.md）。 */
+  animEvent: AnimEvent;
   tweenEnd: TweenEnd;
   key: KeyInput;
   /** 动作变了：按钮按下 / 松开，轴的方向变了。 */
@@ -825,14 +926,14 @@ export type GameViewProps<P, E> = NativeComponentProps<Partial<BuiltinProps> & P
 
 /**
  * 生成游戏视图组件。`props` / `events` 是游戏自己的通道名（Rust 侧 `add_prop` / `add_state` / `add_event`），
- * 类型由泛型给出；内置 prop `scene` / `actions`、事件 `tap` / `collide` / `animEnd` / `tweenEnd` / `key` / `action` / `pad` / `levelStart` / `chase` / `typed` / `fps` / `error` / `ready` / `net` / `http`，触摸自动转成引擎的 `touch` command。
+ * 类型由泛型给出；内置 prop `scene` / `actions`、事件 `tap` / `collide` / `animEnd` / `animEvent` / `tweenEnd` / `key` / `action` / `pad` / `levelStart` / `chase` / `typed` / `fps` / `error` / `ready` / `net` / `http`，触摸自动转成引擎的 `touch` command。
  */
 export function gameView<P extends object = {}, E extends object = {}>(
   spec: { props?: readonly (keyof P & string)[]; events?: readonly (keyof E & string)[] } = {},
 ) {
   const Native = nativeComponent<BuiltinProps & P, BuiltinEvents & E>("nge.game", {
     props: [...new Set(["scene", "captureKeys", "actions", "screenOrientation", ...(spec.props ?? [])])] as (keyof (BuiltinProps & P) & string)[],
-    events: [...new Set(["tap", "collide", "animEnd", "tweenEnd", "key", "action", "pad", "levelStart", "chase", "typed", "fps", "error", "ready", "net", "http", ...(spec.events ?? [])])] as (keyof (BuiltinEvents & E) & string)[],
+    events: [...new Set(["tap", "collide", "animEnd", "animEvent", "tweenEnd", "key", "action", "pad", "levelStart", "chase", "typed", "fps", "error", "ready", "net", "http", ...(spec.events ?? [])])] as (keyof (BuiltinEvents & E) & string)[],
   });
 
   return (props: GameViewProps<P, E>) => {

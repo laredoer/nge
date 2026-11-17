@@ -2250,6 +2250,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "nge-anim"
+version = "0.1.0"
+dependencies = [
+ "bevy_ecs",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "nge-assets"
 version = "0.1.0"
 dependencies = [
@@ -2450,12 +2459,14 @@ dependencies = [
  "gltf",
  "image",
  "log",
+ "nge-anim",
  "nge-assets",
  "nge-core",
  "nge-ecs",
  "nge-render2d",
  "percent-encoding",
  "pollster 1.0.1",
+ "serde_json",
 ]
 
 [[package]]
@@ -2467,6 +2478,7 @@ dependencies = [
  "image",
  "log",
  "nge-ai",
+ "nge-anim",
  "nge-assets",
  "nge-audio",
  "nge-core",
@@ -3274,6 +3286,7 @@ version = "0.1.0"
 dependencies = [
  "bevy_ecs",
  "log",
+ "nge-anim",
  "nge-assets",
  "nge-audio",
  "nge-core",

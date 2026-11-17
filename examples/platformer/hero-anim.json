@@ -1,0 +1,22 @@
+{
+  "params": { "speed": 0, "vy": 0, "grounded": true, "jump": "trigger" },
+  "clips": {
+    "idle": { "frames": [0, 1], "fps": 2 },
+    "walk": { "frames": [2, 3, 4, 5], "fps": 8, "events": [{ "t": 0, "name": "step" }, { "t": 0.25, "name": "step" }] },
+    "run": { "frames": [6, 7, 8, 9], "fps": 12, "events": [{ "t": 0, "name": "step" }, { "t": 0.1666, "name": "step" }] },
+    "jump": { "frames": [10] },
+    "fall": { "frames": [11] },
+    "land": { "frames": [12], "fps": 10, "events": [{ "t": 0, "name": "land" }] }
+  },
+  "start": "move",
+  "states": {
+    "move": {
+      "blend": { "by": "speed", "clips": [{ "clip": "idle", "at": 0 }, { "clip": "walk", "at": 100 }, { "clip": "run", "at": 260 }] },
+      "to": [{ "to": "fall", "when": ["!grounded", "vy < -60"] }]
+    },
+    "jump": { "clip": "jump", "loop": false, "to": [{ "to": "fall", "when": "vy < 0" }, { "to": "land", "when": "grounded", "exit": 1 }] },
+    "fall": { "clip": "fall", "to": [{ "to": "land", "when": "grounded" }] },
+    "land": { "clip": "land", "loop": false, "to": [{ "to": "move", "exit": 1 }] }
+  },
+  "any": [{ "to": "jump", "when": "jump" }]
+}

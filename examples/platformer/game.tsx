@@ -8,7 +8,7 @@ import { levelKey, otherLocale, strings } from "./strings";
 import { NEW_SAVE, nextSlot, SAVE_MIGRATIONS, SAVE_VERSION, saveDataOf, saveSummary, SLOTS } from "./savefile";
 import { hpBar, outOfHearts, padPlace, stickPlace, TITLE_HOLD_MS, titleBubble, zoomBy } from "./hud";
 import { boardOf, leaderOf, nameTags, netLabel, netNode, netSetting, playerName, remotePlayers, scoresUrl, submitUrl, type Leader } from "./online";
-import { campfireAt, finish, flagOn, JELLY_ZONE, jellyAt, LEVELS, TILE, TOWER_TRIGGER, towerAt, towerSpot, type Built, type Progress } from "./levels";
+import { campfireAt, finish, flagOn, HERO, JELLY_ZONE, jellyAt, LEVELS, TILE, TOWER_TRIGGER, towerAt, towerSpot, type Built, type Progress } from "./levels";
 
 /** Rust 发的事件：掉出关卡或被敌人撞到送回起点、按 R 重新开始、踩到敌人。 */
 interface Events {
@@ -253,7 +253,7 @@ export function Game(props: GameProps = {}) {
       ...BACKDROP,
       ...(levels[level()].night ? stonesNear(3 * TILE) : []),
       ...remotePlayers(room.peers()),
-      { id: "player", x: now().spawn[0], y: now().spawn[1], w: 24, h: 32, z: 5, color: "#ff7a59", body: { kind: "character", friction: 0, collide: true, group: PLAYER_GROUP }, ...(flashing() ? FLASH : {}) },
+      { id: "player", x: now().spawn[0], y: now().spawn[1], w: 24, h: 32, z: 5, ...HERO, body: { kind: "character", friction: 0, collide: true, group: PLAYER_GROUP }, ...(flashing() ? FLASH : {}) },
       // 第二个手柄接入时多一个角色，拔掉就去掉
       ...(input.padOf(1) === null ? [] : [guestSprite(now().spawn)]),
       // 金币自己发光，夜里也不暗

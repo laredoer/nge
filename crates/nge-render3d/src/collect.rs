@@ -111,13 +111,14 @@ pub(crate) fn collect(world: &mut World, draws: &mut Vec<Draw>, joints: &mut Vec
         items.push((mesh.mesh, mesh.material, t.matrix(), None, padded(weights.map_or(&[][..], |w| &w.0))));
     }
     // 先建查询再借资源（建查询要 &mut World）
-    let mut models = world.query::<(&Model3d, &Transform3d, Option<&Pose>, Has<crate::Animator>)>();
+    let mut models = world.query::<(&Model3d, &Transform3d, Option<&Pose>, Has<crate::Animator>, Has<nge_anim::AnimGraph>)>();
     let assets = world.resource::<Assets3d>();
-    for (model, t, pose, playing) in models.iter(world) {
+    for (model, t, pose, animator, graph) in models.iter(world) {
+        let playing = animator || graph;
         let Some(model) = assets.model(model.0) else { continue };
         let m = t.matrix();
         let skeleton = &model.skeleton;
-        // 单独去掉 Animator 时 Pose 还在，不再按它画
+        // 单独去掉 Animator（或状态机）时 Pose 还在，不再按它画
         let pose = pose.filter(|p| playing && p.nodes.len() == skeleton.nodes.len() && p.weights.len() == skeleton.nodes.len());
         let posed = pose.map(|p| &p.nodes[..]);
         // 在播动画时按这一帧的权重，不然用部件的默认权重

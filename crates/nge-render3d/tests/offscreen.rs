@@ -648,6 +648,7 @@ fn bending_bar(world: &mut World, animate: bool) {
                     Node { parent: Some(0), rest: Trs { translation: Vec3::Y, ..Default::default() } },
                 ],
                 skins: vec![Skin { joints: vec![0, 1], inverse_bind: vec![glam::Mat4::IDENTITY, glam::Mat4::from_translation(Vec3::NEG_Y)] }],
+                names: vec![],
             },
             animations: vec![Animation {
                 name: "bend".into(),
@@ -709,7 +710,7 @@ fn sliding_cube(animate: bool) -> Option<Pixels> {
             let model = assets
                 .add_model(Model {
                     parts: vec![Part { node: Some(0), ..Part::new(mesh, MaterialId::DEFAULT, glam::Mat4::IDENTITY) }],
-                    skeleton: Skeleton { nodes: vec![Node { parent: None, rest: Trs::default() }], skins: vec![] },
+                    skeleton: Skeleton { nodes: vec![Node { parent: None, rest: Trs::default() }], skins: vec![], names: vec![] },
                     animations: vec![Animation {
                         name: "slide".into(),
                         duration: 1.0,

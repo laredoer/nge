@@ -86,8 +86,15 @@ pub struct Pose {
     old_weights: Vec<[f32; MAX_MORPH_TARGETS]>,
 }
 
-/// 推进动画、算姿势（`PostUpdate`）。时间按 [`Time`] 的（缩放过的）帧间隔走。
-pub(crate) fn animate(time: Res<Time>, assets: Res<Assets3d>, mut models: Query<(&Model3d, &mut Animator, &mut Pose)>) {
+impl Pose {
+    /// 只有矩阵和权重的姿势（状态机算好的，见 docs/anim-graph.md）。
+    pub(crate) fn posed(nodes: Vec<glam::Mat4>, weights: Vec<[f32; MAX_MORPH_TARGETS]>) -> Self {
+        Self { nodes, weights, ..Self::default() }
+    }
+}
+
+/// 推进动画、算姿势（`PostUpdate`）。时间按 [`Time`] 的（缩放过的）帧间隔走。有状态机（`AnimGraph`）的实体归 `graph_pose` 管。
+pub(crate) fn animate(time: Res<Time>, assets: Res<Assets3d>, mut models: Query<(&Model3d, &mut Animator, &mut Pose), Without<nge_anim::AnimGraph>>) {
     for (model, mut animator, mut pose) in &mut models {
         let Some(model) = assets.model(model.0) else { continue };
         let pose = &mut *pose;
@@ -146,7 +153,7 @@ fn fade_out(model: &Model, animator: &mut Mut<Animator>, pose: &mut Pose, dt: f3
 }
 
 /// 不播动画的本地变换；权重从挂在节点上的部件的默认权重开始。
-fn reset(model: &Model, locals: &mut Vec<Trs>, weights: &mut Vec<[f32; MAX_MORPH_TARGETS]>) {
+pub(crate) fn reset(model: &Model, locals: &mut Vec<Trs>, weights: &mut Vec<[f32; MAX_MORPH_TARGETS]>) {
     let nodes = &model.skeleton.nodes;
     locals.clear();
     locals.extend(nodes.iter().map(|n| n.rest));
@@ -182,7 +189,7 @@ fn advance(clip: &Animation, time: f32, speed: f32, looping: bool, dt: f32) -> f
 }
 
 /// 按时间 `t` 采样每条通道，写进本地变换和权重。
-fn apply(clip: &Animation, t: f32, locals: &mut [Trs], weights: &mut [[f32; MAX_MORPH_TARGETS]]) {
+pub(crate) fn apply(clip: &Animation, t: f32, locals: &mut [Trs], weights: &mut [[f32; MAX_MORPH_TARGETS]]) {
     for channel in &clip.channels {
         let n = channel.node as usize;
         let v = channel.sample(t);
@@ -239,7 +246,7 @@ mod tests {
         let mesh = assets.add_mesh(Mesh::cube(1.0)).unwrap();
         let model = Model {
             parts: vec![Part { node: Some(0), weights, ..Part::new(mesh, MaterialId::DEFAULT, glam::Mat4::IDENTITY) }],
-            skeleton: Skeleton { nodes: vec![Node { parent: None, rest: Trs { translation: Vec3::Y, ..Default::default() } }], skins: vec![] },
+            skeleton: Skeleton { nodes: vec![Node { parent: None, rest: Trs { translation: Vec3::Y, ..Default::default() } }], skins: vec![], names: vec![] },
             animations: [vec![clip("slide", vec![slide])], extra].concat(),
         };
         let model = assets.add_model(model).unwrap();

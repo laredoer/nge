@@ -62,7 +62,7 @@ fn skinned_morph(weights: Vec<f32>, squish: bool) -> Option<Pixels> {
             let model = assets
                 .add_model(Model {
                     parts: vec![Part { node: Some(0), skin: Some(0), weights: weights.clone(), ..Part::new(mesh, MaterialId::DEFAULT, glam::Mat4::IDENTITY) }],
-                    skeleton: Skeleton { nodes: vec![Node { parent: None, rest: turned }], skins: vec![Skin { joints: vec![0], inverse_bind: vec![glam::Mat4::IDENTITY] }] },
+                    skeleton: Skeleton { nodes: vec![Node { parent: None, rest: turned }], skins: vec![Skin { joints: vec![0], inverse_bind: vec![glam::Mat4::IDENTITY] }], names: vec![] },
                     animations: vec![Animation { name: "squish".into(), duration: 1.0, channels: vec![one] }],
                 })
                 .unwrap();

@@ -1,8 +1,9 @@
 // 平台跳跃的关卡数据，以及按数据生成地图、金币、移动平台、敌人。
-import type { Emitter3dNode, JointNode, LightNode, ModelNode, SpriteNode, TilemapNode, TrailNode, Tween } from "../../ts/nge";
+import type { AnimGraphDef, Emitter3dNode, JointNode, LightNode, ModelNode, SpriteNode, TilemapNode, TrailNode, Tween } from "../../ts/nge";
 import { checkTypes, LEVEL_FORMAT, LEVEL_VERSION, parseLevel, toTilemap, type Entity, type LevelFile } from "../../ts/level";
 import { tiled, type TiledMap } from "../../ts/tiled";
 import { propOf, sizeOf, TILESET, TYPES } from "./catalog";
+import heroAnim from "./hero-anim.json";
 import level3 from "./maps/level3.json";
 // 第二关在编辑器的目录里：编辑器只能读写自己目录下的 levels/（见 docs/editor.md）
 import stairs from "../editor/levels/stairs.json";
@@ -262,18 +263,38 @@ export const JELLY_ZONE = "jelly-zone";
 /** 果冻在 idle 和 squish 之间淡多久（秒）。 */
 export const JELLY_FADE = 0.25;
 
+/** 果冻的动画状态机（见 docs/anim-graph.md）：`near` 时从 idle 淡到 squish，离开淡回去。 */
+export const JELLY_ANIM: AnimGraphDef = {
+  params: { near: false },
+  start: "idle",
+  states: {
+    idle: { clip: "idle", to: [{ to: "squish", when: "near", fade: JELLY_FADE }] },
+    squish: { clip: "squish", to: [{ to: "idle", when: "!near", fade: JELLY_FADE }] },
+  },
+};
+
+/**
+ * 主角的样子：精灵图集 hero.png（tools/make_hero.py 生成，8 × 2 格）和动画状态机 hero-anim.json（Rust 的角色控制也读这一份，设 speed、vy、grounded、jump）。
+ * 走、跑是按 speed 的一维混合，脚步对得上；走跑落脚、落地时发 step / land 事件，Rust 放脚步声。
+ */
+export const HERO: Pick<SpriteNode, "texture" | "grid" | "animGraph"> = {
+  texture: "asset:/@platformer/hero.png",
+  grid: [8, 2],
+  animGraph: heroAnim as AnimGraphDef,
+};
+
 /** 果冻离关卡平面多远：在角色（z = 5）和其他 z ≥ 0 的精灵后面。 */
 export const JELLY_Z = 0;
 
 /**
  * 地面上 x 处的幽灵果冻：半透明圆顶（宽 48、高约 29），在角色后面（`JELLY_Z`），透出后面的背景。
  * 半透明网格不写深度，混排时 z ≥ 0 的精灵在它后面画、会整只盖上去，所以放在这些精灵后面，盖上去也是对的。
- * `near` 时播 squish，不然 idle，换的时候按 `JELLY_FADE` 淡过去。左右各 2 格的看不见的 2D sensor 管「靠近」。
+ * 状态机 `JELLY_ANIM` 按 `near` 在 idle 和 squish 之间按 `JELLY_FADE` 淡过去。左右各 2 格的看不见的 2D sensor 管「靠近」。
  */
 export function jellyAt(x: number, near: boolean): { zone: SpriteNode; model: ModelNode } {
   return {
     zone: { id: JELLY_ZONE, x, y: 32, w: 4 * TILE, h: 64, color: "#00000000", body: { kind: "fixed", sensor: true } },
-    model: { id: "jelly", model: "asset:/@platformer/jelly.glb", x, y: 0, z: JELLY_Z, scale: 48, animation: { clip: near ? "squish" : "idle", fade: JELLY_FADE } },
+    model: { id: "jelly", model: "asset:/@platformer/jelly.glb", x, y: 0, z: JELLY_Z, scale: 48, animGraph: JELLY_ANIM, animParams: { near } },
   };
 }
 

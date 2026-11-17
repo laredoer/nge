@@ -44,6 +44,8 @@ pub struct Skin {
 pub struct Skeleton {
     pub nodes: Vec<Node>,
     pub skins: Vec<Skin>,
+    /// 每个节点的名字（glTF 节点的 `name`，没有是空串）；可以是空的（不按名字找节点时）。骨骼遮罩按它找节点（见 docs/anim-graph.md）。
+    pub names: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -251,7 +253,7 @@ mod tests {
     #[test]
     fn validation() {
         let node = |parent| Node { parent, rest: Trs::default() };
-        let ok = Skeleton { nodes: vec![node(None), node(Some(0))], skins: vec![Skin { joints: vec![1], inverse_bind: vec![Mat4::IDENTITY] }] };
+        let ok = Skeleton { nodes: vec![node(None), node(Some(0))], skins: vec![Skin { joints: vec![1], inverse_bind: vec![Mat4::IDENTITY] }], names: vec![] };
         assert!(ok.validate(&[]).is_ok());
         assert!(Skeleton { nodes: vec![node(Some(0))], ..Default::default() }.validate(&[]).is_err(), "父节点要在前面");
         assert!(Skeleton { skins: vec![Skin { joints: vec![2], inverse_bind: vec![Mat4::IDENTITY] }], ..ok.clone() }.validate(&[]).is_err());
@@ -278,6 +280,7 @@ mod tests {
                 Node { parent: Some(0), rest: Trs { translation: Vec3::Y, ..Default::default() } },
             ],
             skins: vec![Skin { joints: vec![0, 1], inverse_bind: vec![Mat4::IDENTITY, Mat4::from_translation(Vec3::NEG_Y)] }],
+            names: vec![],
         };
         let mut joints = Vec::new();
         skeleton.joints(0, &skeleton.rest(), &mut joints);

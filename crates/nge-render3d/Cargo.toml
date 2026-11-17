@@ -10,6 +10,7 @@ license.workspace = true
 nge-core.workspace = true
 nge-ecs.workspace = true
 nge-assets.workspace = true
+nge-anim.workspace = true
 bevy_ecs.workspace = true
 glam.workspace = true
 bytemuck.workspace = true
@@ -19,5 +20,6 @@ percent-encoding = "2"
 log.workspace = true
 
 [dev-dependencies]
+serde_json.workspace = true
 pollster.workspace = true
 nge-render2d.workspace = true

@@ -6,6 +6,7 @@
 
 mod ai;
 mod anim;
+mod anim_graph;
 mod attach;
 mod audio;
 mod behave;
@@ -41,6 +42,7 @@ use nge_text::TextPlugin;
 
 pub use ai::{CHASE, ChaseEvent, ChaseNode};
 pub use world_ui::{BarNode, BubbleNode, TYPED, Typed};
+pub use anim_graph::{ANIM_EVENT, ANIM_SET, AnimEventOut, AnimParams, AnimSet, sprite_frame};
 pub use anim::{ANIM_END, AnimEnd, AnimNode, Ease, FrameAnimation, TWEEN, TWEEN_END, Tween, TweenCommand, TweenEnd, TweenProps, Tweens};
 pub use audio::{AudioNode, BusName, BusNode, BusesNode, PlaySound, SOUND};
 pub use behave::{Spin, Tappable};
@@ -168,6 +170,12 @@ impl Plugin for ScenePlugin {
             .add_command(TWEEN)
             .add_command(SHAKE)
             .add_event(ANIM_END)
+            // 动画状态机（见 docs/anim-graph.md）
+            .add_command(ANIM_SET)
+            .add_event(ANIM_EVENT)
+            .add_message::<nge_anim::AnimEvent>()
+            .add_systems(Update, anim_graph::anim_set)
+            .add_systems(PostUpdate, (anim_graph::animate_sprite_graphs.in_set(nge_anim::Animated), anim_graph::forward_events.after(nge_anim::Animated)))
             .add_event(TWEEN_END)
             .add_event(COLLIDE)
             .add_event(LEVEL_START)

@@ -102,6 +102,7 @@
 | **M6 Android** | 仓库里改过的 `nsh-platform-android` 支持 Rust 写的原生组件（`SurfaceView`），wgpu 只走 Vulkan，画面没了暂停、回来换新的 surface；Android 键码和手柄的轴换成和 Mac 一样的键名；不用 Gradle，`tools/nsh-android.sh` 编好 Java 运行时再交给 `nsh package`；Vulkan 上的管线存到磁盘（`codeCacheDir`），坏了、版本不对当没有；见 [android.md](android.md) | 平台跳跃在 Android 模拟器上能玩，第二次启动读到管线缓存 |
 | **输入映射** | 动作绑定（`Actions`，按钮 / 一维 / 二维轴，Rust 每帧问、TSX 收 `action` 事件）；`inputMap()` 改键（按任意键、冲突、恢复默认、存在设备上）；手柄按设备分（`pad` command，`Input::pad`，每个玩家一个手柄，接入 / 拔出事件）；扳机模拟量；手柄震动（`Rumble`，GameController haptics / Android `VibratorManager` / `vibrationActuator`）；浏览器的手柄；见 [input-actions.md](input-actions.md) | 平台跳跃的操作全走动作，有改键面板，第二个手柄接入时出现第二个角色，落地、受伤时震动 |
 | **触屏控制** | `<VirtualStick>`（浮动 / 固定、死区、半径、八 / 四方向，按动作发）；手势识别的纯函数状态机（轻点、长按、滑动、拖动、双指捏合和旋转，`gestureHandlers`）；`<ActionButton>` 的按住连发、冷却显示、按下反馈；引擎认直接驱动的一帧内重按；见 [touch-input.md](touch-input.md) | 长坂坡在手机上用摇杆和按钮能玩；平台跳跃的 ← → 换成摇杆、双指缩放镜头；编辑器触控板捏合缩放 |
+| **动画状态机** | 新 crate `nge-anim`：和骨骼无关的状态机（状态、转换、bool / float / trigger 参数、退出时间、任意状态、默认状态），一维 / 二维混合树和相位同步，分层（覆盖、叠加、骨骼遮罩），叠加动画，动画事件（`AnimEvent` 消息、TSX 的 `animEvent`）；3D 按输出混姿势，2D 按输出选精灵帧；节点的 `animGraph` / `animParams`、`animSet` command；见 [anim-graph.md](anim-graph.md) | 平台跳跃的主角由状态机驱动待机、走、跑、跳、落、落地，脚步声和落地声是动画事件；果冻改用状态机 |
 
 ## 待定
 

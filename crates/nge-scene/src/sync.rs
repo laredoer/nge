@@ -116,8 +116,15 @@ pub(crate) fn sync_sprites(mut commands: Commands, scene: Res<Scene>, mut assets
         };
         crate::effects::apply_sprite(&mut entity, node, &mut assets);
         crate::ai::apply_chase(&mut entity, before, node);
-        // anim 没变时接着播，不从头开始
-        if before.map(|b| &b.anim) != Some(&node.anim) {
+        // 状态机管帧时不用 anim（见 docs/anim-graph.md）
+        let graph = crate::anim_graph::apply_graph(&mut entity, &node.id, before.map(|b| (&b.anim_graph, &b.anim_params)), &node.anim_graph, &node.anim_params);
+        if graph {
+            if node.anim.is_some() {
+                log::warn!("节点 {:?} 同时写了 anim 和 animGraph，以 animGraph 为准", node.id);
+            }
+            entity.remove::<FrameAnimation>();
+        } else if before.map(|b| (&b.anim, &b.anim_graph)) != Some((&node.anim, &node.anim_graph)) {
+            // anim 没变时接着播，不从头开始（状态机去掉或变得不合法时重新挂上）
             let anim = node.anim.as_ref().and_then(|a| FrameAnimation::new(a.frames.clone(), a.fps, a.looped));
             if node.anim.is_some() && anim.is_none() {
                 log::warn!("节点 {:?} 的 anim 没有帧或 fps 不是正数，不播", node.id);

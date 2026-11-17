@@ -38,6 +38,8 @@ opt-level = 3
 [profile.dev.package.nge-ai]
 opt-level = 1
 
+[profile.dev.package.nge-anim]
+opt-level = 1
 [profile.dev.package.nge-assets]
 opt-level = 1
 [profile.dev.package.nge-audio]

@@ -144,6 +144,12 @@ pub struct ModelNode {
     pub attach: Option<String>,
     /// 播模型里的哪段动画（见 docs/3d-more.md）。
     pub animation: Option<ModelAnimation>,
+    /// 动画状态机（见 docs/anim-graph.md）；有它时 `animation` 不起作用。
+    #[serde(rename = "animGraph")]
+    pub anim_graph: Option<nge_anim::GraphDef>,
+    /// 状态机的参数，和上一次声明不一样时才写进去。
+    #[serde(rename = "animParams")]
+    pub anim_params: Option<crate::anim_graph::AnimParams>,
     /// 3D 刚体（见 docs/physics3d.md）：有了它位置和旋转归物理管，`attach`、`spin` 不生效。
     #[serde(default)]
     pub body: Option<crate::physics3d::ModelBody>,

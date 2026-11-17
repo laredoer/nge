@@ -1,7 +1,7 @@
 // `nsh test`：无头 runner 里没有游戏视图，测按钮的显示和按住的手指怎么换成按键。
 import { expect, open, test } from "nsh/test";
 import { act, actionButtonId, heldKey, rumble, rumbleStop } from "../../ts/nge";
-import { campfireAt, finish, JELLY_FADE, JELLY_Z, JELLY_ZONE, jellyAt, LEVELS, NEW_PROGRESS, progressOf, rampOf, ROWS, TOWER_BOX, TOWER_TRIGGER, towerAt, towerSpot } from "./levels";
+import { campfireAt, finish, HERO, JELLY_ANIM, JELLY_FADE, JELLY_Z, JELLY_ZONE, jellyAt, LEVELS, NEW_PROGRESS, progressOf, rampOf, ROWS, TOWER_BOX, TOWER_TRIGGER, towerAt, towerSpot } from "./levels";
 
 // 触屏按钮按动作发，不发键名：改了键也照样管用（见 docs/input-actions.md）；走路是虚拟摇杆（docs/touch-input.md）
 const BUTTONS = ["id:stick-move", "id:act-jump", "id:act-restart"];
@@ -217,6 +217,22 @@ test("聚光灯从左前上方照着箱子堆，开影子，箱子在内锥里�
   }
 });
 
+test("主角是精灵图集，动画状态机按速度混合走跑，落脚、落地发事件（docs/anim-graph.md）", () => {
+  expect(HERO.texture).toBe("asset:/@platformer/hero.png");
+  expect(HERO.grid).toEqual([8, 2]);
+  const g = HERO.animGraph!;
+  expect(g.start).toBe("move");
+  expect(Object.keys(g.states!).sort()).toEqual(["fall", "jump", "land", "move"]);
+  expect(g.states!.move.blend!.by).toBe("speed");
+  expect(g.states!.move.blend!.clips.map((c) => c.clip)).toEqual(["idle", "walk", "run"]);
+  expect(g.clips!.walk.events!.map((e) => e.name)).toEqual(["step", "step"]);
+  expect(g.clips!.run.events!.map((e) => e.name)).toEqual(["step", "step"]);
+  expect(g.clips!.land.events).toEqual([{ t: 0, name: "land" }]);
+  expect(g.any).toEqual([{ to: "jump", when: "jump" }]);
+  // 图集 8 × 2 = 16 格，用到的帧都在里面
+  for (const c of Object.values(g.clips!)) for (const f of c.frames ?? []) expect(f).toBeLessThan(16);
+});
+
 test("幽灵果冻在第一关的地面上，半透明模型；靠近时从 idle 淡到 squish，离开淡回去", () => {
   const x = LEVELS[0].built.jelly!;
   expect(x).not.toBe(null);
@@ -224,11 +240,15 @@ test("幽灵果冻在第一关的地面上，半透明模型；靠近时从 idle
   const far = jellyAt(x, false);
   const near = jellyAt(x, true);
   expect(far.model.model).toBe("asset:/@platformer/jelly.glb");
-  expect(far.model.animation).toEqual({ clip: "idle", fade: JELLY_FADE });
-  expect(near.model.animation).toEqual({ clip: "squish", fade: JELLY_FADE });
+  // 状态机按 near 参数淡过去（见 docs/anim-graph.md）
+  expect(far.model.animGraph).toBe(JELLY_ANIM);
+  expect(far.model.animParams).toEqual({ near: false });
+  expect(near.model.animParams).toEqual({ near: true });
+  expect(JELLY_ANIM.states!.idle.to).toEqual([{ to: "squish", when: "near", fade: JELLY_FADE }]);
+  expect(JELLY_ANIM.states!.squish.to).toEqual([{ to: "idle", when: "!near", fade: JELLY_FADE }]);
   expect(JELLY_FADE).toBeGreaterThan(0);
-  // 只有动画不同：同一个 id、同一个位置，引擎接着这只淡过去
-  expect({ ...near.model, animation: undefined }).toEqual({ ...far.model, animation: undefined });
+  // 只有参数不同：同一个 id、同一个位置、同一份定义，引擎不重建状态机，接着这只淡过去
+  expect({ ...near.model, animParams: undefined }).toEqual({ ...far.model, animParams: undefined });
   expect(far.model.y).toBe(0);
   // 半透明不写深度：放在角色（z = 5）后面、不小于 0（z < 0 的精灵画在 3D 下面）
   expect(far.model.z).toBe(JELLY_Z);

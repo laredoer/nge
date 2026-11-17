@@ -111,7 +111,15 @@ pub(crate) fn sync_models(
         if !same_model {
             entity.remove::<Model3d>().insert(GltfModel(assets.model(&node.model)));
         }
+        // 状态机接管时不用 animation（见 docs/anim-graph.md）
+        let graph = crate::anim_graph::apply_graph(&mut entity, &node.id, before.map(|b| (&b.anim_graph, &b.anim_params)), &node.anim_graph, &node.anim_params);
+        if graph && node.animation.is_some() {
+            log::warn!("模型 {:?} 同时写了 animation 和 animGraph，以 animGraph 为准", node.id);
+        }
         match &node.animation {
+            _ if graph => {
+                entity.remove::<Animator>();
+            }
             None => {
                 entity.remove::<(Animator, Pose)>();
             }

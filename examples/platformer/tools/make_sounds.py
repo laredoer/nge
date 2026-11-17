@@ -48,4 +48,7 @@ save("jump.wav", sweep(300, 700, 0.15, 12, 0.5))
 save("coin.wav", notes([988, 1319], 0.08, 10, 0.4) + notes([1319], 0.2, 14, 0.4))
 save("stomp.wav", sweep(500, 150, 0.12, 20, 0.6))
 save("fall.wav", sweep(600, 120, 0.5, 4, 0.5))
+# 动画事件放的（见 docs/anim-graph.md）：走跑时的脚步、落地
+save("step.wav", sweep(160, 80, 0.06, 50, 0.4))
+save("land.wav", sweep(240, 60, 0.12, 25, 0.55))
 save("win.wav", notes([523, 659, 784, 1047], 0.12, 8, 0.4) + notes([1047], 0.5, 5, 0.4))

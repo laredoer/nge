@@ -224,6 +224,7 @@ mod tests {
         let skeleton = Skeleton {
             nodes: vec![Node { parent: None, rest: Trs::default() }; 2],
             skins: vec![Skin { joints: vec![0, 1], inverse_bind: vec![Mat4::IDENTITY; 2] }],
+            names: vec![],
         };
         let part = Part { node: Some(1), skin: Some(0), ..Part::new(mesh, MaterialId::DEFAULT, Mat4::IDENTITY) };
         let model = |part: Part, skeleton: &Skeleton| Model { parts: vec![part], skeleton: skeleton.clone(), animations: vec![] };
@@ -232,7 +233,7 @@ mod tests {
         assert!(assets.add_model(model(Part { skin: Some(1), ..part.clone() }, &skeleton)).is_err(), "蒙皮不存在");
         let one_joint = Skeleton { skins: vec![Skin { joints: vec![0], inverse_bind: vec![Mat4::IDENTITY] }], ..skeleton.clone() };
         assert!(assets.add_model(model(part, &one_joint)).unwrap_err().contains("关节编号"));
-        let bad_tree = Skeleton { nodes: vec![Node { parent: Some(0), rest: Trs::default() }], skins: vec![] };
+        let bad_tree = Skeleton { nodes: vec![Node { parent: Some(0), rest: Trs::default() }], skins: vec![], names: vec![] };
         assert!(assets.add_model(model(Part::new(mesh, MaterialId::DEFAULT, Mat4::IDENTITY), &bad_tree)).is_err(), "节点树也要校验");
     }
 

@@ -139,6 +139,7 @@ impl Assets3d {
             new_images: Vec::new(),
             parts: Vec::new(),
             nodes: Vec::new(),
+            names: Vec::new(),
             node_index: vec![None; doc.nodes().len()],
             skins: Vec::new(),
         };
@@ -154,7 +155,7 @@ impl Assets3d {
         }
         // 读不出来的蒙皮留个空位，下标才对得上
         let skins = skins.into_iter().map(|s| s.unwrap_or(Skin { joints: Vec::new(), inverse_bind: Vec::new() })).collect();
-        let model = Model { parts, skeleton: Skeleton { nodes: loader.nodes, skins }, animations };
+        let model = Model { parts, skeleton: Skeleton { nodes: loader.nodes, skins, names: loader.names }, animations };
         Ok((self.add_model(model)?, new_images))
     }
 }
@@ -178,6 +179,8 @@ struct Loader<'a> {
     parts: Vec<Part>,
     /// 按父在前的顺序展开的节点。
     nodes: Vec<Node>,
+    /// 和 `nodes` 一一对应的名字。
+    names: Vec<String>,
     /// glTF 节点编号 → `nodes` 里的下标（不在默认场景里的是 None）。
     node_index: Vec<Option<u32>>,
     /// 用到的 glTF 蒙皮编号，按第一次用到的顺序。
@@ -197,6 +200,7 @@ impl Loader<'_> {
         let index = self.nodes.len() as u32;
         let rest = Trs { translation: translation.into(), rotation: crate::animation::rotation(Vec4::from(rotation)), scale: scale.into() };
         self.nodes.push(Node { parent: parent_index, rest });
+        self.names.push(node.name().unwrap_or_default().to_owned());
         self.node_index[node.index()] = Some(index);
         let skin = node.skin().map(|s| s.index());
         if let Some(s) = skin.filter(|s| !self.skins.contains(s)) {
@@ -462,6 +466,9 @@ mod tests {
         let quad = Mat4::from_translation(Vec3::X) * Mat4::from_scale_rotation_translation(Vec3::splat(2.0), Quat::from_rotation_y(FRAC_PI_2), Vec3::ZERO);
         assert!(parts[0].local.abs_diff_eq(quad, 1e-5), "{}", parts[0].local);
         assert!(parts[1].local.abs_diff_eq(Mat4::from_translation(Vec3::new(0.0, 3.0, 0.0)), 1e-6));
+        // 节点名字和节点一一对应（骨骼遮罩按它找，见 docs/anim-graph.md）
+        let skeleton = &assets.model(model).unwrap().skeleton;
+        assert_eq!(skeleton.names, ["root", "quad", "tri"]);
     }
 
     #[test]

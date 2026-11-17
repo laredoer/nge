@@ -2,12 +2,14 @@
 //! Rust 只管每帧的角色控制：问动作（`move`、`jump`、`restart`，绑定见 controls.json 和 docs/input-actions.md）、看脚下有没有地、设速度，
 //! 踩敌人、被敌人撞或掉下去了送回起点，重新开始；起跳、踩敌人和掉坑的音效、落地和受伤时手柄的震动也在这里放。
 //! 第二个手柄接入时 TSX 往场景里放第二个角色（`player2`），这里让它能跑能跳。
+//! 主角的动画状态机（hero-anim.json，见 docs/anim-graph.md）的参数也在这里设，走跑的脚步声、落地声按它的动画事件放。
 
 mod debug;
 
 use std::collections::HashSet;
 
 use bevy_ecs::prelude::*;
+use nge_anim::{AnimEvent, AnimGraph};
 use nge_assets::{AssetPlugin, AssetServer, Assets, Handle};
 use nge_audio::{Audio, AudioPlugin, Play, Sound};
 use nge_core::EventKey;
@@ -82,20 +84,37 @@ fn default_controls() -> ActionMap {
 const JUMP_SOUND: &str = "asset:/@platformer/jump.wav";
 const FALL_SOUND: &str = "asset:/@platformer/fall.wav";
 const STOMP_SOUND: &str = "asset:/@platformer/stomp.wav";
+const STEP_SOUND: &str = "asset:/@platformer/step.wav";
+const LAND_SOUND: &str = "asset:/@platformer/land.wav";
+/// 水平速度超过它时角色转向跑的方向（再慢保持原来的朝向）。
+const FACE_SPEED: f32 = 5.0;
 
-/// 起跳、掉坑的音效；没有音频设备时是空的。
+/// 起跳、掉坑、脚步、落地的音效；没有音频设备时是空的。
 #[derive(Resource, Default)]
 struct Sfx {
     jump: Option<Handle<Sound>>,
     fall: Option<Handle<Sound>>,
     stomp: Option<Handle<Sound>>,
+    step: Option<Handle<Sound>>,
+    land: Option<Handle<Sound>>,
+}
+
+impl Sfx {
+    /// 主角的动画事件放哪个声音、多大声。
+    fn for_event(&self, name: &str) -> Option<(&Option<Handle<Sound>>, f32)> {
+        match name {
+            "step" => Some((&self.step, 0.25)),
+            "land" => Some((&self.land, 0.45)),
+            _ => None,
+        }
+    }
 }
 
 /// 启动时就加载，第一次起跳不用等解码。
 fn load_sfx(audio: Res<Audio>, mut server: ResMut<AssetServer>, mut sounds: ResMut<Assets<Sound>>, mut sfx: ResMut<Sfx>) {
     if audio.enabled() {
         let mut load = |uri| Some(server.load(&mut sounds, uri));
-        *sfx = Sfx { jump: load(JUMP_SOUND), fall: load(FALL_SOUND), stomp: load(STOMP_SOUND) };
+        *sfx = Sfx { jump: load(JUMP_SOUND), fall: load(FALL_SOUND), stomp: load(STOMP_SOUND), step: load(STEP_SOUND), land: load(LAND_SOUND) };
     }
 }
 
@@ -118,11 +137,15 @@ struct Controller {
     falls: u32,
     /// 踩过的敌人：TSX 去掉它的刚体之前不再算。
     stomped: HashSet<Entity>,
+    /// 这一帧起跳了（起跳、踩敌人弹起）：动画状态机发 jump trigger。
+    jumped: bool,
+    /// 面朝右是 1，左是 -1。
+    facing: f32,
 }
 
 impl Default for Controller {
     fn default() -> Self {
-        Self { airborne: f32::INFINITY, jump_pressed: f32::INFINITY, air_time: 0.0, spawn: None, falls: 0, stomped: HashSet::new() }
+        Self { airborne: f32::INFINITY, jump_pressed: f32::INFINITY, air_time: 0.0, spawn: None, falls: 0, stomped: HashSet::new(), jumped: false, facing: 1.0 }
     }
 }
 
@@ -182,6 +205,7 @@ fn control(
         velocity.y = if holding { JUMP } else { JUMP * 0.5 };
         ctl.jump_pressed = f32::INFINITY;
         ctl.airborne = f32::INFINITY;
+        ctl.jumped = true;
         if stomps.is_empty() {
             play(&mut audio, &sfx.jump, 0.5);
         }
@@ -191,6 +215,7 @@ fn control(
     }
     if !stomps.is_empty() {
         velocity.y = if holding { JUMP } else { JUMP * 0.5 };
+        ctl.jumped = true;
         play(&mut audio, &sfx.stomp, 0.6);
     }
     for c in &stomps {
@@ -253,6 +278,38 @@ fn control_guest(
     }
 }
 
+/// 主角的动画状态机：速度、竖直速度、着地、起跳的 trigger；按水平速度转向（翻 `scale.x`）。
+/// 场景同步会把 `scale` 写回声明的值，所以朝向记在 `Controller` 里，每帧都对一下。
+fn animate_player(physics: Res<Physics>, mut ctl: ResMut<Controller>, mut players: Query<(Entity, &SceneId, &Velocity, &mut Transform2d, Option<&mut AnimGraph>)>) {
+    let Some((entity, _, v, mut t, graph)) = players.iter_mut().find(|(_, id, ..)| id.0 == PLAYER) else { return };
+    let jumped = std::mem::take(&mut ctl.jumped);
+    if v.linear.x.abs() > FACE_SPEED {
+        ctl.facing = v.linear.x.signum();
+    }
+    if t.scale.x.signum() != ctl.facing {
+        t.scale.x = ctl.facing * t.scale.x.abs();
+    }
+    let Some(mut graph) = graph else { return };
+    let grounded = physics.contacts(entity).iter().any(|c| c.normal.y > GROUND_NORMAL);
+    graph.set_float("speed", v.linear.x.abs());
+    graph.set_float("vy", v.linear.y);
+    graph.set_bool("grounded", grounded);
+    if jumped {
+        graph.trigger("jump");
+    }
+}
+
+/// 主角动画事件的声音：走跑落脚放脚步声，落地放落地声。
+fn anim_sounds(mut events: MessageReader<AnimEvent>, ids: Query<&SceneId>, mut audio: ResMut<Audio>, sfx: Res<Sfx>) {
+    for e in events.read() {
+        if ids.get(e.entity).is_ok_and(|id| id.0 == PLAYER)
+            && let Some((sound, volume)) = sfx.for_event(&e.name)
+        {
+            play(&mut audio, sound, volume);
+        }
+    }
+}
+
 /// 换关：重生点、掉坑次数、踩过的敌人都是上一关的，重新来。
 fn reset_on_level_start(mut starts: MessageReader<LevelStart>, mut ctl: ResMut<Controller>) {
     if starts.read().count() > 0 {
@@ -278,7 +335,7 @@ fn build(audio: AudioPlugin) -> App {
         .init_resource::<Sfx>()
         .add_systems(Startup, load_sfx)
         .init_resource::<debug::DebugView>()
-        .add_systems(Update, (reset_on_level_start, control, control_guest, debug::debug_view, toggle_perf).chain());
+        .add_systems(Update, (reset_on_level_start, control, control_guest, animate_player, anim_sounds, debug::debug_view, toggle_perf).chain());
     app.world_mut().resource_mut::<Actions>().set_map(default_controls());
     app
 }
@@ -863,11 +920,94 @@ mod tests {
         assert!(include_str!("../controls.ts").contains(&format!("export const GUEST = \"{GUEST}\"")));
     }
 
+    /// 带上主角图集和动画状态机（hero-anim.json，game.tsx 的 `...HERO` 用的同一份）的关卡。
+    fn hero_level() -> Value {
+        let mut scene = level(None);
+        let graph: Value = serde_json::from_str(include_str!("../hero-anim.json")).unwrap();
+        let hero = scene["sprites"][0].as_object_mut().unwrap();
+        hero.insert("texture".into(), json!("asset:/@platformer/hero.png"));
+        hero.insert("grid".into(), json!([8, 2]));
+        hero.insert("animGraph".into(), graph);
+        scene
+    }
+
+    fn hero(app: &mut App) -> (String, u32, f32) {
+        let world = app.world_mut();
+        let (_, graph, sprite, t) = world.query::<(&SceneId, &AnimGraph, &nge_render2d::Sprite, &Transform2d)>().iter(world).find(|(id, ..)| id.0 == PLAYER).unwrap();
+        let nge_render2d::SpriteImage::Atlas(_, frame) = sprite.image else { panic!("不是图集") };
+        (graph.state(0).unwrap().to_owned(), frame, t.scale.x)
+    }
+
+    fn anim_events(events: &[(String, Value)]) -> Vec<(String, String)> {
+        events
+            .iter()
+            .filter(|(n, e)| n == "animEvent" && e["id"] == PLAYER)
+            .map(|(_, e)| (e["clip"].as_str().unwrap().to_owned(), e["name"].as_str().unwrap().to_owned()))
+            .collect()
+    }
+
+    #[test]
+    fn hero_animation_follows_the_controller() {
+        let mut app = app();
+        app.prop("scene", Some(&hero_level()));
+        let still = run(&mut app, 20);
+        let (state, frame, scale) = hero(&mut app);
+        assert!(state == "move" && frame <= 1 && scale > 0.0, "站着：待机 {state} {frame} {scale}");
+        assert!(anim_events(&still).is_empty(), "站着没有脚步 {still:?}");
+
+        key(&mut app, "ArrowRight", true);
+        let running = run(&mut app, 40);
+        let (state, frame, scale) = hero(&mut app);
+        assert!(state == "move" && (6..=9).contains(&frame) && scale > 0.0, "全速：跑 {state} {frame} {scale}");
+        let steps = anim_events(&running[running.len() / 2..]);
+        assert!(steps.len() >= 2 && steps.iter().all(|(c, n)| c == "run" && n == "step"), "跑的脚步 {steps:?}");
+
+        key(&mut app, "ArrowRight", false);
+        key(&mut app, "ArrowLeft", true);
+        run(&mut app, 20);
+        assert!(hero(&mut app).2 < 0.0, "往左跑转身");
+        key(&mut app, "ArrowLeft", false);
+        run(&mut app, 20);
+        assert!(hero(&mut app).2 < 0.0, "停下来还朝左");
+
+        key(&mut app, "Space", true);
+        run(&mut app, 1);
+        key(&mut app, "Space", false);
+        assert_eq!(hero(&mut app).0, "jump", "起跳");
+        let mut seen = Vec::new();
+        let mut events = Vec::new();
+        for _ in 0..90 {
+            events.extend(run(&mut app, 1));
+            let state = hero(&mut app).0;
+            if seen.last() != Some(&state) {
+                seen.push(state);
+            }
+        }
+        assert_eq!(seen, ["jump", "fall", "land", "move"], "跳、落、落地、回到走跑");
+        assert_eq!(anim_events(&events), [("land".to_owned(), "land".to_owned())], "落地一次");
+    }
+
+    #[test]
+    fn hero_steps_and_landing_play_sounds() {
+        let sfx = Sfx { step: Some(Handle::new(0)), ..Sfx::default() };
+        assert_eq!(sfx.for_event("step").map(|(s, v)| (s.is_some(), v)), Some((true, 0.25)));
+        assert_eq!(sfx.for_event("land").map(|(s, v)| (s.is_some(), v)), Some((false, 0.45)));
+        assert!(sfx.for_event("wave").is_none(), "别的事件不出声");
+
+        let mut app = app();
+        app.prop("scene", Some(&hero_level()));
+        run(&mut app, 20);
+        assert_eq!(voices(&mut app), 0, "站着不出声");
+        key(&mut app, "ArrowRight", true);
+        run(&mut app, 30);
+        assert!(voices(&mut app) >= 1, "跑起来有脚步声");
+    }
+
     /// game.tsx 里用到的声音都在打包的资源里。
     #[test]
     fn sounds_are_bundled() {
         let uris: Vec<_> = assets!().iter().map(|f| f.uri).collect();
-        for name in ["jump", "fall", "stomp", "coin", "win"] {
+        for name in ["jump", "fall", "stomp", "coin", "win", "step", "land"] {
             assert!(uris.contains(&format!("asset:/@platformer/{name}.wav").as_str()), "{name} 不在 {uris:?}");
         }
         let tsx = [include_str!("../game.tsx"), include_str!("../levels.ts")].concat();
@@ -876,6 +1016,8 @@ mod tests {
         assert!(uris.contains(&"asset:/@platformer/crate.glb") && tsx.contains("asset:/@platformer/crate.glb"), "2.5D 的箱子");
         assert!(uris.contains(&"asset:/@platformer/hills.ktx2") && tsx.contains("asset:/@platformer/hills.ktx2"), "横向重复的远山");
         assert!(!uris.iter().any(|u| u.ends_with("hills.png")), "PNG 源图放在 tools/，不打包");
+        assert!(uris.contains(&"asset:/@platformer/hero.png") && tsx.contains("asset:/@platformer/hero.png"), "主角图集");
+        assert!(include_str!("../game.tsx").contains("...HERO"), "主角用图集和状态机");
     }
 
     /// 远山是 BC3 压缩贴图，带 mipmap，宽高是块的整数倍（GPU 能直接用）。

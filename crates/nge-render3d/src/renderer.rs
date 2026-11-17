@@ -47,6 +47,9 @@ impl Plugin for Render3dPlugin {
             .init_resource::<GltfModels>()
             .add_systems(PreUpdate, resolve_gltf_models.after(nge_assets::AssetsApplied))
             .add_systems(PostUpdate, animate)
+            // 状态机（见 docs/anim-graph.md）
+            .add_message::<nge_anim::AnimEvent>()
+            .add_systems(PostUpdate, crate::graph_pose::animate_graphs.in_set(nge_anim::Animated))
             .init_resource::<crate::billboards::Billboards>()
             .add_systems(PreUpdate, crate::billboards::clear_billboards);
         app.insert_resource(Assets3d::default()).init_resource::<AmbientLight>().init_resource::<Shadows>().add_renderer(MeshRenderer::default());
