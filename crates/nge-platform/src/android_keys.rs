@@ -74,6 +74,16 @@ pub fn reading(axes: &[f32]) -> Reading {
     }
 }
 
+/// 设备号当手柄号用：虚拟设备（负的号，比如 -1）不是手柄。
+pub fn pad_id(device: i32) -> Option<u32> {
+    u32::try_from(device).ok()
+}
+
+/// 手柄号换回设备号；换不回去的（不是从设备号来的）是 `None`，不能当成「所有手柄」。
+pub fn device_of(pad: u32) -> Option<i32> {
+    i32::try_from(pad).ok()
+}
+
 /// 每个手柄最近一次的轴。
 #[derive(Default)]
 pub struct Pads(BTreeMap<i32, Reading>);
@@ -144,15 +154,15 @@ impl PadInput {
         self.changes()
     }
 
-    /// 设备 `device` 自己的状态：轴的读数加上它按着的按钮（按设备发，见 docs/input-actions.md）。
-    pub fn state(&self, device: i32) -> pad::State {
-        let mut state = self.pads.reading(device).state();
+    /// 设备 `device` 自己的状态：轴的读数加上它按着的按钮（按设备发，见 docs/input-actions.md）；`held` 是它上次按着的键。
+    pub fn state(&self, device: i32, held: &BTreeSet<&'static str>) -> pad::State {
+        let mut state = self.pads.reading(device).state(held);
         state.keys.extend(self.buttons.get(&device).into_iter().flatten().copied());
         state
     }
 
     fn changes(&mut self) -> pad::Changes {
-        let (mut now, analog) = pad::merge(&self.pads.readings());
+        let (mut now, analog) = pad::merge(&self.pads.readings(), &self.held);
         now.extend(self.buttons.values().flatten().copied());
         let changes = pad::diff(&self.held, &now, self.analog, analog);
         self.held = now;
@@ -290,13 +300,31 @@ mod tests {
         pads.button(1, "GamepadA", true);
         pads.button(2, "GamepadL2", true);
         pads.motion(1, &axes(&[(0, -1.0), (7, 0.25)]));
-        let one = pads.state(1);
+        let one = pads.state(1, &BTreeSet::new());
         assert_eq!(one.keys.iter().copied().collect::<Vec<_>>(), ["GamepadA", "GamepadLeftStickLeft"], "按钮和轴合起来");
         assert_eq!((one.analog.sticks[0], one.analog.triggers), ([-1.0, 0.0], [0.0, 0.25]));
-        let two = pads.state(2);
+        let two = pads.state(2, &BTreeSet::new());
         assert_eq!(two.keys.iter().copied().collect::<Vec<_>>(), ["GamepadL2"], "别的手柄的不混进来");
         assert_eq!(two.analog, crate::pad::Analog::default(), "只有按键事件的扳机没有模拟量");
-        assert!(pads.state(9).keys.is_empty());
+        assert!(pads.state(9, &BTreeSet::new()).keys.is_empty());
+    }
+
+    #[test]
+    fn only_real_devices_are_pads() {
+        assert_eq!([pad_id(0), pad_id(7), pad_id(-1), pad_id(i32::MIN)], [Some(0), Some(7), None, None], "虚拟设备（负的号）不是手柄");
+        assert_eq!([device_of(7), device_of(u32::MAX), device_of(1 << 31)], [Some(7), None, None], "回不去的号不震，更不能变成「所有手柄」");
+        assert_eq!(pad_id(i32::MAX).and_then(device_of), Some(i32::MAX));
+    }
+
+    #[test]
+    fn a_trigger_axis_near_the_threshold_presses_once() {
+        let mut pads = PadInput::default();
+        let mut pressed = 0;
+        for v in [0.51, 0.49, 0.51, 0.45, 0.52] {
+            pressed += pads.motion(1, &axes(&[(6, v)])).pressed.len();
+        }
+        assert_eq!(pressed, 1, "松开的门槛比按下低");
+        assert_eq!(pads.motion(1, &axes(&[(6, 0.3)])).released, ["GamepadL2"]);
     }
 
     #[test]

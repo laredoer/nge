@@ -1,6 +1,6 @@
 // 输入映射的 TSX 部分（见 docs/input-actions.md）：改键、冲突、恢复默认、存取，动作和手柄的事件。用内存里的存储测。
 import { expect, test } from "nsh/test";
-import { bindingsOf, conflictsOf, inputMap, keyAt, slotsOf, withKey, type Bindings, type InputStore, type Slot } from "../../ts/input";
+import { bindingsOf, conflictsOf, inputMap, KEY_NAMES, keyAt, slotsOf, withKey, type Bindings, type InputStore, type Slot } from "../../ts/input";
 
 const P1: Bindings = {
   jump: { kind: "button", keys: ["Space", "GamepadA"] },
@@ -111,7 +111,7 @@ test("冲突时先问：确认就对调，取消就不变", () => {
   input.capture(target);
   input.handleKey(down("KeyA"));
   expect(input.bindings()).toEqual(DEFAULTS);
-  expect(input.pending()).toEqual({ slot: target, code: "KeyA", conflicts: [slot(0, "move", "negative", 0)] });
+  expect(input.pending()).toEqual({ slot: target, code: "KeyA", conflicts: [slot(0, "move", "negative", 0)], blocked: [] });
   expect(input.prop().capturing).toBe(true);
   // 等着回答时再按键不算
   expect(input.handleKey(down("KeyZ"))).toBe(true);
@@ -259,4 +259,163 @@ test("prop 是现在的绑定表", () => {
   input.bind(slot(1, "jump", "keys", 0), "KeyU");
   expect(input.prop()).toEqual({ players: input.bindings(), capturing: false });
   expect(input.prop().players[1].jump).toEqual({ kind: "button", keys: ["KeyU", "GamepadA"] });
+});
+
+test("同一个动作的另一部分绑了同一个键也算冲突，同一部分里的不算", () => {
+  expect(conflictsOf(DEFAULTS, slot(0, "move", "negative", 0), "KeyD")).toEqual([slot(0, "move", "positive", 0)]);
+  expect(conflictsOf(DEFAULTS, slot(0, "move", "negative", 0), "GamepadLeft")).toEqual([]);
+  expect(conflictsOf(DEFAULTS, slot(0, "aim", "up", 0), "KeyG")).toEqual([slot(0, "aim", "down", 0)]);
+  // 确认：轴的两边对调
+  const input = make();
+  input.capture(slot(0, "move", "negative", 0));
+  input.handleKey(down("KeyD"));
+  expect(input.pending()?.conflicts).toEqual([slot(0, "move", "positive", 0)]);
+  expect(input.confirm()).toBe(true);
+  expect(input.bindings()[0].move).toMatchObject({ negative: ["KeyD", "GamepadLeft"], positive: ["KeyA", "GamepadRight"] });
+});
+
+test("同一部分里不留重复的键", () => {
+  expect(keysOfJump(withKey(DEFAULTS, slot(0, "jump", "keys", 0), "GamepadA"))).toEqual(["GamepadA"]);
+  expect(keysOfJump(withKey(DEFAULTS, slot(0, "jump", "keys", 2), "Space"))).toEqual(["Space", "GamepadA"]);
+  const input = make();
+  expect(input.bind(slot(0, "jump", "keys", 2), "GamepadA")).toEqual([]);
+  expect(input.slots(0, "jump")).toHaveLength(2);
+});
+const keysOfJump = (players: Bindings[]) => (players[0].jump as { keys: string[] }).keys;
+
+test("有几个冲突时不对调，冲突的位置都去掉这个键", () => {
+  // 默认的表自己就把 KeyZ 绑了两处
+  const defaults: Bindings[] = [{
+    jump: { kind: "button", keys: ["Space"] },
+    a: { kind: "button", keys: ["KeyZ", "KeyQ"] },
+    b: { kind: "axis", negative: ["KeyZ", "KeyE"], positive: ["KeyC"] },
+  }];
+  const input = inputMap({ key: "test", defaults, store: memory() });
+  input.capture(slot(0, "jump", "keys", 0));
+  input.handleKey(down("KeyZ"));
+  expect(input.pending()?.conflicts).toHaveLength(2);
+  expect(input.confirm()).toBe(true);
+  expect(input.bindings()[0]).toEqual({
+    jump: { kind: "button", keys: ["KeyZ"] },
+    a: { kind: "button", keys: ["KeyQ"] },
+    b: { kind: "axis", negative: ["KeyE"], positive: ["KeyC"] },
+  });
+});
+
+test("对方只剩这一个键、又没有键能换给它：不能确认", () => {
+  const defaults: Bindings[] = [{ jump: { kind: "button", keys: ["Space"] }, slot: { kind: "button", keys: ["KeyS"] } }];
+  const input = inputMap({ key: "test", defaults, store: memory() });
+  // 给跳加一个键（没有原来的键能换过去）
+  input.capture(slot(0, "jump", "keys", 1));
+  input.handleKey(down("KeyS"));
+  expect(input.pending()).toEqual({ slot: slot(0, "jump", "keys", 1), code: "KeyS", conflicts: [slot(0, "slot", "keys", 0)], blocked: [slot(0, "slot", "keys", 0)] });
+  expect(input.confirm()).toBe(false);
+  expect(input.pending()).not.toBeNull();
+  expect(input.bindings()).toEqual(defaults);
+  input.cancel();
+  // 换掉已有的键：对调，谁都不会空
+  input.capture(slot(0, "jump", "keys", 0));
+  input.handleKey(down("KeyS"));
+  expect(input.pending()?.blocked).toEqual([]);
+  expect(input.confirm()).toBe(true);
+  expect(input.bindings()[0]).toEqual({ jump: { kind: "button", keys: ["KeyS"] }, slot: { kind: "button", keys: ["Space"] } });
+});
+
+test("去掉一个键：一个部分至少留一个", () => {
+  const input = make();
+  expect(input.unbind(slot(0, "jump", "keys", 0))).toBe(true);
+  expect(input.slots(0, "jump").map((s) => input.key(s))).toEqual(["GamepadA"]);
+  expect(input.unbind(slot(0, "jump", "keys", 0))).toBe(false);
+  expect(input.slots(0, "jump")).toHaveLength(1);
+  expect(input.unbind(slot(0, "jump", "keys", 5))).toBe(false);
+  expect(input.unbind(slot(0, "nope", "keys", 0))).toBe(false);
+});
+
+test("绑上去的那个键松开时不漏给游戏，Escape 也一样", () => {
+  const input = make();
+  const up = (code: string) => ({ code, down: false, repeat: false });
+  input.capture(slot(0, "jump", "keys", 0));
+  expect(input.handleKey(down("KeyX"))).toBe(true);
+  expect(input.handleKey({ code: "KeyX", down: true, repeat: true })).toBe(true);
+  expect(input.handleKey(up("KeyX"))).toBe(true);
+  expect(input.handleKey(up("KeyX"))).toBe(false);
+  expect(input.handleKey(down("KeyX"))).toBe(false);
+  input.capture(slot(0, "jump", "keys", 0));
+  expect(input.handleKey(down("Escape"))).toBe(true);
+  expect(input.handleKey(up("Escape"))).toBe(true);
+  expect(input.handleKey(down("Escape"))).toBe(false);
+});
+
+test("等冲突的回答时 Escape 取消", () => {
+  const input = make();
+  input.capture(slot(0, "jump", "keys", 0));
+  input.handleKey(down("KeyA"));
+  expect(input.pending()).not.toBeNull();
+  expect(input.handleKey(down("Escape"))).toBe(true);
+  expect(input.pending()).toBeNull();
+  expect(input.prop().capturing).toBe(false);
+  expect(input.bindings()).toEqual(DEFAULTS);
+  expect(input.handleKey({ code: "Escape", down: false, repeat: false })).toBe(true);
+});
+
+test("存的键要是认识的键名、不重复、不和别的动作冲突，不然那个动作用默认的", () => {
+  expect(KEY_NAMES.has("Space") && KEY_NAMES.has("GamepadLeftStickLeft") && KEY_NAMES.has("MetaRight") && !KEY_NAMES.has("Numpad1")).toBe(true);
+  const stored = (jump: unknown, move: unknown = P1.move) => bindingsOf({ v: 1, players: [{ jump, move }] }, DEFAULTS)![0];
+  expect(stored({ kind: "button", keys: [""] }).jump).toEqual(P1.jump);
+  expect(stored({ kind: "button", keys: ["KeyX", "Banana"] }).jump).toEqual(P1.jump);
+  expect(stored({ kind: "button", keys: ["KeyX", "KeyX"] }).jump).toEqual(P1.jump);
+  expect(stored({ kind: "button", keys: [] }).jump).toEqual(P1.jump);
+  // 轴两边同一个键
+  expect(stored(P1.jump, { kind: "axis", negative: ["KeyQ"], positive: ["KeyQ"] }).move).toEqual(P1.move);
+  // 两个动作抢一个键：两个都回到默认
+  const clash = stored({ kind: "button", keys: ["KeyQ"] }, { kind: "axis", negative: ["KeyQ"], positive: ["KeyE"] });
+  expect(clash.jump).toEqual(P1.jump);
+  expect(clash.move).toEqual(P1.move);
+  // 存的键撞上了别的动作默认的键（那个动作没存）：存的这个不要
+  expect(stored({ kind: "button", keys: ["KeyT"] }).jump).toEqual(P1.jump);
+  // 第二个玩家存的键盘键撞了第一个玩家的
+  const two = bindingsOf({ v: 1, players: [{}, { jump: { kind: "button", keys: ["Space"] } }] }, DEFAULTS)!;
+  expect(two[1].jump).toEqual(P2.jump);
+  expect(two[0]).toEqual(P1);
+  // 合规的照用
+  expect(stored({ kind: "button", keys: ["KeyX", "GamepadY"] }).jump).toEqual({ kind: "button", keys: ["KeyX", "GamepadY"] });
+});
+
+test("存储抛错接得住并报出来，下次存成了就清掉", async () => {
+  const store = memory();
+  const boom: InputStore = { getItem: store.getItem, setItem: () => { throw new Error("坏了"); } };
+  const input = inputMap({ key: "test", defaults: DEFAULTS, store: boom });
+  expect(input.saveError()).toBeNull();
+  input.bind(slot(0, "jump", "keys", 0), "KeyX");
+  await input.saved();
+  expect(input.saveError()).toContain("坏了");
+  expect(input.key(slot(0, "jump", "keys", 0))).toBe("KeyX");
+
+  const full = memory();
+  full.full = true;
+  const again = make(full);
+  again.bind(slot(0, "jump", "keys", 0), "KeyX");
+  await again.saved();
+  expect(again.saveError()).toContain("存储满了");
+  full.full = false;
+  again.bind(slot(0, "jump", "keys", 0), "KeyZ");
+  await again.saved();
+  expect(again.saveError()).toBeNull();
+});
+
+test("连着存：后存的为准，不会被先存的盖回去", async () => {
+  const items = new Map<string, string>();
+  let delay = 30;
+  const slow: InputStore = {
+    getItem: async () => null,
+    setItem: (k, v) => new Promise((done) => setTimeout(() => (items.set(k, v), done()), (delay -= 25))),
+  };
+  const input = inputMap({ key: "test", defaults: DEFAULTS, store: slow });
+  input.bind(slot(0, "jump", "keys", 0), "KeyX");
+  input.bind(slot(0, "jump", "keys", 0), "KeyZ");
+  await input.saved();
+  expect(JSON.parse(items.get(KEY)!).players[0].jump.keys[0]).toBe("KeyZ");
+  // 先存的那次慢（5 ms），等它也落地：没有盖回去
+  await new Promise((r) => setTimeout(r, 30));
+  expect(JSON.parse(items.get(KEY)!).players[0].jump.keys[0]).toBe("KeyZ");
 });

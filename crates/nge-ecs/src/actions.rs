@@ -108,6 +108,17 @@ pub struct Actions {
     /// 告诉过 TSX 的动作状态、手柄归谁。
     sent: Vec<BTreeMap<String, Sent>>,
     reported: BTreeMap<u32, Option<usize>>,
+    /// 换了表：按着的动作再告诉 TSX 一遍。
+    resend: bool,
+    /// 上一帧在等玩家按键来绑。
+    was_capturing: bool,
+    /// 绑键结束时还按着的键（键盘和合并的手柄键、每个手柄自己的）：松开之前不算数。
+    blocked: BTreeSet<String>,
+    blocked_pad: BTreeSet<(u32, String)>,
+    /// 直接驱动的动作（[`Actions::drive`]）：(玩家, 动作) → 每个来源的方向；这一帧新按下、松开的。
+    driven: BTreeMap<(usize, String), BTreeMap<String, Vec2>>,
+    driven_pressed: BTreeSet<(usize, String)>,
+    driven_released: BTreeSet<(usize, String)>,
 }
 
 /// 一个玩家的动作。
@@ -124,7 +135,7 @@ impl PlayerActions<'_> {
         self.state(action).down
     }
 
-    /// 这一帧刚按下。
+    /// 这一帧刚按下（按着的键这一帧松开过又按下也算，和 [`Input::key_pressed`] 一样）。
     pub fn pressed(&self, action: &str) -> bool {
         self.state(action).pressed
     }
@@ -139,18 +150,19 @@ impl PlayerActions<'_> {
         self.state(action).value.x
     }
 
-    /// 二维的值。
+    /// 二维的值，长度不超过 1。
     pub fn vec(&self, action: &str) -> Vec2 {
         self.state(action).value
     }
 }
 
 impl Actions {
-    /// 换绑定表（改键、TSX 的 prop）。按着的动作接着算按着；连着的手柄会再报给 TSX 一遍。
+    /// 换绑定表（改键、TSX 的 prop）。按着的动作接着算按着、座位不动；连着的手柄和按着的动作会再报给 TSX 一遍。
     pub fn set_map(&mut self, map: ActionMap) {
         self.slots.resize(map.players.len(), None);
         self.map = map;
         self.reported.clear();
+        self.resend = true;
     }
 
     pub fn map(&self) -> &ActionMap {
@@ -188,7 +200,7 @@ impl Actions {
         self.slots.get(player).copied().flatten()
     }
 
-    /// 把手柄 `pad` 给第 `player` 个玩家；他原来的手柄换给 `pad` 原来的主人。
+    /// 把手柄 `pad` 给第 `player` 个玩家；他原来的手柄换给 `pad` 原来的主人，别人的不动。
     pub fn assign(&mut self, player: usize, pad: u32) {
         if player >= self.slots.len() {
             return;
@@ -200,14 +212,41 @@ impl Actions {
         self.slots[player] = Some(pad);
     }
 
+    /// 直接驱动一个动作（触屏按钮、虚拟摇杆）：不经过键和绑定表，改键管不到。`value` 是方向（按钮给 `Vec2::X`），`None` 是松开。
+    /// 同一个动作可以有几个来源（`source`），各自按下松开，方向加起来（左右都按着是 0）。动作要在表里声明过才有状态。
+    pub fn drive(&mut self, player: usize, action: &str, source: &str, value: Option<Vec2>) {
+        let key = (player, action.to_owned());
+        let clean = |v: Vec2| Vec2::new(unit(v.x), unit(v.y));
+        match value {
+            Some(v) => {
+                let sources = self.driven.entry(key.clone()).or_default();
+                if sources.is_empty() {
+                    self.driven_pressed.insert(key);
+                }
+                sources.insert(source.to_owned(), clean(v));
+            }
+            None => {
+                let Some(sources) = self.driven.get_mut(&key) else { return };
+                if sources.remove(source).is_some() && sources.is_empty() {
+                    self.driven.remove(&key);
+                    self.driven_released.insert(key);
+                }
+            }
+        }
+    }
+
     /// 只有一个玩家：不分手柄，读合并后的。
     fn merged(&self) -> bool {
         self.map.players.len() <= 1
     }
 
-    /// 手柄归第几个玩家。
+    /// 手柄归第几个玩家；没有绑定表时不归谁。
     fn player_of(&self, pad: u32) -> Option<usize> {
-        if self.merged() { Some(0) } else { self.slots.iter().position(|s| *s == Some(pad)) }
+        match self.map.players.len() {
+            0 => None,
+            1 => Some(0),
+            _ => self.slots.iter().position(|s| *s == Some(pad)),
+        }
     }
 
     /// 拔掉的手柄让出位置；没有位置的手柄给最靠前的、还没手柄的玩家。
@@ -241,6 +280,20 @@ impl Actions {
         }
     }
 
+    /// 绑键刚结束：这时还按着的键记下来，松开之前不算数（不然绑上去的那个键、取消用的 Esc 马上触发动作）。松开了的放行。
+    fn block_held_keys(&mut self, input: &Input) {
+        if self.was_capturing && !self.map.capturing {
+            self.blocked.extend(input.keys_down().map(str::to_owned));
+            for id in input.pads() {
+                let keys = input.pad(id).into_iter().flat_map(Pad::keys_down);
+                self.blocked_pad.extend(keys.map(|k| (id, k.to_owned())));
+            }
+        }
+        self.was_capturing = self.map.capturing;
+        self.blocked.retain(|code| input.key_down(code));
+        self.blocked_pad.retain(|(id, code)| input.pad(*id).is_some_and(|pad| pad.key_down(code)));
+    }
+
     /// 从这一帧的输入算每个动作的状态，变了的告诉 TSX。
     fn update(&mut self, input: &Input, outbox: &mut Outbox) {
         let connected: BTreeSet<u32> = input.pads().collect();
@@ -252,15 +305,23 @@ impl Actions {
         }
         self.seat(&connected);
         self.report_pads(&connected, outbox);
+        self.block_held_keys(input);
 
         let players = self.map.players.len();
+        // 表里去掉了的玩家：按着的告诉 TSX 松开
+        for (player, sent) in self.sent.iter().enumerate().skip(players) {
+            for (name, _) in sent.iter().filter(|(_, sent)| sent.0) {
+                outbox.send(ACTION_EVENT, &ActionEvent { action: name.clone(), player, down: false, x: 0, y: 0 });
+            }
+        }
         self.states.resize_with(players, BTreeMap::new);
         self.sent.resize_with(players, BTreeMap::new);
         let merged = self.merged();
-        let Self { map, slots, states, sent, .. } = self;
+        let resend = std::mem::take(&mut self.resend);
+        let Self { map, slots, states, sent, blocked, blocked_pad, driven, driven_pressed, driven_released, .. } = self;
         for (player, bindings) in map.players.iter().enumerate() {
-            let pad = if merged { None } else { Some(slots[player].and_then(|id| input.pad(id))) };
-            let reader = Reader { input, pad };
+            let pad = if merged { None } else { Some(slots[player].and_then(|id| input.pad(id).map(|pad| (id, pad)))) };
+            let reader = Reader { input, pad, blocked, blocked_pad };
             let (states, sent) = (&mut states[player], &mut sent[player]);
             // 表里去掉了的动作：按着的告诉 TSX 松开
             states.retain(|name, _| bindings.contains_key(name));
@@ -276,27 +337,54 @@ impl Actions {
                     sent.insert(name.clone(), Sent::default());
                 }
                 let (Some(state), Some(sent)) = (states.get_mut(name), sent.get_mut(name)) else { continue };
-                *state = if map.capturing { ActionState { released: state.down, ..Default::default() } } else { evaluate(binding, &reader, *state) };
-                let mut tell = |now: Sent| {
-                    if *sent != now {
+                let key = (player, name.clone());
+                let direct = Driven {
+                    value: driven.get(&key).map(|sources| sources.values().fold(Vec2::ZERO, |sum, v| sum + *v)),
+                    pressed: driven_pressed.contains(&key),
+                    released: driven_released.contains(&key),
+                };
+                *state = if map.capturing { ActionState { released: state.down, ..Default::default() } } else { evaluate(binding, &reader, direct, *state) };
+                let mut told = false;
+                let mut tell = |now: Sent, again: bool| {
+                    if *sent != now || (again && now.0 && !told) {
                         *sent = now;
+                        told = true;
                         outbox.send(ACTION_EVENT, &ActionEvent { action: name.clone(), player, down: now.0, x: now.1, y: now.2 });
                     }
                 };
                 // 一帧里按下又松开的按钮：两个都告诉
                 if state.pressed && matches!(binding, Binding::Button { .. }) {
-                    tell((true, 1, 0));
+                    tell((true, 1, 0), false);
                 }
-                tell(quantize(binding, state));
+                // 换了表：按着的再报一遍
+                tell(quantize(binding, state), resend);
             }
         }
+        driven_pressed.clear();
+        driven_released.clear();
     }
 }
 
+/// −1 … 1，不是有限数的当 0。
+fn unit(v: f32) -> f32 {
+    if v.is_finite() { v.clamp(-1.0, 1.0) } else { 0.0 }
+}
+
+/// 直接驱动的动作这一帧的样子：现在的方向（没有来源按着是 `None`）、这一帧新按下 / 全松开过。
+#[derive(Clone, Copy)]
+struct Driven {
+    value: Option<Vec2>,
+    pressed: bool,
+    released: bool,
+}
+
 /// 一个玩家读输入：键盘大家共用；手柄的键和模拟量，只有一个玩家时读合并后的（`pad` 是 `None`），不然读他自己的手柄（没有就都是 0）。
+/// 绑键结束时还按着的键（`blocked`）当没按。
 struct Reader<'a> {
     input: &'a Input,
-    pad: Option<Option<&'a Pad>>,
+    pad: Option<Option<(u32, &'a Pad)>>,
+    blocked: &'a BTreeSet<String>,
+    blocked_pad: &'a BTreeSet<(u32, String)>,
 }
 
 #[derive(Clone, Copy)]
@@ -309,34 +397,46 @@ enum Edge {
 impl Reader<'_> {
     fn key(&self, code: &str, edge: Edge) -> bool {
         match (self.pad, code.starts_with("Gamepad")) {
-            (Some(pad), true) => pad.is_some_and(|pad| match edge {
-                Edge::Down => pad.key_down(code),
-                Edge::Pressed => pad.key_pressed(code),
-                Edge::Released => pad.key_released(code),
+            (Some(pad), true) => pad.is_some_and(|(id, pad)| {
+                // 借来的键名只用来查，不分配
+                !self.blocked_pad.iter().any(|(i, c)| *i == id && c == code)
+                    && match edge {
+                        Edge::Down => pad.key_down(code),
+                        Edge::Pressed => pad.key_pressed(code),
+                        Edge::Released => pad.key_released(code),
+                    }
             }),
-            _ => match edge {
-                Edge::Down => self.input.key_down(code),
-                Edge::Pressed => self.input.key_pressed(code),
-                Edge::Released => self.input.key_released(code),
-            },
+            _ => {
+                !self.blocked.contains(code)
+                    && match edge {
+                        Edge::Down => self.input.key_down(code),
+                        Edge::Pressed => self.input.key_pressed(code),
+                        Edge::Released => self.input.key_released(code),
+                    }
+            }
         }
     }
 
-    fn any(&self, codes: &[String], edge: Edge) -> bool {
-        codes.iter().any(|code| self.key(code, edge))
+    fn any<'k>(&self, codes: impl IntoIterator<Item = &'k String>, edge: Edge) -> bool {
+        codes.into_iter().any(|code| self.key(code, edge))
+    }
+
+    /// 有一个键这一帧松开过又按下了。
+    fn repressed<'k>(&self, codes: impl IntoIterator<Item = &'k String>) -> bool {
+        codes.into_iter().any(|code| self.key(code, Edge::Pressed) && self.key(code, Edge::Released))
     }
 
     fn stick(&self, stick: Stick) -> Vec2 {
         match self.pad {
             None => self.input.stick(stick),
-            Some(pad) => pad.map_or(Vec2::ZERO, |pad| pad.stick(stick)),
+            Some(pad) => pad.map_or(Vec2::ZERO, |(_, pad)| pad.stick(stick)),
         }
     }
 
     fn trigger(&self, trigger: Trigger) -> f32 {
         match self.pad {
             None => self.input.trigger(trigger),
-            Some(pad) => pad.map_or(0.0, |pad| pad.trigger(trigger)),
+            Some(pad) => pad.map_or(0.0, |(_, pad)| pad.trigger(trigger)),
         }
     }
 
@@ -363,38 +463,74 @@ impl Reader<'_> {
     }
 
     /// 两组键：正的按着 1，负的按着 −1，都按或都没按是 0。
-    fn digital(&self, negative: &[String], positive: &[String]) -> f32 {
+    fn digital<'k>(&self, negative: impl IntoIterator<Item = &'k String>, positive: impl IntoIterator<Item = &'k String>) -> f32 {
         f32::from(i8::from(self.any(positive, Edge::Down)) - i8::from(self.any(negative, Edge::Down)))
     }
+}
+
+/// 这个动作绑了哪根摇杆的模拟量：[左, 右]。
+fn analog_sticks(binding: &Binding) -> [bool; 2] {
+    match binding {
+        Binding::Button { .. } => [false; 2],
+        Binding::Axis { analog, .. } => [
+            analog.iter().any(|a| matches!(a, AnalogAxis::LeftStickX | AnalogAxis::LeftStickY)),
+            analog.iter().any(|a| matches!(a, AnalogAxis::RightStickX | AnalogAxis::RightStickY)),
+        ],
+        Binding::Axis2d { analog, .. } => [analog.contains(&AnalogStick::LeftStick), analog.contains(&AnalogStick::RightStick)],
+    }
+}
+
+/// 绑了某根摇杆的模拟量时，这根摇杆的方向键（推过一半）不算：不然推过一半值就从 0.5 跳到 1。
+fn counted<'k>(keys: &'k [String], [left, right]: [bool; 2]) -> impl Iterator<Item = &'k String> + Clone {
+    keys.iter().filter(move |code| !(left && code.starts_with("GamepadLeftStick")) && !(right && code.starts_with("GamepadRightStick")))
 }
 
 fn larger(a: f32, b: f32) -> f32 {
     if b.abs() > a.abs() { b } else { a }
 }
 
-fn evaluate(binding: &Binding, r: &Reader, prev: ActionState) -> ActionState {
+/// 刚按下、刚松开。`prs` / `rel`：有键这一帧按下 / 松开；`repress`：有键这一帧松开过又按下；
+/// `level`：没有按键的边沿（模拟量）时，从不按到按着也算刚按下。
+fn edges(prev: bool, down: bool, prs: bool, rel: bool, repress: bool, level: bool) -> (bool, bool) {
+    // 按钮只认这一帧真按下的：改完键、换了手柄时还按着的不算刚按下
+    let pressed = (prs && (!prev || repress) && (down || rel)) || (level && down && !prev);
+    let released = (!down && (prev || (prs && rel))) || (prev && down && repress);
+    (pressed, released)
+}
+
+fn evaluate(binding: &Binding, r: &Reader, direct: Driven, prev: ActionState) -> ActionState {
+    let sticks = analog_sticks(binding);
+    let driven = direct.value.unwrap_or(Vec2::ZERO);
     match binding {
         Binding::Button { keys } => {
-            let down = r.any(keys, Edge::Down);
-            ActionState {
-                down,
-                // 只认这一帧真按下的：改完键、换了手柄时还按着的不算刚按下
-                pressed: r.any(keys, Edge::Pressed) && !prev.down,
-                released: !down && (prev.down || r.any(keys, Edge::Released)),
-                value: Vec2::new(keys.iter().map(|k| r.key_value(k)).fold(0.0, f32::max), 0.0),
-            }
+            let down = r.any(keys, Edge::Down) || direct.value.is_some();
+            let (prs, rel) = (r.any(keys, Edge::Pressed) || direct.pressed, r.any(keys, Edge::Released) || direct.released);
+            let (pressed, released) = edges(prev.down, down, prs, rel, r.repressed(keys), false);
+            let held = f32::from(u8::from(direct.value.is_some()));
+            ActionState { down, pressed, released, value: Vec2::new(keys.iter().map(|k| r.key_value(k)).fold(held, f32::max), 0.0) }
         }
         Binding::Axis { negative, positive, analog } => {
-            let x = analog.iter().map(|a| r.axis(*a)).fold(r.digital(negative, positive), larger).clamp(-1.0, 1.0);
+            let (negative, positive) = (counted(negative, sticks), counted(positive, sticks));
+            let digital = r.digital(negative.clone(), positive.clone());
+            let x = analog.iter().map(|a| r.axis(*a)).fold(larger(digital, driven.x), larger).clamp(-1.0, 1.0);
             let down = x != 0.0;
-            ActionState { down, pressed: down && !prev.down, released: !down && prev.down, value: Vec2::new(x, 0.0) }
+            let keys = negative.chain(positive);
+            let (prs, rel) = (r.any(keys.clone(), Edge::Pressed) || direct.pressed, r.any(keys.clone(), Edge::Released) || direct.released);
+            let (pressed, released) = edges(prev.down, down, prs, rel, r.repressed(keys), true);
+            ActionState { down, pressed, released, value: Vec2::new(x, 0.0) }
         }
         Binding::Axis2d { left, right, down, up, analog } => {
-            let keys = Vec2::new(r.digital(left, right), r.digital(down, up));
+            let [left, right, down, up] = [left, right, down, up].map(|keys| counted(keys, sticks));
+            let digital = Vec2::new(r.digital(left.clone(), right.clone()), r.digital(down.clone(), up.clone()));
             let pick = |best: Vec2, v: Vec2| if v.length_squared() > best.length_squared() { v } else { best };
-            let value = analog.iter().map(|s| r.stick(if *s == AnalogStick::LeftStick { Stick::Left } else { Stick::Right })).fold(keys, pick);
-            let down = value != Vec2::ZERO;
-            ActionState { down, pressed: down && !prev.down, released: !down && prev.down, value }
+            let stick = |s: &AnalogStick| r.stick(if *s == AnalogStick::LeftStick { Stick::Left } else { Stick::Right });
+            // 键盘斜着按、摇杆推到角上：长度不超过 1
+            let value = analog.iter().map(stick).fold(pick(digital, driven), pick).clamp_length_max(1.0);
+            let held = value != Vec2::ZERO;
+            let keys = left.chain(right).chain(down).chain(up);
+            let (prs, rel) = (r.any(keys.clone(), Edge::Pressed) || direct.pressed, r.any(keys.clone(), Edge::Released) || direct.released);
+            let (pressed, released) = edges(prev.down, held, prs, rel, r.repressed(keys), true);
+            ActionState { down: held, pressed, released, value }
         }
     }
 }
@@ -413,14 +549,23 @@ pub(crate) fn update_actions(input: Res<Input>, mut actions: ResMut<Actions>, mu
     actions.update(&input, &mut outbox);
 }
 
-/// 手柄震动：这一帧要的，帧末按玩家找到手柄发给平台层。
+/// 手柄震动：这一帧要的，帧末按玩家找到手柄发给平台层。同一个手柄上新的一次顶掉正在震的；游戏暂停（时间缩放是 0）时自动停。
 #[derive(Resource, Debug, Default)]
 pub struct Rumble(Vec<RumbleRequest>);
 
 impl Rumble {
     /// 让第 `player` 个玩家的手柄震 `seconds` 秒：`low` 是低频（重）马达、`high` 是高频（轻）马达，0 … 1。
     pub fn play(&mut self, player: usize, low: f32, high: f32, seconds: f32) {
-        self.0.push(RumbleRequest { player, low, high, duration: seconds });
+        self.0.push(RumbleRequest { player, low, high, duration: seconds, stop: false });
+    }
+
+    /// 停掉第 `player` 个玩家的手柄上正在震的。
+    pub fn stop(&mut self, player: usize) {
+        self.0.push(RumbleRequest { player, low: 0.0, high: 0.0, duration: 0.0, stop: true });
+    }
+
+    pub(crate) fn request(&mut self, request: RumbleRequest) {
+        self.0.push(request);
     }
 }
 
@@ -432,15 +577,34 @@ fn clean_rumble(request: &RumbleRequest) -> Option<(f32, f32, f32)> {
     (duration > 0.0 && (low > 0.0 || high > 0.0)).then_some((low, high, duration))
 }
 
-pub(crate) fn flush_rumble(actions: Res<Actions>, mut rumble: ResMut<Rumble>, mut outbox: ResMut<Outbox>) {
+/// 帧末：要震的、要停的按玩家找到手柄发出去；游戏刚暂停时把正在震的都停掉。`playing`：发过震动、还没停过。
+pub(crate) fn flush_rumble(
+    time: Res<crate::Time>,
+    actions: Res<Actions>,
+    mut rumble: ResMut<Rumble>,
+    mut outbox: ResMut<Outbox>,
+    mut playing: Local<bool>,
+    mut paused: Local<bool>,
+) {
     for request in rumble.0.drain(..) {
-        let Some((low, high, duration)) = clean_rumble(&request) else { continue };
         // 只有一个玩家时所有手柄一起震
         let pad = if actions.merged() { None } else { actions.pad_of(request.player) };
-        if request.player < actions.map.players.len() && (actions.merged() || pad.is_some()) {
+        if request.player >= actions.map.players.len() || !(actions.merged() || pad.is_some()) {
+            continue;
+        }
+        if request.stop {
+            outbox.send(RUMBLE_OUT, &RumbleOut::stop(pad));
+        } else if let Some((low, high, duration)) = clean_rumble(&request) {
             outbox.send(RUMBLE_OUT, &RumbleOut { pad, low, high, duration });
+            *playing = true;
         }
     }
+    let now_paused = time.delta <= 0.0;
+    if now_paused && !*paused && *playing {
+        outbox.send(RUMBLE_OUT, &RumbleOut::stop(None));
+        *playing = false;
+    }
+    *paused = now_paused;
 }
 
 #[cfg(test)]
@@ -552,7 +716,8 @@ mod tests {
         key(&mut app, "KeyJ", true);
         key(&mut app, "KeyI", true);
         tick(&mut app);
-        assert_eq!(actions(&app).vec("aim"), Vec2::new(-1.0, 1.0));
+        let diagonal = actions(&app).vec("aim");
+        assert!((diagonal.length() - 1.0).abs() < 1e-6 && diagonal.x < 0.0 && diagonal.y > 0.0, "斜着按长度也是 1：{diagonal}");
         key(&mut app, "KeyJ", false);
         key(&mut app, "KeyI", false);
         app.command("gamepad", &json!({ "right": [0.5, -0.25] }));
@@ -603,6 +768,247 @@ mod tests {
         assert!(actions(&app).down("jump"));
         let pads: Vec<_> = events.iter().filter(|(n, _)| n == "pad").map(|(_, e)| e.clone()).collect();
         assert_eq!(pads, [json!({ "id": 4, "connected": true, "player": 0 }), json!({ "id": 9, "connected": true, "player": 0 })]);
+    }
+
+    #[test]
+    fn without_a_map_pads_belong_to_nobody() {
+        let mut app = App::new();
+        pad(&mut app, json!({ "id": 4 }));
+        let events = tick(&mut app);
+        assert_eq!(events, [("pad".to_owned(), json!({ "id": 4, "connected": true, "player": null }))], "没有绑定表就没有玩家");
+    }
+
+    #[test]
+    fn a_stick_with_an_analog_binding_ignores_its_own_direction_keys() {
+        let mut bindings = map();
+        bindings["players"][0]["move"]["negative"] = json!(["ArrowLeft", "GamepadLeft", "GamepadLeftStickLeft"]);
+        bindings["players"][0]["move"]["positive"] = json!(["ArrowRight", "GamepadRight", "GamepadLeftStickRight", "GamepadRightStickRight"]);
+        bindings["players"][0]["aim"]["right"] = json!(["KeyL", "GamepadRightStickRight"]);
+        let mut app = app(bindings);
+        for push in [0.55, 0.9] {
+            // 平台层这时也把「推过一半」当成键发过来
+            key(&mut app, "GamepadLeftStickRight", true);
+            app.command("gamepad", &json!({ "left": [push, 0.0] }));
+            tick(&mut app);
+            assert_eq!(actions(&app).value("move"), push, "不从 0.5 跳到 1");
+        }
+        key(&mut app, "GamepadLeftStickRight", false);
+        app.command("gamepad", &json!({ "left": [0.0, 0.0], "right": [0.75, 0.0] }));
+        key(&mut app, "GamepadRightStickRight", true);
+        tick(&mut app);
+        assert_eq!(actions(&app).value("move"), 1.0, "别的摇杆的方向键照常算");
+        assert_eq!(actions(&app).vec("aim"), Vec2::new(0.75, 0.0), "二维的轴也一样");
+    }
+
+    #[test]
+    fn a_2d_axis_is_never_longer_than_one() {
+        let mut app = app(map());
+        app.command("gamepad", &json!({ "right": [1.0, 1.0] }));
+        tick(&mut app);
+        let corner = actions(&app).vec("aim");
+        assert!((corner.length() - 1.0).abs() < 1e-6 && (corner.x - corner.y).abs() < 1e-6, "摇杆的角：{corner}");
+        app.command("gamepad", &json!({ "right": [0.25, 0.0] }));
+        tick(&mut app);
+        assert_eq!(actions(&app).vec("aim"), Vec2::new(0.25, 0.0), "短的不拉长");
+    }
+
+    #[test]
+    fn a_2d_axis_has_pressed_and_released_edges() {
+        let mut app = app(map());
+        key(&mut app, "KeyL", true);
+        tick(&mut app);
+        let a = actions(&app);
+        assert!(a.down("aim") && a.pressed("aim") && !a.released("aim"));
+        tick(&mut app);
+        assert!(actions(&app).down("aim") && !actions(&app).pressed("aim"));
+        key(&mut app, "KeyL", false);
+        tick(&mut app);
+        let a = actions(&app);
+        assert!(!a.down("aim") && a.released("aim") && !a.pressed("aim"));
+        // 只推摇杆（没有键的边沿）也有刚按下
+        app.command("gamepad", &json!({ "right": [0.3, 0.0] }));
+        tick(&mut app);
+        assert!(actions(&app).pressed("aim"));
+    }
+
+    #[test]
+    fn released_and_pressed_again_within_one_frame_is_a_new_press() {
+        let mut app = app(map());
+        key(&mut app, "Space", true);
+        key(&mut app, "ArrowLeft", true);
+        tick(&mut app);
+        key(&mut app, "Space", false);
+        key(&mut app, "Space", true);
+        key(&mut app, "ArrowLeft", false);
+        key(&mut app, "ArrowLeft", true);
+        tick(&mut app);
+        let a = actions(&app);
+        assert!(a.down("jump") && a.pressed("jump") && a.released("jump"), "和直接读键一样：这一帧松开过又按下");
+        assert!(a.down("move") && a.pressed("move") && a.released("move"), "轴的键也一样");
+        tick(&mut app);
+        assert!(!actions(&app).pressed("jump") && !actions(&app).pressed("move"));
+    }
+
+    #[test]
+    fn an_axis_key_tapped_within_one_frame_has_both_edges() {
+        let mut app = app(map());
+        key(&mut app, "ArrowLeft", true);
+        key(&mut app, "ArrowLeft", false);
+        tick(&mut app);
+        let a = actions(&app);
+        assert!(a.pressed("move") && a.released("move") && !a.down("move"));
+        // 两边同时按下：值是 0，不算按下
+        key(&mut app, "ArrowLeft", true);
+        key(&mut app, "ArrowRight", true);
+        tick(&mut app);
+        assert!(!actions(&app).pressed("move") && !actions(&app).down("move"));
+    }
+
+    fn act(app: &mut App, args: Value) {
+        app.command("action", &args);
+    }
+
+    #[test]
+    fn actions_can_be_driven_directly_whatever_the_bindings() {
+        let mut bindings = map();
+        // 跳改成了别的键，空格现在是别的动作
+        bindings["players"][0]["jump"]["keys"] = json!(["KeyR"]);
+        let mut app = app(bindings);
+        act(&mut app, json!({ "action": "jump", "down": true }));
+        let events = tick(&mut app);
+        let a = actions(&app);
+        assert!(a.down("jump") && a.pressed("jump") && a.value("jump") == 1.0, "触屏按钮按动作发，不看键");
+        assert_eq!(action_events(&events), [json!({ "action": "jump", "player": 0, "down": true, "x": 1, "y": 0 })]);
+        tick(&mut app);
+        assert!(actions(&app).down("jump") && !actions(&app).pressed("jump"));
+        act(&mut app, json!({ "action": "jump", "down": false }));
+        tick(&mut app);
+        assert!(!actions(&app).down("jump") && actions(&app).released("jump"));
+        // 一帧里点一下
+        act(&mut app, json!({ "action": "jump", "down": true }));
+        act(&mut app, json!({ "action": "jump", "down": false }));
+        tick(&mut app);
+        assert!(actions(&app).pressed("jump") && actions(&app).released("jump") && !actions(&app).down("jump"));
+        // 没按着时的松开、坏的命令不算
+        act(&mut app, json!({ "action": "jump", "down": false }));
+        act(&mut app, json!({ "down": true }));
+        tick(&mut app);
+        assert!(!actions(&app).released("jump") && !actions(&app).down("jump"));
+        // 刚按下只算一帧
+        act(&mut app, json!({ "action": "jump", "down": true }));
+        tick(&mut app);
+        tick(&mut app);
+        assert!(actions(&app).down("jump") && !actions(&app).pressed("jump"));
+    }
+
+    #[test]
+    fn directions_driven_directly_add_up_per_source() {
+        let mut app = app(two_players());
+        act(&mut app, json!({ "action": "move", "down": true, "x": -1, "source": "left" }));
+        tick(&mut app);
+        assert_eq!(actions(&app).value("move"), -1.0);
+        assert_eq!(actions(&app).player(1).value("move"), 0.0, "只管指定的玩家");
+        act(&mut app, json!({ "action": "move", "down": true, "x": 1, "source": "right" }));
+        tick(&mut app);
+        assert_eq!(actions(&app).value("move"), 0.0, "左右都按着：抵消");
+        act(&mut app, json!({ "action": "move", "down": false, "source": "left" }));
+        tick(&mut app);
+        assert_eq!(actions(&app).value("move"), 1.0, "松开一个，另一个还在");
+        // 同一个来源再发一次是换值（虚拟摇杆）；数值限制在 −1 … 1，坏的当 0
+        act(&mut app, json!({ "action": "move", "down": true, "x": 0.25, "source": "right" }));
+        tick(&mut app);
+        assert_eq!(actions(&app).value("move"), 0.25);
+        act(&mut app, json!({ "action": "move", "down": true, "x": 9, "source": "right" }));
+        act(&mut app, json!({ "action": "move", "player": 1, "down": true, "x": -0.5 }));
+        tick(&mut app);
+        assert_eq!((actions(&app).value("move"), actions(&app).player(1).value("move")), (1.0, -0.5));
+        // 每个来源先限幅再加：9 和 −1 抵消成 0，不是 8
+        act(&mut app, json!({ "action": "move", "down": true, "x": -1, "source": "left" }));
+        tick(&mut app);
+        assert_eq!(actions(&app).value("move"), 0.0);
+        act(&mut app, json!({ "action": "move", "down": false, "source": "left" }));
+        // 键盘的键和它取大的
+        key(&mut app, "KeyA", true);
+        act(&mut app, json!({ "action": "move", "down": true, "x": 0.25, "source": "right" }));
+        tick(&mut app);
+        assert_eq!(actions(&app).value("move"), -1.0);
+    }
+
+    #[test]
+    fn switching_between_one_and_two_players_keeps_a_held_pad_key_down() {
+        let one = json!({ "players": [two_players()["players"][0].clone()] });
+        let mut app = app(one.clone());
+        // 平台层两条路都发：合并的键和这个手柄自己的状态
+        key(&mut app, "GamepadA", true);
+        pad(&mut app, json!({ "id": 2, "keys": ["GamepadA"] }));
+        tick(&mut app);
+        assert!(actions(&app).down("jump") && actions(&app).pressed("jump"));
+        app.prop("actions", Some(&two_players()));
+        tick(&mut app);
+        let a = actions(&app);
+        assert!(a.down("jump") && !a.pressed("jump") && !a.released("jump"), "换成两个人：还是按着，不算新按下");
+        assert!(!a.player(1).down("jump"));
+        app.prop("actions", Some(&one));
+        tick(&mut app);
+        let a = actions(&app);
+        assert!(a.down("jump") && !a.pressed("jump") && !a.released("jump"), "换回一个人也一样");
+    }
+
+    #[test]
+    fn a_new_map_keeps_the_seats_and_reports_held_actions_again() {
+        let mut app = app(two_players());
+        pad(&mut app, json!({ "id": 5 }));
+        pad(&mut app, json!({ "id": 7 }));
+        key(&mut app, "KeyW", true);
+        tick(&mut app);
+        app.world_mut().resource_mut::<Actions>().assign(0, 7);
+        tick(&mut app);
+        app.prop("actions", Some(&two_players()));
+        assert_eq!((actions(&app).pad_of(0), actions(&app).pad_of(1)), (Some(7), Some(5)), "换表不动座位");
+        let events = tick(&mut app);
+        assert_eq!((actions(&app).pad_of(0), actions(&app).pad_of(1)), (Some(7), Some(5)));
+        assert_eq!(action_events(&events), [json!({ "action": "jump", "player": 0, "down": true, "x": 1, "y": 0 })], "按着的再报一遍，JS 重载后对得上");
+        assert!(!actions(&app).pressed("jump"), "Rust 这边不算新按下");
+    }
+
+    #[test]
+    fn a_pad_unplugged_right_before_a_new_map_is_still_reported_gone() {
+        let mut app = app(map());
+        pad(&mut app, json!({ "id": 3 }));
+        tick(&mut app);
+        pad(&mut app, json!({ "id": 3, "connected": false }));
+        app.prop("actions", Some(&map()));
+        let events = tick(&mut app);
+        assert!(events.contains(&("pad".to_owned(), json!({ "id": 3, "connected": false, "player": null }))), "{events:?}");
+    }
+
+    #[test]
+    fn players_dropped_from_the_map_let_go_of_what_they_held() {
+        let mut app = app(two_players());
+        key(&mut app, "KeyI", true);
+        key(&mut app, "KeyL", true);
+        tick(&mut app);
+        assert!(actions(&app).player(1).down("jump"));
+        app.prop("actions", Some(&json!({ "players": [two_players()["players"][0].clone()] })));
+        let events = action_events(&tick(&mut app));
+        assert!(events.contains(&json!({ "action": "jump", "player": 1, "down": false, "x": 0, "y": 0 })), "{events:?}");
+        assert!(events.contains(&json!({ "action": "move", "player": 1, "down": false, "x": 0, "y": 0 })), "{events:?}");
+        assert!(!actions(&app).player(1).down("jump"));
+    }
+
+    #[test]
+    fn assigning_swaps_only_the_two_players_involved() {
+        let three = json!({ "players": [{}, {}, {}] });
+        let mut app = app(three);
+        for id in [10, 11, 12] {
+            pad(&mut app, json!({ "id": id }));
+        }
+        tick(&mut app);
+        app.world_mut().resource_mut::<Actions>().assign(0, 12);
+        let a = actions(&app);
+        assert_eq!([a.pad_of(0), a.pad_of(1), a.pad_of(2)], [Some(12), Some(11), Some(10)], "第二个人的不动");
+        app.world_mut().resource_mut::<Actions>().assign(7, 10);
+        assert_eq!(actions(&app).pad_of(2), Some(10), "没有的玩家：不变");
     }
 
     #[test]
@@ -712,10 +1118,43 @@ mod tests {
         let events = tick(&mut app);
         assert!(!actions(&app).down("jump") && actions(&app).released("jump"));
         assert_eq!(action_events(&events).len(), 1, "松开告诉 TSX");
-        // 绑完了键还按着：不算刚按下
+        // 绑完了键还按着：等它松开一次才重新算数，Rust 和 TSX 都一样
         app.prop("actions", Some(&map()));
+        let events = tick(&mut app);
+        assert!(!actions(&app).down("jump") && !actions(&app).pressed("jump"), "还按着的键不算");
+        assert!(action_events(&events).is_empty(), "{events:?}");
         tick(&mut app);
-        assert!(actions(&app).down("jump") && !actions(&app).pressed("jump"));
+        assert!(!actions(&app).down("jump"));
+        key(&mut app, "Space", false);
+        let events = tick(&mut app);
+        assert!(!actions(&app).released("jump") && action_events(&events).is_empty(), "松开的这一下也不算");
+        key(&mut app, "Space", true);
+        let events = tick(&mut app);
+        assert!(actions(&app).down("jump") && actions(&app).pressed("jump"), "松开过再按才算");
+        assert_eq!(action_events(&events).len(), 1);
+    }
+
+    #[test]
+    fn keys_held_when_capturing_ends_wait_for_a_release_on_pads_too() {
+        let mut app = app(two_players());
+        pad(&mut app, json!({ "id": 5, "keys": ["GamepadA"] }));
+        key(&mut app, "Escape", true);
+        let mut capturing = two_players();
+        capturing["players"][0]["menu"] = json!({ "kind": "button", "keys": ["Escape"] });
+        let done = capturing.clone();
+        capturing["capturing"] = json!(true);
+        app.prop("actions", Some(&capturing));
+        tick(&mut app);
+        // Esc 取消了捕获：绑着 Escape 的动作不触发；手柄上按着的 A 也不算
+        app.prop("actions", Some(&done));
+        let events = tick(&mut app);
+        assert!(action_events(&events).is_empty(), "{events:?}");
+        assert!(!actions(&app).down("menu") && !actions(&app).down("jump"));
+        pad(&mut app, json!({ "id": 5, "keys": [] }));
+        tick(&mut app);
+        pad(&mut app, json!({ "id": 5, "keys": ["GamepadA"] }));
+        tick(&mut app);
+        assert!(actions(&app).down("jump") && !actions(&app).down("menu"), "手柄的键松开再按就算；Esc 还按着");
     }
 
     #[test]
@@ -776,6 +1215,43 @@ mod tests {
         tick(&mut two);
         two.world_mut().resource_mut::<Rumble>().play(1, 1.0, 1.0, 0.25);
         assert!(rumbles(&tick(&mut two)).is_empty(), "这个玩家没有手柄");
+    }
+
+    const STOP: f32 = 0.0;
+
+    #[test]
+    fn rumble_can_be_stopped() {
+        let mut two = app(two_players());
+        pad(&mut two, json!({ "id": 6 }));
+        tick(&mut two);
+        two.world_mut().resource_mut::<Rumble>().stop(0);
+        assert_eq!(rumbles(&tick(&mut two)), [json!({ "pad": 6, "low": STOP, "high": STOP, "duration": STOP })], "强度和时长都是 0 就是停");
+        two.command("rumble", &json!({ "player": 0, "stop": true }));
+        assert_eq!(rumbles(&tick(&mut two)).len(), 1, "TSX 也能停");
+        two.world_mut().resource_mut::<Rumble>().stop(1);
+        assert!(rumbles(&tick(&mut two)).is_empty(), "没手柄的玩家不用停");
+        let mut one = app(map());
+        one.world_mut().resource_mut::<Rumble>().stop(0);
+        assert_eq!(rumbles(&tick(&mut one)), [json!({ "pad": null, "low": STOP, "high": STOP, "duration": STOP })]);
+    }
+
+    #[test]
+    fn pausing_stops_a_rumble_that_is_playing() {
+        let mut app = app(map());
+        app.world_mut().resource_mut::<crate::Time>().scale = 0.0;
+        assert!(rumbles(&tick(&mut app)).is_empty(), "没在震，暂停时不用停");
+        app.world_mut().resource_mut::<crate::Time>().scale = 1.0;
+        tick(&mut app);
+        app.world_mut().resource_mut::<Rumble>().play(0, 1.0, 1.0, 2.0);
+        assert_eq!(rumbles(&tick(&mut app)).len(), 1);
+        app.world_mut().resource_mut::<crate::Time>().scale = 0.0;
+        assert_eq!(rumbles(&tick(&mut app)), [json!({ "pad": null, "low": STOP, "high": STOP, "duration": STOP })], "暂停了：所有手柄停");
+        assert!(rumbles(&tick(&mut app)).is_empty(), "只停一次");
+        // 继续了又暂停：中间没有新的震动，不用再停
+        app.world_mut().resource_mut::<crate::Time>().scale = 1.0;
+        tick(&mut app);
+        app.world_mut().resource_mut::<crate::Time>().scale = 0.0;
+        assert!(rumbles(&tick(&mut app)).is_empty(), "已经停了");
     }
 
     #[test]

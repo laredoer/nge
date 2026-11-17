@@ -1,0 +1,260 @@
+[
+ {
+  "players": [
+   {
+    "move": {
+     "kind": "axis",
+     "negative": [
+      "ArrowLeft",
+      "KeyA",
+      "GamepadLeft"
+     ],
+     "positive": [
+      "ArrowRight",
+      "KeyD",
+      "GamepadRight"
+     ],
+     "analog": [
+      "LeftStickX"
+     ]
+    },
+    "jump": {
+     "kind": "button",
+     "keys": [
+      "Space",
+      "ArrowUp",
+      "KeyW",
+      "GamepadA"
+     ]
+    },
+    "restart": {
+     "kind": "button",
+     "keys": [
+      "KeyR",
+      "GamepadMenu"
+     ]
+    },
+    "slot": {
+     "kind": "button",
+     "keys": [
+      "KeyS"
+     ]
+    },
+    "lang": {
+     "kind": "button",
+     "keys": [
+      "KeyL"
+     ]
+    },
+    "net": {
+     "kind": "button",
+     "keys": [
+      "KeyN"
+     ]
+    },
+    "remap": {
+     "kind": "button",
+     "keys": [
+      "KeyK"
+     ]
+    }
+   },
+   {
+    "move": {
+     "kind": "axis",
+     "negative": [
+      "KeyF",
+      "GamepadLeft"
+     ],
+     "positive": [
+      "KeyH",
+      "GamepadRight"
+     ],
+     "analog": [
+      "LeftStickX"
+     ]
+    },
+    "jump": {
+     "kind": "button",
+     "keys": [
+      "KeyT",
+      "GamepadA"
+     ]
+    }
+   }
+  ],
+  "capturing": false
+ },
+ {
+  "players": [
+   {
+    "move": {
+     "kind": "axis",
+     "negative": [
+      "ArrowLeft",
+      "KeyA",
+      "GamepadLeft"
+     ],
+     "positive": [
+      "ArrowRight",
+      "KeyD",
+      "GamepadRight"
+     ],
+     "analog": [
+      "LeftStickX"
+     ]
+    },
+    "jump": {
+     "kind": "button",
+     "keys": [
+      "Space",
+      "ArrowUp",
+      "KeyW",
+      "GamepadA"
+     ]
+    },
+    "restart": {
+     "kind": "button",
+     "keys": [
+      "KeyR",
+      "GamepadMenu"
+     ]
+    },
+    "slot": {
+     "kind": "button",
+     "keys": [
+      "KeyS"
+     ]
+    },
+    "lang": {
+     "kind": "button",
+     "keys": [
+      "KeyL"
+     ]
+    },
+    "net": {
+     "kind": "button",
+     "keys": [
+      "KeyN"
+     ]
+    },
+    "remap": {
+     "kind": "button",
+     "keys": [
+      "KeyK"
+     ]
+    }
+   },
+   {
+    "move": {
+     "kind": "axis",
+     "negative": [
+      "KeyF",
+      "GamepadLeft"
+     ],
+     "positive": [
+      "KeyH",
+      "GamepadRight"
+     ],
+     "analog": [
+      "LeftStickX"
+     ]
+    },
+    "jump": {
+     "kind": "button",
+     "keys": [
+      "KeyT",
+      "GamepadA"
+     ]
+    }
+   }
+  ],
+  "capturing": true
+ },
+ {
+  "players": [
+   {
+    "move": {
+     "kind": "axis",
+     "negative": [
+      "ArrowLeft",
+      "KeyA",
+      "GamepadLeft"
+     ],
+     "positive": [
+      "ArrowRight",
+      "KeyD",
+      "GamepadRight"
+     ],
+     "analog": [
+      "LeftStickX"
+     ]
+    },
+    "jump": {
+     "kind": "button",
+     "keys": [
+      "KeyX",
+      "ArrowUp",
+      "KeyW",
+      "GamepadA"
+     ]
+    },
+    "restart": {
+     "kind": "button",
+     "keys": [
+      "KeyR",
+      "GamepadMenu"
+     ]
+    },
+    "slot": {
+     "kind": "button",
+     "keys": [
+      "KeyS"
+     ]
+    },
+    "lang": {
+     "kind": "button",
+     "keys": [
+      "KeyL"
+     ]
+    },
+    "net": {
+     "kind": "button",
+     "keys": [
+      "KeyN"
+     ]
+    },
+    "remap": {
+     "kind": "button",
+     "keys": [
+      "KeyK"
+     ]
+    }
+   },
+   {
+    "move": {
+     "kind": "axis",
+     "negative": [
+      "KeyF",
+      "GamepadLeft"
+     ],
+     "positive": [
+      "KeyH",
+      "GamepadRight"
+     ],
+     "analog": [
+      "LeftStickX"
+     ]
+    },
+    "jump": {
+     "kind": "button",
+     "keys": [
+      "KeyT",
+      "GamepadA"
+     ]
+    }
+   }
+  ],
+  "capturing": false
+ }
+]

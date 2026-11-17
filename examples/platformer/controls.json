@@ -3,8 +3,8 @@
     {
       "move": {
         "kind": "axis",
-        "negative": ["ArrowLeft", "KeyA", "GamepadLeft", "GamepadLeftStickLeft"],
-        "positive": ["ArrowRight", "KeyD", "GamepadRight", "GamepadLeftStickRight"],
+        "negative": ["ArrowLeft", "KeyA", "GamepadLeft"],
+        "positive": ["ArrowRight", "KeyD", "GamepadRight"],
         "analog": ["LeftStickX"]
       },
       "jump": { "kind": "button", "keys": ["Space", "ArrowUp", "KeyW", "GamepadA"] },
@@ -17,8 +17,8 @@
     {
       "move": {
         "kind": "axis",
-        "negative": ["KeyF", "GamepadLeft", "GamepadLeftStickLeft"],
-        "positive": ["KeyH", "GamepadRight", "GamepadLeftStickRight"],
+        "negative": ["KeyF", "GamepadLeft"],
+        "positive": ["KeyH", "GamepadRight"],
         "analog": ["LeftStickX"]
       },
       "jump": { "kind": "button", "keys": ["KeyT", "GamepadA"] }

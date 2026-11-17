@@ -57,6 +57,11 @@ impl Pad {
         self.keys_released.contains(code)
     }
 
+    /// 这个手柄按着的所有键。
+    pub fn keys_down(&self) -> impl Iterator<Item = &str> {
+        self.keys_down.iter().map(String::as_str)
+    }
+
     /// x 向右、y 向上，各在 −1 … 1，已经去掉死区。
     pub fn stick(&self, stick: Stick) -> Vec2 {
         self.sticks[stick as usize]

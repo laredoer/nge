@@ -43,6 +43,8 @@ pub struct Collider {
     pub sensor: bool,
     /// 碰撞开始 / 结束时发 [`Collision`]。
     pub events: bool,
+    /// 碰撞分组（1 … 31）：同一组的互相不碰撞（两个玩家的角色互相穿过），和别的照常碰；0 是不分组。
+    pub group: u8,
 }
 
 impl Collider {
@@ -55,7 +57,7 @@ impl Collider {
     }
 
     fn new(shape: Shape) -> Self {
-        Self { shape, restitution: 0.0, friction: 0.5, density: 1.0, sensor: false, events: false }
+        Self { shape, restitution: 0.0, friction: 0.5, density: 1.0, sensor: false, events: false, group: 0 }
     }
 }
 

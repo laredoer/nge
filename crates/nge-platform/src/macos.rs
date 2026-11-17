@@ -8,7 +8,7 @@ use std::ptr::NonNull;
 use std::rc::{Rc, Weak};
 
 use block2::RcBlock;
-use nge_core::bridge::{GAMEPAD, KEY, KEY_EVENT, KeyInput, PAD, PadInput};
+use nge_core::bridge::{GAMEPAD, KEY, KEY_EVENT, KeyInput, PAD, PadInput, RumbleOut};
 use nge_core::{Engine, GameFactory, Viewport, create_surface};
 use nsh_platform_macos::{ComponentContext, ComponentFactory, NativeComponent};
 use objc2::rc::Retained;
@@ -90,19 +90,20 @@ impl Shared {
         if key && !self.view.isHiddenOrHasHiddenAncestor() {
             let readings = self.pads.borrow_mut().read();
             self.update_pads(&readings.iter().map(|(_, r)| *r).collect::<Vec<_>>());
-            let states = readings.iter().map(|(id, r)| (*id, r.state())).collect();
-            let changed = self.devices.borrow_mut().update(states);
+            let changed = self.devices.borrow_mut().read(&readings);
             self.forward_devices(changed);
         } else {
             self.release_pads();
         }
     }
 
-    /// 手柄按着的全部松开、摇杆归零；手柄还算连着。
+    /// 手柄按着的全部松开、摇杆归零；手柄还算连着。正在震的停掉，排着的不震了。
     fn release_pads(&self) {
         self.update_pads(&[]);
         let released = self.devices.borrow_mut().release();
         self.forward_devices(released);
+        self.rumbles.take();
+        self.pads.borrow_mut().rumble(&RumbleOut::stop(None));
     }
 
     /// 每个手柄各自的状态（按设备的那条路）。
@@ -113,15 +114,20 @@ impl Shared {
         }
     }
 
-    /// 引擎要震的手柄。
+    /// 引擎要震的手柄；窗口不在前台、视图藏起来时不震。
     fn play_rumbles(&self) {
+        let key = self.view.window().is_some_and(|w| w.isKeyWindow());
+        if !key || self.view.isHiddenOrHasHiddenAncestor() {
+            self.rumbles.take();
+            return;
+        }
         for rumble in self.rumbles.take() {
             self.pads.borrow_mut().rumble(&rumble);
         }
     }
 
     fn update_pads(&self, readings: &[pad::Reading]) {
-        let (now, analog) = pad::merge(readings);
+        let (now, analog) = pad::merge(readings, &self.pad_keys.borrow());
         let changes = pad::diff(&self.pad_keys.borrow(), &now, self.analog.get(), analog);
         *self.pad_keys.borrow_mut() = now;
         self.analog.set(analog);

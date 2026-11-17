@@ -1,9 +1,10 @@
 // `nsh test`：无头 runner 里没有游戏视图，测按钮的显示和按住的手指怎么换成按键。
 import { expect, open, test } from "nsh/test";
-import { heldKey } from "../../ts/nge";
+import { act, actionButtonId, heldKey, rumble, rumbleStop } from "../../ts/nge";
 import { campfireAt, finish, JELLY_FADE, JELLY_Z, JELLY_ZONE, jellyAt, LEVELS, NEW_PROGRESS, progressOf, rampOf, ROWS, TOWER_BOX, TOWER_TRIGGER, towerAt, towerSpot } from "./levels";
 
-const BUTTONS = ["id:key-ArrowLeft", "id:key-ArrowRight", "id:key-Space", "id:key-KeyR"];
+// 触屏按钮按动作发，不发键名：改了键也照样管用（见 docs/input-actions.md）
+const BUTTONS = ["id:act-move-left", "id:act-move-right", "id:act-jump", "id:act-restart"];
 
 test("手机上有触屏按钮", async () => {
   const app = await open(".", { platform: "ios" });
@@ -45,6 +46,30 @@ test("别的手指松开不影响按着的", () => {
   held.start([1]);
   held.end([9]);
   expect(sent).toEqual([true]);
+});
+
+test("按动作发：按钮只带动作名，方向键带方向和来源", () => {
+  const sent: [string, unknown][] = [];
+  const game = { command: (name: string, args: unknown) => sent.push([name, args]) } as never;
+  act(game, "jump", true);
+  act(game, "move", true, { x: -1, source: "left" });
+  act(game, "move", false, { source: "left", player: 1 });
+  act(undefined, "jump", true);
+  expect(sent).toEqual([
+    ["action", { action: "jump", down: true }],
+    ["action", { action: "move", down: true, x: -1, source: "left" }],
+    ["action", { action: "move", down: false, source: "left", player: 1 }],
+  ]);
+  expect([actionButtonId("jump"), actionButtonId("move", -1), actionButtonId("move", 1), actionButtonId("aim", 0, 1), actionButtonId("aim", -1, -1)]).toEqual(["act-jump", "act-move-left", "act-move-right", "act-aim-up", "act-aim-left-down"]);
+});
+
+test("震动和停止走同一条 command", () => {
+  const sent: [string, unknown][] = [];
+  const game = { command: (name: string, args: unknown) => sent.push([name, args]) } as never;
+  rumble(game, { low: 1, duration: 0.5 });
+  rumbleStop(game, 1);
+  rumbleStop(game);
+  expect(sent).toEqual([["rumble", { low: 1, duration: 0.5 }], ["rumble", { player: 1, stop: true }], ["rumble", { player: 0, stop: true }]]);
 });
 
 const hud = (app: { texts(): string[] }) => app.texts().join(" ");

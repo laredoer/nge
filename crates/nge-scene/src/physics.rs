@@ -56,6 +56,8 @@ pub struct BodyNode {
     pub collide: bool,
     /// 不让碰撞把它转起来（平台游戏的角色）。
     pub fixed_rotation: bool,
+    /// 碰撞分组（1 … 31）：同一组的互相不碰撞；0 不分组。
+    pub group: u8,
     /// `character`：能爬的最陡的坡（度）。
     pub slope: f32,
     /// `character`：自动迈上去的台阶最高多高，0 不自动上。
@@ -80,6 +82,7 @@ impl Default for BodyNode {
             angular_velocity: 0.0,
             collide: false,
             fixed_rotation: false,
+            group: 0,
             slope: 50.0,
             step: 0.0,
             snap: 4.0,
@@ -158,6 +161,7 @@ fn collider(body: &BodyNode, size: Option<Vec2>, scale: f32) -> Option<Collider>
     c.density = body.density;
     c.sensor = body.sensor;
     c.events = body.collide;
+    c.group = body.group;
     Some(c)
 }
 
@@ -355,6 +359,14 @@ mod tests {
         assert!(get::<LockRotation>(&mut app, "p").is_some());
         frame(&mut app, Some(scene(false)));
         assert!(get::<LockRotation>(&mut app, "p").is_none());
+    }
+
+    #[test]
+    fn bodies_carry_their_collision_group() {
+        let mut app = app();
+        frame(&mut app, Some(json!({ "sprites": [{ "id": "p", "w": 10, "body": { "group": 2 } }, { "id": "q", "w": 10, "body": {} }] })));
+        assert_eq!(get::<Collider>(&mut app, "p").map(|c| c.group), Some(2));
+        assert_eq!(get::<Collider>(&mut app, "q").map(|c| c.group), Some(0));
     }
 
     #[test]

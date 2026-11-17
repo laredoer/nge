@@ -8,7 +8,7 @@ use bevy_ecs::prelude::*;
 use bevy_ecs::schedule::{IntoScheduleConfigs, ScheduleLabel};
 use bevy_ecs::system::ScheduleSystem;
 use glam::Vec2;
-use nge_core::bridge::{ACTIONS_PROP, GAMEPAD, KEY, PAD, RUMBLE, SUSPEND, TOUCH};
+use nge_core::bridge::{ACT, ACTIONS_PROP, GAMEPAD, KEY, PAD, RUMBLE, SUSPEND, TOUCH};
 use nge_core::{Ctx, FrameTiming, Game, GameFactory, Gfx, Viewport, wgpu};
 use serde_json::Value as JsonValue;
 
@@ -227,7 +227,12 @@ impl App {
             }
         } else if name == RUMBLE.name() {
             match RUMBLE.decode(args) {
-                Ok(r) => self.world.resource_mut::<Rumble>().play(r.player, r.low, r.high, r.duration),
+                Ok(r) => self.world.resource_mut::<Rumble>().request(r),
+                Err(e) => log::warn!("{e}"),
+            }
+        } else if name == ACT.name() {
+            match ACT.decode(args) {
+                Ok(a) => self.world.resource_mut::<Actions>().drive(a.player, &a.action, &a.source, a.down.then_some(Vec2::new(a.x, a.y))),
                 Err(e) => log::warn!("{e}"),
             }
         } else if name == SUSPEND.name() {

@@ -64,7 +64,7 @@ pub(crate) fn advance(physics: &mut Physics, dt: f32) {
         let (Some(body), Some(collider), Some(mover)) = (h.body, h.collider, h.mover.as_mut()) else { continue };
         let world = &mut physics.world;
         let (Some(pose), Some(col)) = (world.bodies.get(body).map(|b| *b.position()), world.colliders.get(collider)) else { continue };
-        let (shape, mass) = (col.shared_shape().clone(), col.mass());
+        let (shape, mass, groups) = (col.shared_shape().clone(), col.mass(), col.collision_groups());
         let mut v = h.velocity.linear;
         // 站在地上、没往上走时不加重力：不然每步都往地里压一下
         if !(mover.grounded && v.y <= 0.0) && mover.params.gravity_scale.is_finite() {
@@ -79,7 +79,8 @@ pub(crate) fn advance(physics: &mut Physics, dt: f32) {
             continue;
         }
         let ctl = controller(&mover.params);
-        let filter = RapierFilter::default().exclude_sensors().exclude_rigid_body(body);
+        // 同一个碰撞分组的不挡路
+        let filter = RapierFilter::default().exclude_sensors().exclude_rigid_body(body).groups(groups);
         let mut hits = Vec::new();
         // 先走自己的这段：脚下的东西这一步还没挪，相对它走
         let out = ctl.move_shape(dt, &world.query_pipeline_with_filter(filter), &*shape, &pose, vector(v * dt), |hit| hits.push(hit));
@@ -127,7 +128,7 @@ pub(crate) fn touch(physics: &mut Physics) {
         let (Some(body), Some(collider)) = (h.body, h.collider) else { continue };
         let Some(col) = physics.world.colliders.get(collider) else { continue };
         let (pose, shape) = (*col.position(), col.shared_shape().clone());
-        let filter = RapierFilter::default().exclude_sensors().exclude_rigid_body(body);
+        let filter = RapierFilter::default().exclude_sensors().exclude_rigid_body(body).groups(col.collision_groups());
         let queries = physics.world.query_pipeline_with_filter(filter);
         let aabb = shape.compute_aabb(&pose).loosened(CONTACT_GAP);
         let touching: Vec<Contact> = queries

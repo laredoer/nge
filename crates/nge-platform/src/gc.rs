@@ -4,7 +4,12 @@
 #[cfg(target_os = "ios")]
 use std::collections::BTreeSet;
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::ffi::CStr;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use block2::RcBlock;
 
 use nge_core::bridge::RumbleOut;
 use objc2::rc::{Allocated, Retained};
@@ -35,12 +40,81 @@ enum Motor {
     Whole,
 }
 
-/// 连着的手柄：给每个编号，记着它们（震动时找得到），缓存震动引擎。
+/// 一个马达的震动引擎。建好时启动一次，开着「空闲了自己停」；系统把它停了、重置了（`dead`）以后下次用之前再启动。
+struct HapticEngine {
+    engine: Retained<AnyObject>,
+    dead: Arc<AtomicBool>,
+    /// 正在放的那一段：新的一次先把它停掉（后一次顶掉前一次）。
+    player: Option<Retained<AnyObject>>,
+    // 回调要活得和引擎一样久
+    _stopped: RcBlock<dyn Fn(isize)>,
+    _reset: RcBlock<dyn Fn()>,
+}
+
+impl HapticEngine {
+    fn new(haptics: &GCDeviceHaptics, motor: Motor) -> Result<Self, String> {
+        let locality = unsafe {
+            match motor {
+                Motor::Low => GCHapticsLocalityLeftHandle,
+                Motor::High => GCHapticsLocalityRightHandle,
+                Motor::Whole => GCHapticsLocalityDefault,
+            }
+        };
+        let engine: Option<Retained<AnyObject>> = unsafe { msg_send![haptics, createEngineWithLocality: locality] };
+        let engine = engine.ok_or("建不了震动引擎")?;
+        // 一开始就当它没启动：第一次用时启动
+        let dead = Arc::new(AtomicBool::new(true));
+        // 回调在系统的线程上：只置一个标记
+        let flag = dead.clone();
+        let stopped = RcBlock::new(move |_reason: isize| flag.store(true, Ordering::Relaxed));
+        let flag = dead.clone();
+        let reset = RcBlock::new(move || flag.store(true, Ordering::Relaxed));
+        unsafe {
+            let _: () = msg_send![&*engine, setStoppedHandler: &*stopped];
+            let _: () = msg_send![&*engine, setResetHandler: &*reset];
+            // 一阵子没东西放就自己停（省手柄的电），停了会走上面的回调
+            let _: () = msg_send![&*engine, setAutoShutdownEnabled: true];
+        }
+        Ok(Self { engine, dead, player: None, _stopped: stopped, _reset: reset })
+    }
+
+    /// 停掉正在放的。
+    fn stop(&mut self) {
+        if let Some(player) = self.player.take() {
+            let stopped: Result<(), Retained<NSError>> = unsafe { msg_send![&*player, stopAtTime: 0.0f64, error: _] };
+            if let Err(e) = stopped {
+                log::debug!("停震动: {}", describe(e));
+            }
+        }
+    }
+
+    /// 放一段，顶掉正在放的。引擎只在没启动、被系统停掉以后才（同步）启动，不是每次都启动。
+    fn play(&mut self, strength: f32, seconds: f32) -> Result<(), String> {
+        self.stop();
+        let pattern = pattern(strength, seconds)?;
+        if self.dead.swap(false, Ordering::Relaxed) {
+            let started: Result<(), Retained<NSError>> = unsafe { msg_send![&*self.engine, startAndReturnError: _] };
+            started.map_err(|e| {
+                self.dead.store(true, Ordering::Relaxed);
+                describe(e)
+            })?;
+        }
+        let player: Result<Retained<AnyObject>, Retained<NSError>> = unsafe { msg_send![&*self.engine, createPlayerWithPattern: &*pattern, error: _] };
+        let player = player.map_err(describe)?;
+        let played: Result<(), Retained<NSError>> = unsafe { msg_send![&*player, startAtTime: 0.0f64, error: _] };
+        played.map_err(describe)?;
+        self.player = Some(player);
+        Ok(())
+    }
+}
+
+/// 连着的手柄：给每个编号，记着它们（震动时找得到），按号缓存震动引擎；号换了主人就把引擎丢掉（`pad::Owners`）。
 #[derive(Default)]
 pub struct Pads {
     ids: pad::Ids<usize>,
+    owners: pad::Owners<usize>,
     live: Vec<(u32, Retained<GCController>)>,
-    engines: HashMap<(u32, Motor), Retained<AnyObject>>,
+    engines: HashMap<(u32, Motor), HapticEngine>,
 }
 
 impl Pads {
@@ -49,25 +123,28 @@ impl Pads {
         let found: Vec<_> = unsafe { GCController::controllers() }.iter().filter_map(|c| unsafe { c.extendedGamepad() }.map(|g| (c, g))).collect();
         let keys: Vec<usize> = found.iter().map(|(c, _)| Retained::as_ptr(c) as usize).collect();
         let ids = self.ids.assign(&keys);
-        // 拔掉的手柄：它的震动引擎不要了
-        self.engines.retain(|(id, _), _| ids.contains(id));
+        // 拔掉的手柄、号给了别的手柄：按号缓存的震动引擎是旧手柄的，不要了
+        let stale = self.owners.changed(&ids.iter().copied().zip(keys).collect::<Vec<_>>());
+        self.engines.retain(|(id, _), _| !stale.contains(id));
         let readings = ids.iter().zip(&found).map(|(id, (_, g))| (*id, read(g))).collect();
         self.live = ids.into_iter().zip(found.into_iter().map(|(c, _)| c)).collect();
         readings
     }
 
-    /// 让手柄震一下（指定的那个，或者全部）。不能震的手柄、出了错的只记日志。
+    /// 让手柄震一下（指定的那个，或者全部），顶掉它正在震的；强度是 0 的马达、[`RumbleOut::is_stop`] 的就是停。
+    /// 不能震的手柄、出了错的只记日志。
     pub fn rumble(&mut self, rumble: &RumbleOut) {
         let ids: Vec<u32> = self.live.iter().map(|(id, _)| *id).collect();
         for id in rumble::targets(rumble.pad, &ids) {
+            if rumble.is_stop() {
+                self.engines.iter_mut().filter(|((i, _), _)| *i == id).for_each(|(_, engine)| engine.stop());
+                continue;
+            }
             let Some(haptics) = self.live.iter().find(|(i, _)| *i == id).and_then(|(_, c)| haptics(c)) else { continue };
             for (motor, strength) in motors(&haptics, rumble) {
-                if strength <= 0.0 {
-                    continue;
-                }
                 if let Err(e) = self.play(id, motor, &haptics, strength, rumble.duration) {
                     log::warn!("手柄 {id} 震不了: {e}");
-                    // 引擎可能被系统停掉了：丢掉，下次重建
+                    // 引擎坏了：丢掉，下次重建
                     self.engines.remove(&(id, motor));
                 }
             }
@@ -75,30 +152,18 @@ impl Pads {
     }
 
     fn play(&mut self, id: u32, motor: Motor, haptics: &GCDeviceHaptics, strength: f32, seconds: f32) -> Result<(), String> {
-        let engine = match self.engines.get(&(id, motor)) {
-            Some(engine) => engine.clone(),
-            None => {
-                let locality = unsafe {
-                    match motor {
-                        Motor::Low => GCHapticsLocalityLeftHandle,
-                        Motor::High => GCHapticsLocalityRightHandle,
-                        Motor::Whole => GCHapticsLocalityDefault,
-                    }
-                };
-                let engine: Option<Retained<AnyObject>> = unsafe { msg_send![haptics, createEngineWithLocality: locality] };
-                let engine = engine.ok_or("建不了震动引擎")?;
-                self.engines.insert((id, motor), engine.clone());
-                engine
+        if strength <= 0.0 {
+            // 这个马达这次不震：正在震的也停掉
+            if let Some(engine) = self.engines.get_mut(&(id, motor)) {
+                engine.stop();
             }
+            return Ok(());
+        }
+        let engine = match self.engines.entry((id, motor)) {
+            Entry::Occupied(e) => e.into_mut(),
+            Entry::Vacant(e) => e.insert(HapticEngine::new(haptics, motor)?),
         };
-        let pattern = pattern(strength, seconds)?;
-        // 已经在跑时再 start 一次没有副作用
-        let started: Result<(), Retained<NSError>> = unsafe { msg_send![&*engine, startAndReturnError: _] };
-        started.map_err(describe)?;
-        let player: Result<Retained<AnyObject>, Retained<NSError>> = unsafe { msg_send![&*engine, createPlayerWithPattern: &*pattern, error: _] };
-        let player = player.map_err(describe)?;
-        let played: Result<(), Retained<NSError>> = unsafe { msg_send![&*player, startAtTime: 0.0f64, error: _] };
-        played.map_err(describe)
+        engine.play(strength, seconds)
     }
 }
 

@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 use std::ptr::NonNull;
 use std::rc::{Rc, Weak};
 
-use nge_core::bridge::{GAMEPAD, KEY, KEY_EVENT, KeyInput, PAD, PadInput};
+use nge_core::bridge::{GAMEPAD, KEY, KEY_EVENT, KeyInput, PAD, PadInput, RumbleOut};
 use nge_core::{Engine, GameFactory, Viewport, create_surface};
 use nsh_platform_ios::{ComponentContext, ComponentFactory, NativeComponent};
 use objc2::rc::Retained;
@@ -148,21 +148,21 @@ impl Shared {
         self.update_keyboard(&keys);
         let readings = self.pads.borrow_mut().read();
         self.update_pads(&readings.iter().map(|(_, r)| *r).collect::<Vec<_>>());
-        let states = readings.iter().map(|(id, r)| (*id, r.state())).collect();
-        let changed = self.devices.borrow_mut().update(states);
+        let changed = self.devices.borrow_mut().read(&readings);
         self.forward_devices(changed);
         for rumble in self.rumbles.take() {
             self.pads.borrow_mut().rumble(&rumble);
         }
     }
 
-    /// 按着的键、手柄全部补发松开，摇杆归零；手柄还算连着。这时候要震的不震了。
+    /// 按着的键、手柄全部补发松开，摇杆归零；手柄还算连着。正在震的停掉，排着的不震了。
     fn release_input(&self) {
         self.update_keyboard(&BTreeSet::new());
         self.update_pads(&[]);
         let released = self.devices.borrow_mut().release();
         self.forward_devices(released);
         self.rumbles.take();
+        self.pads.borrow_mut().rumble(&RumbleOut::stop(None));
     }
 
     /// 每个手柄各自的状态（按设备的那条路）。
@@ -181,7 +181,7 @@ impl Shared {
     }
 
     fn update_pads(&self, readings: &[pad::Reading]) {
-        let (now, analog) = pad::merge(readings);
+        let (now, analog) = pad::merge(readings, &self.pad_keys.borrow());
         let changes = pad::diff(&self.pad_keys.borrow(), &now, self.analog.get(), analog);
         *self.pad_keys.borrow_mut() = now;
         self.analog.set(analog);

@@ -368,3 +368,44 @@ fn moving_the_transform_teleports() {
     steps(&mut app, 30);
     assert_eq!(pos(&app, h), Vec2::new(500.0, 200.0));
 }
+
+/// 同一个碰撞分组的角色互相穿过去，各自照样站在地上、被墙挡住（见 docs/input-actions.md）。
+#[test]
+fn characters_in_the_same_group_pass_through_each_other() {
+    let mut app = app();
+    ground(&mut app);
+    let wall = block(&mut app, Vec2::new(200.0, 50.0), Vec2::new(20.0, 100.0), 0.0);
+    let grouped = |app: &mut App, x: f32, group: u8| {
+        app.world_mut().spawn((RigidBody::Kinematic, Collider { group, ..Collider::rect(Vec2::splat(20.0)) }, at(x, 10.0), Velocity::default(), Character::default())).id()
+    };
+    let (a, b) = (grouped(&mut app, 0.0, 3), grouped(&mut app, 60.0, 3));
+    steps(&mut app, 5);
+    for _ in 0..60 {
+        set_velocity(&mut app, a, Vec2::new(200.0, 0.0));
+        steps(&mut app, 1);
+    }
+    assert!((pos(&app, b).x - 60.0).abs() < 0.5, "没被推走 {}", pos(&app, b));
+    assert!(pos(&app, a).x > 150.0 && pos(&app, a).x < 181.0, "穿过同组的角色，被墙挡住 {}", pos(&app, a));
+    assert!((pos(&app, a).y - 10.0).abs() < 1.0, "还站在地上");
+    assert!(contacts(&app, a).iter().all(|c| c.other != b), "同组的不算接触");
+    assert!(contacts(&app, a).iter().any(|c| c.other == wall));
+    // 叠在一起时也不算接触
+    let x = pos(&app, a).x;
+    let twin = grouped(&mut app, x, 3);
+    steps(&mut app, 2);
+    assert!(contacts(&app, a).iter().all(|c| c.other != twin), "叠着的同组角色不算接触");
+
+    // 不同组（或者没有组）的照常挡住
+    let mut app = self::app();
+    ground(&mut app);
+    let (a, b) = (grouped(&mut app, 0.0, 3), grouped(&mut app, 60.0, 4));
+    let c = hero(&mut app, -60.0, 10.0, Character::default());
+    steps(&mut app, 5);
+    for _ in 0..60 {
+        set_velocity(&mut app, a, Vec2::new(200.0, 0.0));
+        set_velocity(&mut app, c, Vec2::new(200.0, 0.0));
+        steps(&mut app, 1);
+    }
+    assert!(pos(&app, a).x < pos(&app, b).x - 19.0, "不同组挡住 {} {}", pos(&app, a), pos(&app, b));
+    assert!(pos(&app, c).x < pos(&app, a).x - 19.0, "没有组的也挡住");
+}

@@ -216,24 +216,27 @@ fn control(
     }
 }
 
-/// 第二个玩家（见 docs/input-actions.md）：只会跑、跳，掉下去回到出现的地方；不踩敌人、不算失手。
+/// 第二个玩家（见 docs/input-actions.md）：只会跑、跳；一出现就挪到第一个角色身边，掉下去也回到他身边。不踩敌人、不算失手。
 fn control_guest(
     time: Res<Time>,
     actions: Res<Actions>,
     physics: Res<Physics>,
-    mut starts: MessageReader<LevelStart>,
-    mut spawn: Local<Option<Vec2>>,
+    mut placed: Local<Option<Entity>>,
     mut players: Query<(Entity, &SceneId, &mut Transform2d, &mut Velocity)>,
 ) {
-    // 换关了：出现的地方重新记
-    if starts.read().count() > 0 {
-        *spawn = None;
-    }
+    let host = players.iter().find(|(_, id, ..)| id.0 == PLAYER).map(|(_, _, t, _)| t.translation);
     let Some((entity, _, mut t, mut v)) = players.iter_mut().find(|(_, id, ..)| id.0 == GUEST) else {
-        *spawn = None;
+        *placed = None;
         return;
     };
-    let home = *spawn.get_or_insert(t.translation);
+    // 刚出现（手柄接上、重连；换关时实体是重建的，也算新出现）或者掉下去了：到第一个角色现在的位置（两个角色同一个碰撞分组，叠着也不会挤开）
+    if (*placed != Some(entity) || t.translation.y < FALL_LINE)
+        && let Some(host) = host
+    {
+        t.translation = host;
+        *v = Velocity::default();
+    }
+    *placed = Some(entity);
     let dt = time.delta;
     if !(dt > 0.0) {
         return;
@@ -247,10 +250,6 @@ fn control_guest(
     }
     if velocity != v.linear {
         v.linear = velocity;
-    }
-    if t.translation.y < FALL_LINE {
-        t.translation = home;
-        *v = Velocity::default();
     }
 }
 
@@ -436,14 +435,69 @@ mod tests {
     }
 
     #[test]
-    fn a_stick_pushed_a_little_walks_slowly() {
+    fn the_stick_sets_the_speed_all_the_way() {
         let mut app = app();
         app.prop("scene", Some(&level(None)));
         run(&mut app, 20);
-        pad(&mut app, 0, &[], [0.25, 0.0]);
+        // 推过一半时平台层还会把方向当成键发过来：速度照样跟着推的力度，不从一半跳到全速
+        for (push, keys) in [(0.25, &[][..]), (0.55, &["GamepadLeftStickRight"][..]), (0.9, &["GamepadLeftStickRight"][..])] {
+            pad(&mut app, 0, keys, [push, 0.0]);
+            run(&mut app, 60);
+            let speed = player(&mut app).1.x;
+            assert!((speed - push * SPEED).abs() < 2.0, "推 {push}，走 {push} 的速度：{speed}");
+        }
+    }
+
+    /// 触屏按钮按动作发（`action` command）：改了键也照样跳，不会串到别的动作上。
+    #[test]
+    fn touch_buttons_drive_actions_whatever_the_bindings() {
+        let mut app = app();
+        app.prop("scene", Some(&level(None)));
+        run(&mut app, 20);
+        let (start, ground) = { let p = player(&mut app).0; (p.x, p.y) };
+        // 跳和重来的键对调了
+        let mut swapped: Value = serde_json::from_str(include_str!("../controls.json")).unwrap();
+        swapped["players"][0]["jump"]["keys"] = json!(["KeyR"]);
+        swapped["players"][0]["restart"]["keys"] = json!(["Space"]);
+        app.prop("actions", Some(&swapped));
+        app.command("action", &json!({ "action": "move", "down": true, "x": 1, "source": "right" }));
+        run(&mut app, 30);
+        assert!(player(&mut app).0.x > start + 50.0, "→ 按钮往右走");
+        app.command("action", &json!({ "action": "move", "down": false, "source": "right" }));
+        run(&mut app, 20);
+        app.command("action", &json!({ "action": "jump", "down": true }));
+        let events = run(&mut app, 10);
+        assert!(player(&mut app).0.y > ground + 50.0, "跳按钮还是跳");
+        assert!(events.iter().all(|(n, _)| n != "restart"), "没有变成重来：{events:?}");
+        app.command("action", &json!({ "action": "jump", "down": false }));
         run(&mut app, 60);
-        let speed = player(&mut app).1.x;
-        assert!((speed - 0.25 * SPEED).abs() < 2.0, "推四分之一，走四分之一的速度：{speed}");
+        app.command("action", &json!({ "action": "restart", "down": true }));
+        assert!(run(&mut app, 2).iter().any(|(n, _)| n == "restart"), "重来按钮还是重来");
+    }
+
+    /// 面板上绑键的三步（`controls.test.tsx` 生成同一份夹具）：平时、等按键、绑成了 X。
+    #[test]
+    fn remap_fixture_drives_the_engine() {
+        let steps: Vec<Value> = serde_json::from_str(include_str!("../remap-fixture.json")).unwrap();
+        assert_eq!(steps[0]["players"], serde_json::from_str::<Value>(include_str!("../controls.json")).unwrap()["players"], "夹具的第一步是默认绑定");
+        let mut app = app();
+        app.prop("scene", Some(&level(None)));
+        app.prop("actions", Some(&steps[0]));
+        run(&mut app, 20);
+        let ground = player(&mut app).0.y;
+        app.prop("actions", Some(&steps[1]));
+        key(&mut app, "KeyX", true);
+        run(&mut app, 3);
+        app.prop("actions", Some(&steps[2]));
+        run(&mut app, 10);
+        assert!((player(&mut app).0.y - ground).abs() < 1.0, "绑上去的 X 还按着：不跳");
+        key(&mut app, "KeyX", false);
+        key(&mut app, "Space", true);
+        run(&mut app, 10);
+        assert!((player(&mut app).0.y - ground).abs() < 1.0, "空格不再是跳");
+        key(&mut app, "KeyX", true);
+        run(&mut app, 10);
+        assert!(player(&mut app).0.y > ground + 50.0, "松开再按 X 才跳");
     }
 
     /// 默认绑定是 controls.json（TSX 读的同一份）；TSX 发来的 `actions` 换掉它。
@@ -469,11 +523,74 @@ mod tests {
         assert!(player(&mut app).0.y > ground + 50.0, "改成 X 跳");
     }
 
-    /// 地面上两个角色：`player` 和右边 100 处的 `player2`。
+    /// `game.tsx` 往场景里放的第二个角色（和第一个同一个碰撞分组）。
+    fn guest_sprite(x: f32) -> Value {
+        json!({ "id": GUEST, "x": x, "y": 16, "w": 24, "h": 32, "body": { "kind": "character", "friction": 0, "group": 1 } })
+    }
+
+    /// 地面上两个角色：`player` 和声明在右边 100 处的 `player2`。
     fn two_players() -> Value {
         let mut scene = level(None);
-        scene["sprites"].as_array_mut().unwrap().push(json!({ "id": GUEST, "x": 100, "y": 16, "w": 24, "h": 32, "body": { "kind": "character", "friction": 0 } }));
+        scene["sprites"][0]["body"]["group"] = json!(1);
+        scene["sprites"].as_array_mut().unwrap().push(guest_sprite(100.0));
         scene
+    }
+
+    #[test]
+    fn the_second_player_appears_beside_the_first_wherever_that_is() {
+        let mut app = app();
+        let mut alone = level(None);
+        alone["sprites"][0]["body"]["group"] = json!(1);
+        app.prop("scene", Some(&alone));
+        run(&mut app, 20);
+        key(&mut app, "ArrowRight", true);
+        run(&mut app, 60);
+        key(&mut app, "ArrowRight", false);
+        run(&mut app, 20);
+        let first = player(&mut app).0;
+        assert!(first.x > 150.0);
+        // 第二个手柄接入：TSX 把它声明在起点旁边，Rust 挪到第一个角色身边
+        app.prop("scene", Some(&two_players()));
+        run(&mut app, 20);
+        assert!((guest(&mut app).0 - first).length() < 4.0, "出现在第一个角色身边 {:?} {first}", guest(&mut app).0);
+        // 手柄拔掉又接上：重新出现在第一个角色现在的位置
+        key(&mut app, "ArrowLeft", true);
+        run(&mut app, 30);
+        key(&mut app, "ArrowLeft", false);
+        app.prop("scene", Some(&alone));
+        run(&mut app, 20);
+        let moved = player(&mut app).0;
+        app.prop("scene", Some(&two_players()));
+        run(&mut app, 20);
+        assert!((guest(&mut app).0 - moved).length() < 4.0, "重连后在现在的位置 {:?} {moved}", guest(&mut app).0);
+        // 换关：跟着第一个角色到新关卡的起点
+        let mut next = two_players();
+        next["level"] = json!(2);
+        next["sprites"][0]["x"] = json!(-300);
+        app.prop("scene", Some(&next));
+        run(&mut app, 20);
+        assert!((guest(&mut app).0.x + 300.0).abs() < 4.0, "新关卡里在第一个角色的起点 {:?}", guest(&mut app).0);
+    }
+
+    #[test]
+    fn the_two_players_walk_through_each_other() {
+        let mut app = app();
+        app.prop("scene", Some(&two_players()));
+        pad(&mut app, 0, &[], [0.0; 2]);
+        pad(&mut app, 1, &[], [0.0; 2]);
+        run(&mut app, 20);
+        // 第二个角色先走到右边，第一个再穿过它
+        pad(&mut app, 1, &[], [1.0, 0.0]);
+        run(&mut app, 30);
+        pad(&mut app, 1, &[], [0.0; 2]);
+        run(&mut app, 20);
+        let (resting, ground) = (guest(&mut app).0, player(&mut app).0.y);
+        assert!(resting.x > player(&mut app).0.x + 60.0);
+        key(&mut app, "ArrowRight", true);
+        run(&mut app, 90);
+        assert!(player(&mut app).0.x > resting.x + 60.0, "穿过去了，没被挡住 {:?}", player(&mut app).0);
+        assert!((guest(&mut app).0 - resting).length() < 1.0, "也没把它推走");
+        assert!((player(&mut app).0.y - ground).abs() < 1.0, "没踩到它头上");
     }
 
     fn guest(app: &mut App) -> (Vec2, Vec2) {
@@ -513,8 +630,9 @@ mod tests {
         let mut app = app();
         let mut scene = level(Some((22, 24)));
         // 第二个角色站在坑的左边
-        scene["sprites"].as_array_mut().unwrap().push(json!({ "id": GUEST, "x": 0, "y": 16, "w": 24, "h": 32, "body": { "kind": "character", "friction": 0 } }));
+        scene["sprites"].as_array_mut().unwrap().push(guest_sprite(0.0));
         scene["sprites"][0]["x"] = json!(-200);
+        scene["sprites"][0]["body"]["group"] = json!(1);
         app.prop("scene", Some(&scene));
         run(&mut app, 20);
         let start = guest(&mut app).0;
@@ -526,7 +644,7 @@ mod tests {
         assert!(fell, "H 往右走进坑里");
         key(&mut app, "KeyH", false);
         let events = run(&mut app, 60);
-        assert!((guest(&mut app).0 - start).length() < 1.0, "回到出现的地方 {:?}", guest(&mut app));
+        assert!((guest(&mut app).0 - start).length() < 1.0, "回到第一个角色身边 {:?}", guest(&mut app));
         assert!(events.iter().all(|(n, _)| n != "respawn"), "不算第一个玩家的失手");
     }
 
@@ -730,6 +848,18 @@ mod tests {
         run(&mut app, 1);
         key(&mut app, "GamepadMenu", true);
         assert!(run(&mut app, 5).iter().all(|(n, _)| n != "restart"), "暂停时不重来");
+    }
+
+    /// TSX 那边的接线：触屏按钮按动作发，两个角色同一个碰撞分组。
+    #[test]
+    fn tsx_uses_action_buttons_and_groups_the_players() {
+        let tsx = include_str!("../game.tsx");
+        assert!(!tsx.contains("KeyButton"), "触屏按钮不发死键名");
+        for button in [r#"action="move" x={-1}"#, r#"action="move" x={1}"#, r#"action="restart""#, r#"action="jump""#] {
+            assert!(tsx.contains(&format!("<ActionButton game={{props.game}} {button}")), "{button}");
+        }
+        assert!(tsx.contains(r#"id: "player""#) && tsx.contains("collide: true, group: PLAYER_GROUP }"), "第一个角色带分组");
+        assert!(include_str!("../controls.ts").contains(&format!("export const GUEST = \"{GUEST}\"")));
     }
 
     /// game.tsx 里用到的声音都在打包的资源里。

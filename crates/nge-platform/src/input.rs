@@ -144,6 +144,27 @@ mod tests {
         assert_eq!(mac, web, "浏览器和 macOS 转发同一组键");
     }
 
+    /// 改键存档校验用的键名表（`ts/input.ts` 的 `KEY_NAMES`）要认识平台层会发的每个键名。
+    #[test]
+    fn the_ts_key_names_cover_what_the_platform_sends() {
+        let ts = include_str!("../../../ts/input.ts");
+        let start = ts.find("export const KEY_NAMES").expect("ts/input.ts 里有 KEY_NAMES");
+        let table = &ts[start..start + ts[start..].find("]);").expect("表的结尾")];
+        let mut pad = BTreeSet::new();
+        let all = crate::pad::Reading { a: true, b: true, x: true, y: true, l1: true, r1: true, l3: true, r3: true, menu: true, options: true, l2: 1.0, r2: 1.0, ..Default::default() };
+        for direction in [[1.0, 1.0], [-1.0, -1.0]] {
+            crate::pad::Reading { dpad: direction, left: direction, right: direction, ..all }.keys(&BTreeSet::new(), &mut pad);
+        }
+        assert_eq!(pad.len(), 24, "12 个按钮、十字键和两根摇杆各 4 个方向");
+        // 表是按前缀拼的：去掉前缀后的那一截要在表里
+        for name in NAMES.iter().chain(&pad) {
+            let stem = ["Key", "Digit", "GamepadLeftStick", "GamepadRightStick", "Gamepad"].iter().find_map(|p| name.strip_prefix(p)).unwrap_or(name);
+            let listed = table.contains(&format!("\"{name}\"")) || table.contains(&format!("\"{stem}\"")) || (stem.len() == 1 && table.contains(stem)) || name.starts_with('F');
+            assert!(listed, "{name} 不在 KEY_NAMES 里");
+        }
+        assert!(table.contains("length: 12 }, (_, i) => `F${i + 1}`"), "F1 … F12");
+    }
+
     #[test]
     fn capture_keys_prop() {
         assert_eq!(capture_keys(None), None);

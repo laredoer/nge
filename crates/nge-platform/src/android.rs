@@ -13,7 +13,7 @@ use nsh::{ComponentContext, ComponentFactory, Key, NativeComponent, Surface, reg
 use raw_window_handle::{AndroidDisplayHandle, DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawDisplayHandle, WindowHandle};
 use serde_json::{Value as JsonValue, json};
 
-use crate::android_keys::{PadInput, from_gamepad, key_name, shortcut};
+use crate::android_keys::{PadInput, device_of, from_gamepad, key_name, pad_id, shortcut};
 use crate::android_state::{Pending, viewport};
 use crate::input::{self, CAPTURE_KEYS, capture_keys};
 use crate::pad;
@@ -152,7 +152,11 @@ impl GameView {
                 return ctx.emit(n, d);
             }
             match RUMBLE_OUT.decode(&d) {
-                Ok(r) => ctx.vibrate_pad(r.pad.map(|id| id as i32), amplitude(r.low), amplitude(r.high), millis(r.duration)),
+                // 强度、时长是 0 就是停（Java 那边 cancel）；指定了手柄却换不回设备号的不震，不能变成「所有手柄」
+                Ok(r) => match r.pad.map(device_of) {
+                    Some(None) => log::warn!("手柄 {:?} 不是 Android 的设备号", r.pad),
+                    device => ctx.vibrate_pad(device.flatten(), amplitude(r.low), amplitude(r.high), millis(r.duration)),
+                },
                 Err(e) => log::warn!("{e}"),
             }
         });
@@ -188,11 +192,15 @@ impl GameView {
         for input in self.devices.release() {
             self.send(Msg::Command(PAD.name().to_owned(), PAD.encode(&input)));
         }
+        // 正在震的停掉
+        self.ctx.vibrate_pad(None, 0, 0, 0);
     }
 
-    /// 设备 `device` 的状态变了：按设备发一份（第一次就是接入）。
+    /// 设备 `device` 的状态变了：按设备发一份（第一次就是接入）。虚拟设备（负的号）不算手柄。
     fn forward_device(&mut self, device: i32) {
-        if let Some(input) = self.devices.set(device as u32, self.pads.state(device)) {
+        let Some(id) = pad_id(device) else { return };
+        let state = self.pads.state(device, &self.devices.keys(id));
+        if let Some(input) = self.devices.set(id, state) {
             self.send(Msg::Command(PAD.name().to_owned(), PAD.encode(&input)));
         }
     }
@@ -319,7 +327,7 @@ impl NativeComponent for GameView {
             Some(device) => {
                 let changes = self.pads.remove(device);
                 self.forward_pads(changes);
-                if let Some(input) = self.devices.remove(device as u32) {
+                if let Some(input) = pad_id(device).and_then(|id| self.devices.remove(id)) {
                     self.send(Msg::Command(PAD.name().to_owned(), PAD.encode(&input)));
                 }
             }

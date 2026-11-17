@@ -61,6 +61,11 @@ struct Shared {
     devices: RefCell<pad::Devices>,
 }
 
+thread_local! {
+    /// 让手柄震过、还没停过：失焦、页面隐藏时只在这时候去停。
+    static RUMBLING: Cell<bool> = const { Cell::new(false) };
+}
+
 /// 这一帧连着的、标准布局的手柄的读数，号是 `Gamepad.index`。页面不让读（权限策略）时是空的。
 fn read_pads(window: &Window) -> Vec<(u32, pad::Reading)> {
     gamepads(window)
@@ -86,11 +91,20 @@ thread_local! {
     static IGNORE: Closure<dyn FnMut(JsValue)> = Closure::new(|_| {});
 }
 
-/// 让手柄震一下（指定的那个，或者全部）；没有 `vibrationActuator` 的不震。
+/// 让手柄震一下（指定的那个，或者全部），浏览器自己会顶掉正在震的；没有 `vibrationActuator` 的不震。
+/// [`RumbleOut::is_stop`] 的是停（`reset()`）。
 fn rumble_pads(window: &Window, rumble: &RumbleOut) {
     let effect = web_pad::effect(rumble);
+    RUMBLING.set(!rumble.is_stop() || (RUMBLING.get() && rumble.pad.is_some()));
     for g in gamepads(window).into_iter().filter(|g| rumble.pad.is_none_or(|id| id == g.index())) {
         let Ok(actuator) = js_sys::Reflect::get(&g, &"vibrationActuator".into()) else { continue };
+        if rumble.is_stop() {
+            let reset = js_sys::Reflect::get(&actuator, &"reset".into()).and_then(|f| f.dyn_into::<js_sys::Function>());
+            if let Ok(promise) = reset.and_then(|f| f.call0(&actuator)).and_then(|p| p.dyn_into::<js_sys::Promise>()) {
+                IGNORE.with(|ignore| drop(promise.catch(ignore)));
+            }
+            continue;
+        }
         let Ok(play) = js_sys::Reflect::get(&actuator, &"playEffect".into()).and_then(|f| f.dyn_into::<js_sys::Function>()) else { continue };
         let params = js_sys::Object::new();
         for (name, value) in [("startDelay", 0.0), ("duration", effect.duration_ms), ("strongMagnitude", effect.strong), ("weakMagnitude", effect.weak)] {
@@ -128,16 +142,18 @@ impl Shared {
         }
         let readings = read_pads(&self.window);
         self.update_pads(&readings.iter().map(|(_, r)| *r).collect::<Vec<_>>());
-        let states = readings.iter().map(|(id, r)| (*id, r.state())).collect();
-        let changed = self.devices.borrow_mut().update(states);
+        let changed = self.devices.borrow_mut().read(&readings);
         self.forward_devices(changed);
     }
 
-    /// 手柄按着的全部松开、摇杆归零；手柄还算连着。
+    /// 手柄按着的全部松开、摇杆归零；手柄还算连着。正在震的停掉。
     fn release_pads(&self) {
         self.update_pads(&[]);
         let released = self.devices.borrow_mut().release();
         self.forward_devices(released);
+        if RUMBLING.get() {
+            rumble_pads(&self.window, &RumbleOut::stop(None));
+        }
     }
 
     fn forward_devices(&self, changed: Vec<PadInput>) {
@@ -149,7 +165,7 @@ impl Shared {
 
     /// 几个手柄合起来的那条路：按下、松开走 `key`，模拟量走 `gamepad`（和 macOS 一样）。
     fn update_pads(&self, readings: &[pad::Reading]) {
-        let (now, analog) = pad::merge(readings);
+        let (now, analog) = pad::merge(readings, &self.pad_keys.borrow());
         let changes = pad::diff(&self.pad_keys.borrow(), &now, self.analog.get(), analog);
         *self.pad_keys.borrow_mut() = now;
         self.analog.set(analog);

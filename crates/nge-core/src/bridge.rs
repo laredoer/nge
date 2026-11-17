@@ -27,6 +27,8 @@ pub const KEY_EVENT: EventKey<KeyInput> = EventKey::new("key");
 pub const GAMEPAD: CommandKey<GamepadInput> = CommandKey::new("gamepad");
 /// 内置（平台层发）：一个手柄的整份状态，变了才发；第一次发就是接入（见 docs/input-actions.md）。
 pub const PAD: CommandKey<PadInput> = CommandKey::new("pad");
+/// 内置：直接让一个动作按下 / 松开、给它一个方向（触屏按钮、虚拟摇杆），不经过键和绑定表，改键管不到它。
+pub const ACT: CommandKey<ActInput> = CommandKey::new("action");
 /// 内置：TSX 让手柄震动；引擎按玩家找到手柄，换成 [`RUMBLE_OUT`]。
 pub const RUMBLE: CommandKey<RumbleRequest> = CommandKey::new("rumble");
 /// 内置（引擎 → 平台层）：让手柄震动。平台层截下来，不交给 NSH。
@@ -63,7 +65,7 @@ pub fn is_reserved(name: &str, outbound: bool) -> bool {
         [FRAME_STATS.name(), ENGINE_ERROR.name(), KEY_EVENT.name(), READY.name(), ACTION_EVENT.name(), PAD_EVENT.name()].contains(&name)
             || name.starts_with(RESERVED_COMMAND_PREFIX)
     } else {
-        [TOUCH.name(), KEY.name(), GAMEPAD.name(), PAD.name(), RUMBLE.name()].contains(&name) || name.starts_with(RESERVED_COMMAND_PREFIX)
+        [TOUCH.name(), KEY.name(), GAMEPAD.name(), PAD.name(), RUMBLE.name(), ACT.name()].contains(&name) || name.starts_with(RESERVED_COMMAND_PREFIX)
     }
 }
 
@@ -138,6 +140,26 @@ pub struct PadInput {
     pub r2: f32,
 }
 
+fn one() -> f32 {
+    1.0
+}
+
+/// [`ACT`]：第 `player` 个玩家的动作 `action`，`down` 是按着。`x`、`y` 是方向（按钮不用填）；
+/// 同一个动作可以有几个来源（`source`，比如左、右两个按钮），各自按下松开，方向加起来。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ActInput {
+    pub action: String,
+    #[serde(default)]
+    pub player: usize,
+    pub down: bool,
+    #[serde(default = "one")]
+    pub x: f32,
+    #[serde(default)]
+    pub y: f32,
+    #[serde(default)]
+    pub source: String,
+}
+
 fn rumble_duration() -> f32 {
     0.2
 }
@@ -153,15 +175,30 @@ pub struct RumbleRequest {
     pub high: f32,
     #[serde(default = "rumble_duration")]
     pub duration: f32,
+    /// 停掉正在震的（别的字段不看）。
+    #[serde(default)]
+    pub stop: bool,
 }
 
-/// [`RUMBLE_OUT`]：`pad` 是手柄号，`None` 是所有连着的手柄。
+/// [`RUMBLE_OUT`]：`pad` 是手柄号，`None` 是所有连着的手柄。强度都是 0 或者时长是 0 就是停。
+/// 新的一次顶掉同一个手柄上正在震的。
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct RumbleOut {
     pub pad: Option<u32>,
     pub low: f32,
     pub high: f32,
     pub duration: f32,
+}
+
+impl RumbleOut {
+    /// 停掉 `pad`（`None`：所有手柄）正在震的。
+    pub fn stop(pad: Option<u32>) -> Self {
+        Self { pad, low: 0.0, high: 0.0, duration: 0.0 }
+    }
+
+    pub fn is_stop(&self) -> bool {
+        !(self.duration > 0.0 && (self.low > 0.0 || self.high > 0.0))
+    }
 }
 
 /// [`ACTION_EVENT`]：`down` 是按着（轴是推过一半）；`x`、`y` 是方向（−1 / 0 / 1，按钮按着时 x 是 1）。
@@ -338,7 +375,7 @@ mod tests {
         let g = GAMEPAD.decode(&json!({ "left": [0.0, 0.0], "l2": 0.75 })).unwrap();
         assert_eq!((g.l2, g.r2), (0.75, 0.0), "gamepad 带上合并后的扳机");
         let r = RUMBLE.decode(&json!({ "low": 1.0 })).unwrap();
-        assert_eq!(r, RumbleRequest { player: 0, low: 1.0, high: 0.0, duration: 0.2 });
+        assert_eq!(r, RumbleRequest { player: 0, low: 1.0, high: 0.0, duration: 0.2, stop: false });
         let out = RumbleOut { pad: None, low: 0.5, high: 0.25, duration: 0.5 };
         assert_eq!(RUMBLE_OUT.encode(&out), json!({ "pad": null, "low": 0.5, "high": 0.25, "duration": 0.5 }));
         assert_eq!(RUMBLE_OUT.decode(&json!({ "pad": 3, "low": 0.5, "high": 0.25, "duration": 0.1 })).unwrap().pad, Some(3));
@@ -348,10 +385,25 @@ mod tests {
     }
 
     #[test]
+    fn act_and_rumble_stop_wire_formats() {
+        let a = ACT.decode(&json!({ "action": "jump", "down": true })).unwrap();
+        assert_eq!(a, ActInput { action: "jump".into(), player: 0, down: true, x: 1.0, y: 0.0, source: String::new() }, "不填方向就是按钮");
+        let a = ACT.decode(&json!({ "action": "move", "player": 1, "down": true, "x": -1, "y": 0.5, "source": "left" })).unwrap();
+        assert_eq!((a.player, a.x, a.y, a.source.as_str()), (1, -1.0, 0.5, "left"));
+        assert!(ACT.decode(&json!({ "down": true })).is_err() && ACT.decode(&json!({ "action": "jump" })).is_err());
+        assert!(is_reserved("action", false));
+        let r = RUMBLE.decode(&json!({ "player": 1, "stop": true })).unwrap();
+        assert!(r.stop && r.player == 1);
+        assert!(!RUMBLE.decode(&json!({ "low": 1.0 })).unwrap().stop);
+        assert!(RumbleOut::stop(Some(2)).is_stop() && !RumbleOut { pad: None, low: 0.5, high: 0.0, duration: 1.0 }.is_stop());
+        assert!(RumbleOut { pad: None, low: 0.0, high: 0.0, duration: 1.0 }.is_stop() && RumbleOut { pad: None, low: 1.0, high: 0.0, duration: 0.0 }.is_stop());
+    }
+
+    #[test]
     fn input_channels_are_reserved() {
         assert!(is_reserved("pad", false) && is_reserved("rumble", false));
         assert!(is_reserved("action", true) && is_reserved("pad", true) && is_reserved("nge.rumble", true));
-        assert!(!is_reserved("action", false) && !is_reserved("rumble", true));
+        assert!(!is_reserved("jump", false) && !is_reserved("rumble", true));
         assert_eq!(ACTIONS_PROP, "actions");
     }
 

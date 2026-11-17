@@ -10,7 +10,7 @@ use rapier2d::prelude::{
     ActiveCollisionTypes, ActiveEvents, ColliderBuilder, ColliderHandle, ColliderSet, CollisionEvent, ContactPair, EventHandler, PhysicsWorld, RigidBodyBuilder,
     RigidBodyHandle, RigidBodySet, SoftBodySet, SoftBodyTearEvent,
 };
-use rapier2d::prelude::{Cuboid, QueryFilter as RapierFilter, Ray};
+use rapier2d::prelude::{Cuboid, Group, InteractionGroups, InteractionTestMode, QueryFilter as RapierFilter, Ray};
 
 use crate::character::{self, Character, Mover};
 use crate::joint::Linked;
@@ -279,6 +279,15 @@ pub(crate) fn create(
     }
 }
 
+/// 分组换成 rapier 的掩码：属于自己那一位，不和那一位碰；不分组（0、超出范围）的和谁都碰。
+pub(crate) fn groups(group: u8) -> InteractionGroups {
+    if !(1..=31).contains(&group) {
+        return InteractionGroups::all();
+    }
+    let bit = Group::from_bits_truncate(1 << group);
+    InteractionGroups::new(bit, bit.complement(), InteractionTestMode::And)
+}
+
 fn build(world: &mut PhysicsWorld, entity: Entity, kind: Option<RigidBody>, shape: Option<Collider>, at: (Vec2, f32), velocity: Velocity) -> Handles {
     let data = u128::from(entity.to_bits());
     let collider = shape.map(|c| {
@@ -292,6 +301,7 @@ fn build(world: &mut PhysicsWorld, entity: Entity, kind: Option<RigidBody>, shap
             .friction(c.friction)
             .density(c.density.max(0.0))
             .sensor(c.sensor)
+            .collision_groups(groups(c.group))
             .active_events(events)
             .user_data(data)
     });

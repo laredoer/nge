@@ -1,8 +1,8 @@
 import { batch, effect, keymap, type NativeComponentRef, platform, safeArea, signal, Text, View } from "nsh";
 import { Button } from "nsh/base";
-import { floatText, gameView, httpClient, inputMap, KeyButton, netRoom, push, saved, saveSlots, sound, tween, type ActionEvent, type Scene, type SpriteNode } from "../../ts/nge";
-import { DEFAULT_CONTROLS, guestSprite } from "./controls";
-import { RemapPanel } from "./remap";
+import { ActionButton, floatText, gameView, httpClient, inputMap, netRoom, push, saved, saveSlots, sound, tween, type ActionEvent, type Scene, type SpriteNode } from "../../ts/nge";
+import { DEFAULT_CONTROLS, guestSprite, PLAYER_GROUP } from "./controls";
+import { remapPlace, RemapPanel } from "./remap";
 import { COIN_SHADER, FLASH, FLASH_MS, levelAudio, night, portalOver, POST, SHADERS, stonesNear } from "./effects";
 import { levelKey, otherLocale, strings } from "./strings";
 import { NEW_SAVE, nextSlot, SAVE_MIGRATIONS, SAVE_VERSION, saveDataOf, saveSummary, SLOTS } from "./savefile";
@@ -250,7 +250,7 @@ export function Game(props: GameProps = {}) {
       ...BACKDROP,
       ...(levels[level()].night ? stonesNear(3 * TILE) : []),
       ...remotePlayers(room.peers()),
-      { id: "player", x: now().spawn[0], y: now().spawn[1], w: 24, h: 32, z: 5, color: "#ff7a59", body: { kind: "character", friction: 0, collide: true }, ...(flashing() ? FLASH : {}) },
+      { id: "player", x: now().spawn[0], y: now().spawn[1], w: 24, h: 32, z: 5, color: "#ff7a59", body: { kind: "character", friction: 0, collide: true, group: PLAYER_GROUP }, ...(flashing() ? FLASH : {}) },
       // 第二个手柄接入时多一个角色，拔掉就去掉
       ...(input.padOf(1) === null ? [] : [guestSprite(now().spawn)]),
       // 金币自己发光，夜里也不暗
@@ -403,25 +403,25 @@ export function Game(props: GameProps = {}) {
         }}
       />
       {platform.desktop ? null : <TouchPad game={() => game} />}
-      <Button testID="remap-open" class="absolute right-4 rounded bg-white/20 px-3 py-1 active:bg-white/40" style={{ top: safeArea().top + 40 }} onPress={() => (remapping() ? closeRemap() : remapping.set(true))}>
+      <Button testID="remap-open" class="absolute rounded bg-white/20 px-3 items-center justify-center active:bg-white/40" style={remapPlace(safeArea()).button} onPress={() => (remapping() ? closeRemap() : remapping.set(true))}>
         <Text class="text-white text-sm">{t("remapOpen")}</Text>
       </Button>
-      {remapping() ? <RemapPanel input={input} t={t} onClose={closeRemap} /> : null}
+      {remapping() ? <RemapPanel input={input} t={t} onClose={closeRemap} place={remapPlace(safeArea()).panel} /> : null}
     </View>
   );
 }
 
-/** 手机上的触屏按钮，叠在游戏视图下方：左边跑，右边跳和重来（见 docs/touch-controls.md）。 */
+/** 手机上的触屏按钮，叠在游戏视图下方：左边跑，右边跳和重来。按动作发，不发键名：改了键也管用（见 docs/input-actions.md）。 */
 function TouchPad(props: { game: () => NativeComponentRef | undefined }) {
   return (
     <View class="absolute flex-row justify-between items-end" style={padPlace(safeArea())}>
       <View class="flex-row gap-4">
-        <KeyButton game={props.game} code="ArrowLeft" label="←" />
-        <KeyButton game={props.game} code="ArrowRight" label="→" />
+        <ActionButton game={props.game} action="move" x={-1} label="←" />
+        <ActionButton game={props.game} action="move" x={1} label="→" />
       </View>
       <View class="flex-row gap-4 items-end">
-        <KeyButton game={props.game} code="KeyR" label="↺" class="w-12 h-12" />
-        <KeyButton game={props.game} code="Space" label={t("jump")} class="w-20 h-20" />
+        <ActionButton game={props.game} action="restart" label="↺" class="w-12 h-12" />
+        <ActionButton game={props.game} action="jump" label={t("jump")} class="w-20 h-20" />
       </View>
     </View>
   );

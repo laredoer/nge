@@ -1045,10 +1045,12 @@ public class NshView extends FrameLayout {
      * @param device {@code InputDevice} 的号；负数是所有手柄
      * @param low 低频（重）马达的振幅，0 … 255，0 不震
      * @param high 高频（轻）马达的振幅
-     * @param millis 毫秒
+     * @param millis 毫秒；振幅都是 0 或者毫秒是 0 就是停掉正在震的
      */
     void vibratePad(int device, int low, int high, int millis) {
-        if (millis <= 0 || (low <= 0 && high <= 0)) return;
+        // VibrationEffect 是 API 26 加的；运行时按 min-api 28 编（tools/nsh-android.sh），这里再防一道
+        if (Build.VERSION.SDK_INT < 26) return;
+        boolean stop = millis <= 0 || (low <= 0 && high <= 0);
         int[] ids = device >= 0 ? new int[] {device} : android.view.InputDevice.getDeviceIds();
         for (int id : ids) {
             android.view.InputDevice pad = android.view.InputDevice.getDevice(id);
@@ -1058,15 +1060,29 @@ public class NshView extends FrameLayout {
                     || (source & android.view.InputDevice.SOURCE_JOYSTICK) == android.view.InputDevice.SOURCE_JOYSTICK;
             if (!gamepad) continue;
             try {
-                vibrate(pad, Math.min(low, 255), Math.min(high, 255), millis);
-            } catch (RuntimeException e) {
-                // 没有权限、设备刚拔掉：不震，不崩
+                if (stop) cancel(pad);
+                else vibrate(pad, Math.min(low, 255), Math.min(high, 255), millis);
+            } catch (Throwable e) {
+                // 没有权限、设备刚拔掉、厂商的实现抛了别的：不震，不崩
                 android.util.Log.w("nsh", "cannot vibrate input device " + id + ": " + e);
             }
         }
     }
 
-    /** 两个马达各放各的（Android 12 起）；只有一个、或者系统老时取大的。 */
+    /** 停掉这个手柄正在震的。 */
+    private static void cancel(android.view.InputDevice pad) {
+        if (Build.VERSION.SDK_INT >= 31) {
+            pad.getVibratorManager().cancel();
+            return;
+        }
+        android.os.Vibrator vibrator = pad.getVibrator();
+        if (vibrator != null) vibrator.cancel();
+    }
+
+    /**
+     * 新的一次顶掉正在震的（系统的 vibrate 本来就这样）。两个马达各放各的（Android 12 起）：{@code getVibratorIds()}
+     * 不保证顺序，这里按常见手柄的排法当第一个是低频（左）、第二个是高频（右）；只有一个、或者系统老时用两个里大的。
+     */
     private static void vibrate(android.view.InputDevice pad, int low, int high, int millis) {
         int both = Math.max(low, high);
         if (Build.VERSION.SDK_INT >= 31) {
@@ -1076,6 +1092,8 @@ public class NshView extends FrameLayout {
                 android.os.CombinedVibration.ParallelCombination combo = android.os.CombinedVibration.startParallel();
                 if (low > 0) combo.addVibrator(motors[0], android.os.VibrationEffect.createOneShot(millis, low));
                 if (high > 0) combo.addVibrator(motors[1], android.os.VibrationEffect.createOneShot(millis, high));
+                // 这次不震的那个马达上正在震的也停掉
+                manager.cancel();
                 manager.vibrate(combo.combine());
             } else if (motors.length == 1) {
                 manager.getVibrator(motors[0]).vibrate(android.os.VibrationEffect.createOneShot(millis, both));
