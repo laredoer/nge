@@ -55,8 +55,14 @@ pub(crate) struct CameraRig {
 }
 
 impl CameraRig {
+    /// 换关：下一次跟随直接对准目标，停掉震屏。
+    pub(crate) fn restart(&mut self) {
+        self.tracking = false;
+        self.shake = None;
+    }
+
     /// 相机不含震屏的位置。
-    fn unshaken(&self, position: Vec2) -> Vec2 {
+    pub(crate) fn unshaken(&self, position: Vec2) -> Vec2 {
         if position == self.written { position - self.applied } else { position }
     }
 }

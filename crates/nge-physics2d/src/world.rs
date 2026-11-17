@@ -7,35 +7,43 @@ use nge_ecs::Time;
 use nge_render2d::{DrawAt, Transform2d};
 use rapier2d::math::{Pose, Rotation, Vector};
 use rapier2d::prelude::{
-    ActiveEvents, ColliderBuilder, ColliderHandle, ColliderSet, CollisionEvent, ContactPair, EventHandler, PhysicsWorld, RigidBodyBuilder,
+    ActiveCollisionTypes, ActiveEvents, ColliderBuilder, ColliderHandle, ColliderSet, CollisionEvent, ContactPair, EventHandler, PhysicsWorld, RigidBodyBuilder,
     RigidBodyHandle, RigidBodySet, SoftBodySet, SoftBodyTearEvent,
 };
 use rapier2d::prelude::{Cuboid, QueryFilter as RapierFilter, Ray};
 
+use crate::character::{self, Character, Mover};
+use crate::joint::Linked;
 use crate::{Collider, Collision, Contact, Impulse, LockRotation, MAX_STEPS, QueryFilter, RayHit, RigidBody, STEP, Shape, Velocity};
 
 /// rapier 的世界，加上实体和刚体 / 碰撞体的对应关系。
 #[derive(Resource)]
 pub struct Physics {
-    world: PhysicsWorld,
-    entities: HashMap<Entity, Handles>,
+    pub(crate) world: PhysicsWorld,
+    pub(crate) entities: HashMap<Entity, Handles>,
+    /// 关节实体 → 建好的关节。
+    pub(crate) joints: HashMap<Entity, Linked>,
+    /// 连到世界上的关节用的固定刚体（原点，没有碰撞体），用到时才建。
+    pub(crate) ground: Option<RigidBodyHandle>,
     /// 刚删掉的碰撞体：rapier 下一步才发它们的停止接触，那时已经查不到 user_data 了。
     removed: HashMap<ColliderHandle, Entity>,
     accumulator: f32,
 }
 
 /// 一个实体在物理里的东西，以及上一次和组件同步时的值（用来判断游戏改没改）。
-struct Handles {
-    body: Option<RigidBodyHandle>,
-    collider: Option<ColliderHandle>,
-    kind: Option<RigidBody>,
+pub(crate) struct Handles {
+    pub(crate) body: Option<RigidBodyHandle>,
+    pub(crate) collider: Option<ColliderHandle>,
+    pub(crate) kind: Option<RigidBody>,
     shape: Option<Collider>,
     locked: bool,
     transform: (Vec2, f32),
-    velocity: Velocity,
+    pub(crate) velocity: Velocity,
     /// 动态 / kinematic 刚体在上一步、这一步结束时的位置（角度不折回），`DrawAt` 在两者之间插值。
     prev: (Vec2, f32),
     curr: (Vec2, f32),
+    /// 有 `Character` 的：角色控制器的状态。
+    pub(crate) mover: Option<Mover>,
 }
 
 impl Physics {
@@ -44,7 +52,7 @@ impl Physics {
         world.gravity = vector(gravity);
         world.integration_parameters.dt = STEP;
         world.integration_parameters.length_unit = pixels_per_meter;
-        Self { world, entities: HashMap::new(), removed: HashMap::new(), accumulator: 0.0 }
+        Self { world, entities: HashMap::new(), joints: HashMap::new(), ground: None, removed: HashMap::new(), accumulator: 0.0 }
     }
 
     pub fn gravity(&self) -> Vec2 {
@@ -69,6 +77,10 @@ impl Physics {
     /// 上一步结束时正在接触的碰撞体（交给求解器的接触点，含很近还没碰上的预测点；sensor 的重叠不算）。
     /// 实体还没建到物理里时是空的。`other` 是碰撞体所在的实体（瓦片地图是它下面的子实体）。
     pub fn contacts(&self, entity: Entity) -> Vec<Contact> {
+        // 角色：走完这一帧之后贴着它的碰撞体（rapier 不算 kinematic 和固定、kinematic 之间的接触）
+        if let Some(mover) = self.entities.get(&entity).and_then(|h| h.mover.as_ref()) {
+            return mover.touching.clone();
+        }
         let Some(collider) = self.entities.get(&entity).and_then(|h| h.collider) else { return Vec::new() };
         self.world
             .contact_pairs_with(collider)
@@ -115,9 +127,19 @@ impl Physics {
         self.world.intersect_shape(Pose::from_translation(vector(center)), &shape, self.filter(filter)).filter_map(|(c, _)| self.entity_of(c)).collect()
     }
 
-    /// （刚体数，碰撞体数）。
+    /// （刚体数，碰撞体数）。连到世界上的关节用的固定刚体不算。
     pub fn len(&self) -> (usize, usize) {
-        (self.world.bodies.len(), self.world.colliders.len())
+        (self.world.bodies.len() - usize::from(self.ground.is_some()), self.world.colliders.len())
+    }
+
+    /// 这个关节实体已经连上了（两头都是刚体、参数没问题）。
+    pub fn is_linked(&self, joint: Entity) -> bool {
+        self.joints.get(&joint).is_some_and(Linked::is_linked)
+    }
+
+    /// 建到物理里的关节数。
+    pub fn joints(&self) -> usize {
+        self.world.impulse_joints.len()
     }
 
     /// 每个碰撞体：（实体，形状，刚体种类，是不是 sensor，物理里的位置和角度）。
@@ -144,7 +166,7 @@ impl Physics {
         f
     }
 
-    fn entity_of(&self, collider: ColliderHandle) -> Option<Entity> {
+    pub(crate) fn entity_of(&self, collider: ColliderHandle) -> Option<Entity> {
         self.world.colliders.get(collider).map(|c| Entity::from_bits(c.user_data as u64))
     }
 
@@ -161,11 +183,11 @@ impl Physics {
     }
 }
 
-fn vector(v: Vec2) -> Vector {
+pub(crate) fn vector(v: Vec2) -> Vector {
     Vector::new(v.x, v.y)
 }
 
-fn vec2(v: Vector) -> Vec2 {
+pub(crate) fn vec2(v: Vector) -> Vec2 {
     Vec2::new(v.x, v.y)
 }
 
@@ -298,7 +320,7 @@ fn build(world: &mut PhysicsWorld, entity: Entity, kind: Option<RigidBody>, shap
     {
         body.set_additional_mass(1.0, true);
     }
-    Handles { body, collider, kind, shape, locked: false, transform: at, velocity, prev: at, curr: at }
+    Handles { body, collider, kind, shape, locked: false, transform: at, velocity, prev: at, curr: at, mover: None }
 }
 
 /// 收集 rapier 的碰撞事件。
@@ -326,8 +348,25 @@ pub(crate) fn step(
     mut query: Query<Synced>,
     mut collisions: MessageWriter<Collision>,
     mut commands: Commands,
+    characters: Query<&Character>,
 ) {
     let physics = &mut *physics;
+    // 角色控制器的参数跟着组件走；去掉了组件就不再是角色
+    for (entity, h) in physics.entities.iter_mut() {
+        match (characters.get(*entity), h.mover.as_mut()) {
+            (Ok(&c), Some(m)) => m.params = c,
+            (Ok(&c), None) if h.kind == Some(RigidBody::Kinematic) => h.mover = Some(Mover { params: c, ..Default::default() }),
+            (Ok(_), None) => {}
+            (Err(_), _) => h.mover = None,
+        }
+        // 角色碰到固定、kinematic 的 sensor（金币、终点）也要发碰撞事件：rapier 默认只算有动态刚体的一对
+        let types = if h.mover.is_some() { ActiveCollisionTypes::all() } else { ActiveCollisionTypes::default() };
+        if let Some(c) = h.collider.and_then(|c| physics.world.colliders.get_mut(c))
+            && c.active_collision_types() != types
+        {
+            c.set_active_collision_types(types);
+        }
+    }
     if time.delta.is_finite() {
         physics.accumulator += time.delta.max(0.0);
     }
@@ -361,8 +400,10 @@ pub(crate) fn step(
                 }
             }
         }
+        character::advance(physics, STEP);
         physics.world.step_with_events(&(), &events);
     }
+    character::touch(physics);
     for (entity, mut transform, velocity, ..) in &mut query {
         let Some(h) = physics.entities.get_mut(&entity) else { continue };
         let Some(body) = h.body.and_then(|b| physics.world.bodies.get(b)) else { continue };
@@ -373,7 +414,10 @@ pub(crate) fn step(
         if moving_body(&physics.world, h).is_some() {
             h.curr = h.transform;
         }
-        h.velocity = Velocity { linear: vec2(body.linvel()), angular: body.angvel() };
+        // 角色的速度是控制器算的，kinematic 刚体的速度里还带着脚下平台的
+        if h.mover.is_none() {
+            h.velocity = Velocity { linear: vec2(body.linvel()), angular: body.angvel() };
+        }
         if let Some(mut v) = velocity {
             *v.bypass_change_detection() = h.velocity;
         }
@@ -459,13 +503,17 @@ fn push(
     };
     let mut kinematic = None;
     if moved {
-        if body.is_kinematic() {
+        if body.is_kinematic() && h.mover.is_none() {
             kinematic = h.body.map(|b| (b, from, at));
         } else {
             body.set_translation(vector(at.0), true);
             body.set_rotation(Rotation::new(at.1), true);
             // 瞬移：插值的两头都换成新位置，画面不从旧位置滑过去
             (h.prev, h.curr) = (at, at);
+            // 角色不再跟着原来脚下的东西走
+            if let Some(m) = h.mover.as_mut() {
+                (m.ground, m.grounded) = (None, false);
+            }
         }
     }
     if let Some(&v) = velocity

@@ -1,4 +1,4 @@
-//! 网格：交错顶点（position / normal / uv）加 u32 索引，逆时针为正面。
+//! 网格：交错顶点（position / normal / uv）加 u32 索引，逆时针为正面；蒙皮的网格另带每个顶点的关节和权重，变形的另带每个目标的位置差、法线差。
 
 use bytemuck::{Pod, Zeroable};
 use glam::{Vec2, Vec3};
@@ -17,10 +17,34 @@ impl Vertex {
     }
 }
 
+/// 一个顶点受哪几个关节影响：`joints` 是蒙皮（[`crate::Skin`]）里的关节下标，`weights` 加起来应是 1。
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Pod, Zeroable)]
+pub struct Influence {
+    pub joints: [u16; 4],
+    pub weights: [f32; 4],
+}
+
+/// 一个网格最多几个变形目标，多的丢掉。
+pub const MAX_MORPH_TARGETS: usize = 8;
+
+/// 一个变形目标（glTF 的 morph target）：每个顶点的位置差、法线差，按权重加到顶点上。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct MorphTarget {
+    /// 和网格的顶点一样多。
+    pub positions: Vec<Vec3>,
+    /// 空表示法线不变；不空时和顶点一样多。
+    pub normals: Vec<Vec3>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Mesh {
     pub vertices: Vec<Vertex>,
     pub indices: Vec<u32>,
+    /// 空表示不蒙皮；不空时和 `vertices` 一样长。
+    pub skin: Vec<Influence>,
+    /// 变形目标，最多 [`MAX_MORPH_TARGETS`] 个。
+    pub targets: Vec<MorphTarget>,
 }
 
 impl Mesh {
@@ -163,6 +187,7 @@ mod tests {
         let mut mesh = Mesh {
             vertices: [Vec3::ZERO, Vec3::X, Vec3::Y].map(|p| Vertex::new(p, Vec3::ZERO, Vec2::ZERO)).to_vec(),
             indices: vec![0, 1, 2],
+            ..Default::default()
         };
         mesh.compute_normals();
         assert!(mesh.vertices.iter().all(|v| v.normal == [0.0, 0.0, 1.0]));
@@ -170,7 +195,7 @@ mod tests {
 
     #[test]
     fn degenerate_triangles_get_a_fallback_normal() {
-        let mut mesh = Mesh { vertices: vec![Vertex::new(Vec3::ZERO, Vec3::ZERO, Vec2::ZERO); 3], indices: vec![0, 1, 2] };
+        let mut mesh = Mesh { vertices: vec![Vertex::new(Vec3::ZERO, Vec3::ZERO, Vec2::ZERO); 3], indices: vec![0, 1, 2], ..Default::default() };
         mesh.compute_normals();
         assert!(mesh.vertices.iter().all(|v| (Vec3::from(v.normal).length() - 1.0).abs() < 1e-6));
     }

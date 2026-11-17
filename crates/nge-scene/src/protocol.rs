@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::anim::AnimNode;
 use crate::audio::AudioNode;
+use crate::effects::{LightingNode, MaskedNode, PostNode};
+use crate::joints::JointNode;
 use crate::nodes::{AmbientNode, Camera3dNode, EmitterNode, LightNode, ModelNode, TextNode};
 use crate::physics::{BodyNode, PhysicsNode};
 use crate::tilemap::TilemapNode;
@@ -24,14 +26,37 @@ pub struct Scene {
     pub texts: Vec<TextNode>,
     pub emitters: Vec<EmitterNode>,
     pub models: Vec<ModelNode>,
+    /// 3D 粒子发射器（见 docs/particles3d.md）。
+    pub emitters3d: Vec<crate::particles3d::Emitter3dNode>,
     pub camera3d: Option<Camera3dNode>,
     pub lights: Vec<LightNode>,
     pub ambient: Option<AmbientNode>,
     pub physics: Option<PhysicsNode>,
+    /// 3D 物理（见 docs/physics3d.md）。
+    pub physics3d: Option<crate::physics3d::Physics3dNode>,
+    /// 进度条（见 docs/world-ui.md）。
+    pub bars: Vec<crate::world_ui::BarNode>,
+    /// 气泡。
+    pub bubbles: Vec<crate::world_ui::BubbleNode>,
+    /// 关节（见 docs/joints.md）。
+    pub joints: Vec<JointNode>,
+    /// 游戏写的着色器：名字 → WGSL（见 docs/effects2d.md）。
+    pub shaders: std::collections::HashMap<String, String>,
+    /// 2D 光照，写了就开。
+    pub lighting: Option<LightingNode>,
+    /// 后处理，按顺序。
+    pub post: Vec<PostNode>,
     pub audio: Option<AudioNode>,
     /// 时间缩放，1 正常、0 暂停。
     #[serde(rename = "timeScale")]
     pub time_scale: Option<f32>,
+    /// 左上角的性能面板（见 docs/perf-overlay.md）。
+    pub perf: Option<bool>,
+    /// 关卡：换了值就整个重建场景（见 docs/levels.md）。数字和字符串都行。
+    #[serde(deserialize_with = "crate::level::level_id")]
+    pub level: Option<String>,
+    /// 联网（见 docs/networking.md）：写了就连中继。
+    pub net: Option<crate::net::NetNode>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -95,6 +120,40 @@ pub struct SpriteNode {
     pub body: Option<BodyNode>,
     /// 视差：相机移动时跟着挪的比例，不填是 1（见 docs/parallax.md）。
     pub parallax: Option<ParallaxNode>,
+    /// 沿哪个轴一个挨一个重复铺满视野（见 docs/repeat.md）。
+    pub repeat: Option<RepeatNode>,
+    /// 用着色器库里的哪个着色器画，`params` 交给它（不写用着色器的默认值）。
+    pub shader: Option<String>,
+    pub params: Option<[f32; 4]>,
+    /// 当遮罩：不画出来，只记下不透明的地方。
+    #[serde(default)]
+    pub mask: bool,
+    /// 只画在遮罩里或者遮罩外。
+    pub masked: Option<MaskedNode>,
+    /// 开着 2D 光照时不受光。
+    #[serde(default)]
+    pub unlit: bool,
+    /// 法线图（和贴图同样排布），受光时按表面朝向明暗（见 docs/render2d-more.md）。
+    pub normal: Option<String>,
+    /// 挡住开了 shadows 的灯：`true` 是精灵的矩形，或者本地坐标的多边形。
+    pub occluder: Option<crate::effects::OccluderNode>,
+    /// 追某个节点（见 docs/ai.md）。
+    pub chase: Option<crate::ai::ChaseNode>,
+}
+
+/// `repeat`：`"x"`、`"y"` 或 `"xy"`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RepeatNode {
+    X,
+    Y,
+    Xy,
+}
+
+impl From<RepeatNode> for nge_render2d::Repeat {
+    fn from(node: RepeatNode) -> Self {
+        Self { x: node != RepeatNode::Y, y: node != RepeatNode::X }
+    }
 }
 
 /// `parallax`：一个数（x、y 一样），或者 `[x, y]`。

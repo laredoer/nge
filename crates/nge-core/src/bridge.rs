@@ -29,8 +29,13 @@ pub const GAMEPAD: CommandKey<GamepadInput> = CommandKey::new("gamepad");
 pub const FRAME_STATS: EventKey<FrameReport> = EventKey::new("fps");
 /// 内置：渲染线程出错（初始化失败、panic、surface 丢失）。`game_view()` 默认记日志。
 pub const ENGINE_ERROR: EventKey<EngineError> = EventKey::new("error");
+/// 内置：第一帧画出来了（web 上就是加载完了）。游戏可以等它再开始走时间。
+pub const READY: EventKey<Ready> = EventKey::new("ready");
 /// 引擎 / 平台自用的 command 前缀（如 `nge.stall_main`）。
 pub const RESERVED_COMMAND_PREFIX: &str = "nge.";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Ready {}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EngineError {
@@ -40,7 +45,7 @@ pub struct EngineError {
 /// 游戏不能用来注册的通道名：`outbound` 为 true 指游戏 → NSH（State / Event），否则指 command。
 pub fn is_reserved(name: &str, outbound: bool) -> bool {
     if outbound {
-        name == FRAME_STATS.name() || name == ENGINE_ERROR.name() || name == KEY_EVENT.name()
+        name == FRAME_STATS.name() || name == ENGINE_ERROR.name() || name == KEY_EVENT.name() || name == READY.name()
     } else {
         name == TOUCH.name() || name == KEY.name() || name == GAMEPAD.name() || name.starts_with(RESERVED_COMMAND_PREFIX)
     }
@@ -228,6 +233,8 @@ mod tests {
         assert_eq!(g, GamepadInput { left: [0.5, -1.0], right: [0.0, 0.25] });
         assert_eq!(GAMEPAD.decode(&json!({})).unwrap(), GamepadInput::default(), "缺的摇杆是 0");
         assert!(is_reserved("gamepad", false));
+        assert!(is_reserved("ready", true) && !is_reserved("ready", false));
+        assert_eq!(READY.encode(&Ready {}), serde_json::json!({}));
     }
 
     #[test]

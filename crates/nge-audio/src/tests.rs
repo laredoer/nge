@@ -170,3 +170,192 @@ fn loops_do_not_use_up_the_per_frame_starts() {
     app.tick(VIEWPORT, 0.016);
     assert_eq!(audio(&mut app).voices(), MAX_STARTS_PER_FRAME as usize + 1);
 }
+
+#[test]
+fn spatial_volume_and_pan() {
+    use glam::Vec2;
+    let l = Vec2::new(100.0, 50.0);
+    assert_eq!(spatial(0.8, 0.0, l, l, 1000.0), (0.8, 0.0), "正中");
+    let (v, p) = spatial(1.0, 0.0, l + Vec2::new(-250.0, 0.0), l, 1000.0);
+    assert!((v - 0.75).abs() < 1e-6 && (p + 0.5).abs() < 1e-6, "左边 250：{v} {p}");
+    let (v, p) = spatial(1.0, 0.0, l + Vec2::new(0.0, 500.0), l, 1000.0);
+    assert!((v - 0.5).abs() < 1e-6 && p == 0.0, "正上方不偏 {v} {p}");
+    assert_eq!(spatial(1.0, 0.0, l + Vec2::new(1500.0, 0.0), l, 1000.0), (0.0, 1.0), "超出范围静音、声像截到 1");
+    let (_, p) = spatial(1.0, 0.5, l + Vec2::new(100.0, 0.0), l, 1000.0);
+    assert!((p - 0.7).abs() < 1e-6, "叠加自己的声像 {p}");
+    let (v, _) = spatial(1.0, 0.0, l + Vec2::new(100.0, 0.0), l, -1.0);
+    assert!((v - 0.9).abs() < 1e-6, "范围不合法按 1000 {v}");
+    assert_eq!(spatial(1.0, 0.2, Vec2::NAN, l, 1000.0), (0.0, 0.2));
+}
+
+#[test]
+fn bus_settings_are_clamped_and_read_back() {
+    let mut app = app();
+    let mut audio = audio(&mut app);
+    assert_eq!((audio.bus_volume(Bus::Music), audio.lowpass(Bus::Sfx), audio.reverb(Bus::Ui)), (1.0, None, 0.0), "默认");
+    audio.set_bus_volume(Bus::Music, 0.4, 0.1);
+    audio.set_bus_volume(Bus::Ui, -2.0, 0.0);
+    audio.set_lowpass(Bus::Sfx, Some(800.0), 0.3);
+    audio.set_lowpass(Bus::Music, Some(5.0), 0.0);
+    audio.set_reverb(Bus::Sfx, 1.5, 0.0);
+    audio.set_reverb(Bus::Music, f32::NAN, 0.0);
+    assert_eq!(audio.bus_volume(Bus::Music), 0.4);
+    assert_eq!(audio.bus_volume(Bus::Ui), 0.0);
+    assert_eq!(audio.bus_volume(Bus::Sfx), 1.0, "别的组不变");
+    assert_eq!((audio.lowpass(Bus::Sfx), audio.lowpass(Bus::Music)), (Some(800.0), Some(20.0)));
+    assert_eq!((audio.reverb(Bus::Sfx), audio.reverb(Bus::Music)), (1.0, 0.0));
+    audio.set_lowpass(Bus::Sfx, None, 0.0);
+    assert_eq!(audio.lowpass(Bus::Sfx), None);
+    audio.set_range(0.0);
+    assert_eq!(audio.range(), DEFAULT_RANGE);
+    audio.set_range(300.0);
+    assert_eq!(audio.range(), 300.0);
+}
+
+#[test]
+fn positional_voices_follow_the_listener() {
+    use glam::Vec2;
+    let mut app = app();
+    let beep = load(&mut app, BEEP);
+    let placed = audio(&mut app).play(beep, Play { at: Some(Vec2::new(-500.0, 0.0)), volume: 0.8, ..Play::looped() });
+    let plain = audio(&mut app).play(beep, Play { volume: 0.6, pan: 0.3, bus: Bus::Ui, ..Play::looped() });
+    let queued = audio(&mut app).play(beep, Play { at: Some(Vec2::ZERO), ..Play::looped() });
+    // 还在排队时挪：开始时按新位置
+    audio(&mut app).set_voice_position(queued, Vec2::new(500.0, 0.0));
+    settle(&mut app);
+    assert_eq!(audio(&mut app).mix(queued), Some((0.5, 1.0)));
+    audio(&mut app).stop(queued, 0.0);
+    let (v, p) = audio(&mut app).mix(placed).unwrap();
+    assert!((v - 0.4).abs() < 1e-6 && (p + 1.0).abs() < 1e-6, "开始时按位置 {v} {p}");
+    assert_eq!(audio(&mut app).mix(plain), Some((0.6, 0.3)));
+    audio(&mut app).advance_mock(1);
+    let audio_ref = app.world().resource::<Audio>();
+    assert_eq!(Bus::ALL.map(|b| audio_ref.bus_sounds(b)), [0, 2, 1], "各进各的分组");
+    audio(&mut app).set_listener(Vec2::new(-500.0, 0.0));
+    app.tick(VIEWPORT, 0.016);
+    assert_eq!(audio(&mut app).mix(placed), Some((0.8, 0.0)), "听的人走过去了");
+    assert_eq!(audio(&mut app).mix(plain), Some((0.6, 0.3)), "不按位置的不变");
+    audio(&mut app).set_voice_position(placed, Vec2::new(-300.0, 0.0));
+    audio(&mut app).set_voice_position(plain, Vec2::new(-300.0, 0.0));
+    app.tick(VIEWPORT, 0.016);
+    let (v, p) = audio(&mut app).mix(placed).unwrap();
+    assert!((v - 0.64).abs() < 1e-6 && (p - 0.4).abs() < 1e-6, "声音挪了 {v} {p}");
+    assert_eq!(audio(&mut app).mix(plain), Some((0.6, 0.3)), "不按位置的不会变成按位置");
+    audio(&mut app).set_voice_volume(placed, 0.4, 0.0);
+    let (v, _) = audio(&mut app).mix(placed).unwrap();
+    assert!((v - 0.32).abs() < 1e-6, "改音量也按位置算 {v}");
+}
+
+#[test]
+fn without_a_device_bus_calls_are_no_ops() {
+    let mut audio = Audio::new(None);
+    audio.add_buses();
+    audio.set_bus_volume(Bus::Sfx, 0.5, 0.1);
+    audio.set_lowpass(Bus::Sfx, Some(500.0), 0.1);
+    audio.set_reverb(Bus::Sfx, 0.5, 0.1);
+    audio.set_listener(glam::Vec2::new(1.0, 2.0));
+    audio.set_listener(glam::Vec2::NAN);
+    assert_eq!(audio.listener(), glam::Vec2::new(1.0, 2.0), "不是有限数的不要");
+    assert_eq!((audio.bus_volume(Bus::Sfx), audio.lowpass(Bus::Sfx), audio.reverb(Bus::Sfx)), (0.5, Some(500.0), 0.5));
+}
+
+#[test]
+fn moving_does_not_cut_a_long_fade_short_and_nan_volumes_are_silent() {
+    use glam::Vec2;
+    let mut app = app();
+    let beep = load(&mut app, BEEP);
+    let v = audio(&mut app).play(beep, Play { at: Some(Vec2::ZERO), ..Play::looped() });
+    let bad = audio(&mut app).play(beep, Play { volume: f32::NAN, at: Some(Vec2::ZERO), ..Play::looped() });
+    settle(&mut app);
+    assert_eq!(audio(&mut app).mix(bad), Some((0.0, 0.0)), "NaN 音量当 0");
+    audio(&mut app).set_voice_volume(v, 0.0, 2.0);
+    audio(&mut app).set_listener(Vec2::new(100.0, 0.0));
+    app.tick(VIEWPORT, 0.016);
+    let fade = audio(&mut app).last_fade(v).unwrap();
+    assert!(fade > 1.5, "还剩将近 2 秒的淡出 {fade}");
+    assert_eq!(spatial(1.0, f32::NAN, Vec2::ZERO, Vec2::ZERO, 100.0), (1.0, 0.0));
+}
+
+/// 用到全局解锁状态的测试一个一个跑。
+static UNLOCK_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn locked_app() -> App {
+    let source = MemorySource::default().with(BEEP, wav(2.5)).with(BOOP, wav(0.1));
+    let mut app = App::new();
+    app.add_plugins(AssetPlugin::new().source(Arc::new(source))).add_plugins(AudioPlugin::locked_mock());
+    app
+}
+
+/// 模拟一次用户手势：返回这次有没有新建音频设备。
+fn gesture() -> bool {
+    let mut made = false;
+    crate::unlock_with(|| {
+        made = true;
+        Some(crate::mock_manager())
+    });
+    made
+}
+
+#[test]
+fn locked_until_unlocked_then_music_starts_and_settings_carry_over() {
+    let _serial = UNLOCK_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut app = locked_app();
+    let (beep, boop) = (load(&mut app, BEEP), load(&mut app, BOOP));
+    let music = audio(&mut app).play(beep, Play { bus: Bus::Music, ..Play::looped() });
+    let hit = audio(&mut app).play(boop, Play::default());
+    audio(&mut app).set_bus_volume(Bus::Music, 0.5, 0.0);
+    assert!(!audio(&mut app).enabled());
+    assert!(audio(&mut app).is_playing(music), "音乐排着等解锁");
+    assert!(!audio(&mut app).is_playing(hit), "解锁前的音效直接丢掉");
+    settle(&mut app);
+    assert_eq!(audio(&mut app).voices(), 0, "没解锁不出声");
+    assert!(audio(&mut app).is_playing(music));
+
+    assert!(gesture());
+    settle(&mut app);
+    let audio = audio(&mut app);
+    assert!(audio.enabled());
+    assert!(audio.mix(music).is_some(), "解锁后音乐开始");
+    assert_eq!(audio.bus_volume(Bus::Music), 0.5);
+    assert_eq!(audio.bus_sounds(Bus::Music), 1, "进了音乐分组的轨道");
+}
+
+#[test]
+fn later_gestures_do_not_make_another_device() {
+    let _serial = UNLOCK_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut app = locked_app();
+    assert!(gesture());
+    assert!(!gesture(), "还没接上：不再建");
+    settle(&mut app);
+    assert!(audio(&mut app).enabled());
+    assert!(!gesture(), "接上以后也不再建");
+}
+
+#[test]
+fn a_new_audio_after_the_old_one_is_gone_can_unlock_again() {
+    let _serial = UNLOCK_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut first = locked_app();
+    assert!(gesture());
+    settle(&mut first);
+    drop(first);
+    let mut second = locked_app();
+    let beep = load(&mut second, BEEP);
+    let music = audio(&mut second).play(beep, Play::looped());
+    assert!(gesture(), "旧的设备跟着旧的 Audio 没了，新的要重新建");
+    settle(&mut second);
+    assert!(audio(&mut second).enabled());
+    assert!(audio(&mut second).mix(music).is_some());
+}
+
+#[test]
+fn music_stopped_before_unlocking_never_starts() {
+    let _serial = UNLOCK_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut app = locked_app();
+    let beep = load(&mut app, BEEP);
+    let music = audio(&mut app).play(beep, Play::looped());
+    audio(&mut app).stop(music, 0.0);
+    assert!(!audio(&mut app).is_playing(music));
+    assert!(gesture());
+    settle(&mut app);
+    assert_eq!(audio(&mut app).voices(), 0);
+}

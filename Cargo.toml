@@ -1,6 +1,8 @@
 [workspace]
 resolver = "3"
-members = ["crates/nge-assets", "crates/nge-audio", "crates/nge-core", "crates/nge-ecs", "crates/nge-nsh", "crates/nge-particles", "crates/nge-physics2d", "crates/nge-platform", "crates/nge-render2d", "crates/nge-render3d", "crates/nge-scene", "crates/nge-text", "examples/bounce", "examples/sprites", "examples/dodge", "examples/scene", "examples/model", "examples/effects", "examples/scene3d", "examples/physics", "examples/platformer"]
+# vendor/ 里是打过补丁的第三方 crate（.cargo/config.toml 的 [patch.crates-io]），不是成员
+exclude = ["vendor"]
+members = ["crates/nge-ai", "crates/nge-assets", "crates/nge-audio", "crates/nge-core", "crates/nge-ecs", "crates/nge-net", "crates/nge-nsh", "crates/nge-particles", "crates/nge-physics2d", "crates/nge-physics3d", "crates/nge-platform", "crates/nge-render2d", "crates/nge-relay", "crates/nge-render3d", "crates/nge-scene", "crates/nge-text", "examples/bounce", "examples/sprites", "examples/dodge", "examples/scene", "examples/model", "examples/effects", "examples/scene3d", "examples/physics", "examples/platformer", "examples/sanguo", "examples/editor"]
 
 [workspace.package]
 version = "0.1.0"
@@ -9,6 +11,7 @@ publish = false
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
+nge-ai = { path = "crates/nge-ai" }
 nge-assets = { path = "crates/nge-assets" }
 nge-audio = { path = "crates/nge-audio" }
 nge-core = { path = "crates/nge-core" }
@@ -16,19 +19,31 @@ nge-platform = { path = "crates/nge-platform" }
 nge-ecs = { path = "crates/nge-ecs" }
 nge-render2d = { path = "crates/nge-render2d" }
 nge-render3d = { path = "crates/nge-render3d" }
+nge-net = { path = "crates/nge-net", default-features = false }
 nge-nsh = { path = "crates/nge-nsh" }
 nge-particles = { path = "crates/nge-particles" }
 nge-physics2d = { path = "crates/nge-physics2d" }
-nge-scene = { path = "crates/nge-scene" }
+nge-physics3d = { path = "crates/nge-physics3d" }
+nge-scene = { path = "crates/nge-scene", default-features = false }
 nge-text = { path = "crates/nge-text" }
 bevy_ecs = { version = "0.20.1", default-features = false, features = ["std"] }
 glam = { version = "0.34", features = ["bytemuck"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
+texture2ddecoder = "0.1.2"
+texpresso = "2.0.2"
 nsh-core = "0.4.0"
 nsh-base = "0.4.0"
 nsh-platform-macos = { version = "0.4.0", default-features = false }
 nsh-platform-ios = { version = "0.4.0", default-features = false }
-wgpu = "30"
+# fragile-send-sync-non-atomic-wasm：wasm 上只有一个线程，wgpu 对象也当 Send + Sync，才放得进 ECS 的资源（见 docs/web.md）
+wgpu = { version = "30", features = ["fragile-send-sync-non-atomic-wasm"] }
+naga = { version = "30", features = ["wgsl-in"] }
+# nsh 0.4 的 web 打包按 0.2.129 的胶水写，wasm-bindgen 命令行要和这里同一个版本
+wasm-bindgen = "=0.2.129"
+wasm-bindgen-futures = "0.4"
+web-sys = "0.3"
+js-sys = "0.3"
+web-time = "1"
 pollster = "1"
 raw-window-handle = "0.6"
 bytemuck = { version = "1.25", features = ["derive"] }
@@ -37,7 +52,7 @@ serde_json = "1"
 log = "0.4"
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSRunLoop", "NSObject", "NSString", "NSThread", "NSNotification", "NSOperation", "block2"] }
-objc2-game-controller = { version = "0.3", features = ["GCController", "GCExtendedGamepad", "GCPhysicalInputProfile", "GCControllerElement", "GCControllerButtonInput", "GCControllerAxisInput", "GCControllerDirectionPad"] }
+objc2-game-controller = { version = "0.3", features = ["GCController", "GCExtendedGamepad", "GCPhysicalInputProfile", "GCControllerElement", "GCControllerButtonInput", "GCControllerAxisInput", "GCControllerDirectionPad", "GCKeyboard", "GCKeyboardInput", "GCKeyCodes", "GCDevice"] }
 objc2-quartz-core = { version = "0.3", features = ["CADisplayLink", "CAFrameRateRange"] }
 objc2-app-kit = { version = "0.3", features = ["NSView", "objc2-quartz-core", "NSEvent", "NSResponder", "NSWindow", "NSText", "NSTextInputClient", "block2"] }
 block2 = "0.6"

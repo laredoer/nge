@@ -15,13 +15,13 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, AnyProtocol, NSObjectProtocol, ProtocolObject};
 use objc2::{ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{NSEvent, NSEventMask, NSEventModifierFlags, NSEventType, NSText, NSView, NSWindow, NSWindowDidResignKeyNotification};
-use objc2_game_controller::{GCController, GCControllerButtonInput, GCControllerDirectionPad, GCExtendedGamepad};
 use objc2_foundation::{NSNotification, NSNotificationCenter, NSObject, NSPoint, NSRunLoop, NSRunLoopCommonModes};
 use objc2_quartz_core::CADisplayLink;
 use raw_window_handle::{AppKitDisplayHandle, AppKitWindowHandle, RawDisplayHandle, RawWindowHandle};
 use serde_json::{Value as JsonValue, json};
 
-use crate::{keys, pad};
+use crate::input::{self, CAPTURE_KEYS, capture_keys};
+use crate::{gc, keys, pad};
 use crate::shared::Proxy;
 
 /// 把 `factory` 包成 NSH 原生组件工厂，注册到 `AppOptions.components`。
@@ -36,7 +36,7 @@ struct Shared {
     ctx: ComponentContext,
     /// 转发过按下、还没松开的键，切走时补发松开。
     keys: RefCell<BTreeSet<&'static str>>,
-    /// prop `captureKeys`：游戏要吞的键；`None` 时用 [`keys::default_capture`]。
+    /// prop `captureKeys`：游戏要吞的键；`None` 时用 [`input::default_capture`]。
     capture: RefCell<Option<Vec<String>>>,
     /// 上一帧按着的手柄键和摇杆。
     pad_keys: RefCell<BTreeSet<&'static str>>,
@@ -83,7 +83,7 @@ impl Shared {
     fn poll_pads(&self) {
         let key = self.view.window().is_some_and(|w| w.isKeyWindow());
         if key && !self.view.isHiddenOrHasHiddenAncestor() {
-            self.update_pads(&read_pads());
+            self.update_pads(&gc::read_pads());
         } else {
             self.update_pads(&[]);
         }
@@ -111,22 +111,22 @@ impl Shared {
         self.check_focus();
         let Some(code) = keys::code(event.keyCode()) else { return false };
         let kind = match event.r#type() {
-            NSEventType::KeyDown => keys::Kind::Down,
-            NSEventType::KeyUp => keys::Kind::Up,
-            NSEventType::FlagsChanged => keys::Kind::Flags,
+            NSEventType::KeyDown => input::Kind::Down,
+            NSEventType::KeyUp => input::Kind::Up,
+            NSEventType::FlagsChanged => input::Kind::Flags,
             _ => return false,
         };
         let flags = event.modifierFlags();
-        let facts = keys::Facts {
+        let facts = input::Facts {
             code,
             kind,
             cmd: flags.contains(NSEventModifierFlags::Command),
-            repeat: kind == keys::Kind::Down && event.isARepeat(),
+            repeat: kind == input::Kind::Down && event.isARepeat(),
             modifier_down: keys::modifier_down(code, flags.0),
             eligible: self.eligible(event),
-            capture: self.capture.borrow().as_ref().map_or_else(|| keys::default_capture(code), |list| list.iter().any(|c| c == code)),
+            capture: input::captured(self.capture.borrow().as_deref(), code),
         };
-        let decision = keys::decide(&mut self.keys.borrow_mut(), facts);
+        let decision = input::decide(&mut self.keys.borrow_mut(), facts);
         if let Some((down, repeat)) = decision.forward {
             self.forward(code, down, repeat);
         }
@@ -139,46 +139,6 @@ impl Shared {
         let ours = event.window(self.view.mtm()).is_some_and(|w| w == window);
         ours && window.isKeyWindow() && !self.view.isHiddenOrHasHiddenAncestor() && !editing(&window)
     }
-}
-
-/// 所有连着的、有 extendedGamepad 的手柄这一帧的读数。
-fn read_pads() -> Vec<pad::Reading> {
-    let pressed = |b: Retained<GCControllerButtonInput>| unsafe { b.isPressed() };
-    let maybe = |b: Option<Retained<GCControllerButtonInput>>| b.is_some_and(pressed);
-    let axes = |d: Retained<GCControllerDirectionPad>| unsafe { [d.xAxis().value(), d.yAxis().value()] };
-    let read = |g: &GCExtendedGamepad| unsafe {
-        pad::Reading {
-            a: pressed(g.buttonA()),
-            b: pressed(g.buttonB()),
-            x: pressed(g.buttonX()),
-            y: pressed(g.buttonY()),
-            l1: pressed(g.leftShoulder()),
-            r1: pressed(g.rightShoulder()),
-            l3: maybe(g.leftThumbstickButton()),
-            r3: maybe(g.rightThumbstickButton()),
-            menu: pressed(g.buttonMenu()),
-            options: maybe(g.buttonOptions()),
-            l2: g.leftTrigger().value(),
-            r2: g.rightTrigger().value(),
-            dpad: axes(g.dpad()),
-            left: axes(g.leftThumbstick()),
-            right: axes(g.rightThumbstick()),
-        }
-    };
-    unsafe { GCController::controllers() }.iter().filter_map(|c| unsafe { c.extendedGamepad() }).map(|g| read(&g)).collect()
-}
-
-/// 平台层自己用的 prop：游戏视图要吞的键（`code` 名的数组），不转给游戏。
-const CAPTURE_KEYS: &str = "captureKeys";
-
-/// 不是字符串数组时记 warn，用默认的。
-fn capture_keys(value: Option<&JsonValue>) -> Option<Vec<String>> {
-    let value = value.filter(|v| !v.is_null())?;
-    let list = value.as_array().and_then(|a| a.iter().map(|v| v.as_str().map(str::to_owned)).collect::<Option<Vec<_>>>());
-    if list.is_none() {
-        log::warn!("captureKeys 要是键名的数组，收到 {value}，用默认的");
-    }
-    list
 }
 
 /// 第一响应者是不是文本编辑（输入框），是的话按键留给它。

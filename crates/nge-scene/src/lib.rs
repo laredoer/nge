@@ -4,18 +4,29 @@
 //! 节点内容没变的实体不会被改动，所以 Rust 系统可以按 [`SceneId`] 找到实体继续驱动它；
 //! 节点一旦在 TSX 里改了，就以 TSX 声明的为准整体覆盖。
 
+mod ai;
 mod anim;
+mod attach;
 mod audio;
 mod behave;
 mod camera;
+#[cfg(not(all(feature = "physics3d", feature = "ai", feature = "net")))]
+mod disabled;
+mod effects;
+mod joints;
+mod level;
 mod match2d;
+mod net;
+mod particles3d;
 mod nodes;
 mod physics;
+mod physics3d;
 mod protocol;
 mod resolve;
 mod sync;
 mod sync_nodes;
 mod tilemap;
+mod world_ui;
 
 use std::collections::HashMap;
 
@@ -28,12 +39,19 @@ use nge_render2d::{Assets, AtlasId, Atlases, Camera2d, Grid, Image, PointerWorld
 use nge_render3d::{Assets3d, Camera3d, Transform3d};
 use nge_text::TextPlugin;
 
+pub use ai::{CHASE, ChaseEvent, ChaseNode};
+pub use world_ui::{BarNode, BubbleNode, TYPED, Typed};
 pub use anim::{ANIM_END, AnimEnd, AnimNode, Ease, FrameAnimation, TWEEN, TWEEN_END, Tween, TweenCommand, TweenEnd, TweenProps, Tweens};
-pub use audio::{AudioNode, PlaySound, SOUND};
+pub use audio::{AudioNode, BusName, BusNode, BusesNode, PlaySound, SOUND};
 pub use behave::{Spin, Tappable};
 pub use camera::{SHAKE, Shake};
+pub use effects::{Light2dNode, LightingNode, MaskedNode, PostNode};
+pub use joints::{JointKindName, JointNode, MotorNode};
+pub use level::{LEVEL_START, LevelStart};
 pub use nodes::{AmbientNode, AnchorName, BURST, Burst, Camera3dNode, EmitterNode, FLOAT_TEXT, FloatText, LightKind, LightNode, ModelNode, Particles, TextNode};
+pub use net::{NetNode, REMOTE_PREFIX, parse_remote};
 pub use physics::{BodyKind, BodyNode, COLLIDE, Collide, PUSH, PhysicsNode, Push, ShapeName};
+pub use physics3d::{Body3dKind, ModelBody, Physics3dNode, Shape3dName};
 pub use protocol::{Bounds, CameraNode, Color, SCENE, Scene, SpriteNode, TAP, Tap};
 pub use sync::SceneId;
 pub use tilemap::TilemapNode;
@@ -96,6 +114,9 @@ impl Plugin for ScenePlugin {
             }
         }
         app.world_mut().spawn((Camera2d::default(), Camera3d::default(), Transform3d::default(), SceneCamera));
+        if !app.is_plugin_added::<nge_particles::Particles3dPlugin>() {
+            app.add_plugins(nge_particles::Particles3dPlugin);
+        }
         if !app.is_plugin_added::<ParticlePlugin>() {
             app.add_plugins(ParticlePlugin);
         }
@@ -105,21 +126,35 @@ impl Plugin for ScenePlugin {
         if !app.is_plugin_added::<PhysicsPlugin>() {
             app.add_plugins(PhysicsPlugin::default());
         }
+        #[cfg(feature = "physics3d")]
+        physics3d::register(app);
+        #[cfg(feature = "ai")]
+        ai::register(app);
+        #[cfg(feature = "net")]
+        net::register(app);
+        #[cfg(not(all(feature = "physics3d", feature = "ai", feature = "net")))]
+        app.add_systems(PreUpdate, disabled::warn_disabled.run_if(resource_changed::<Scene>));
         if !app.is_plugin_added::<AudioPlugin>() {
             app.add_plugins(AudioPlugin::default());
         }
         let synced = (
             sync::sync_sprites,
             sync::sync_time_scale,
+            sync::sync_perf,
             tilemap::sync_tilemaps,
             camera::sync_camera,
             sync_nodes::sync_texts,
             sync_nodes::sync_emitters,
             sync_nodes::sync_models,
+            particles3d::sync_emitters3d,
             sync_nodes::sync_lights,
             sync_nodes::sync_camera3d,
             physics::sync_gravity,
+            joints::sync_joints,
             audio::sync_audio,
+            effects::sync_effects,
+            world_ui::sync_bars,
+            world_ui::sync_bubbles,
         );
         app.insert_resource(textures)
             .init_resource::<resolve::UriAtlases>()
@@ -135,12 +170,29 @@ impl Plugin for ScenePlugin {
             .add_event(ANIM_END)
             .add_event(TWEEN_END)
             .add_event(COLLIDE)
-            .add_systems(PreUpdate, synced.run_if(resource_changed::<Scene>).before(PointerWorld))
+            .add_event(LEVEL_START)
+            .add_event(CHASE)
+            .add_event(TYPED)
+            .add_systems(Update, world_ui::type_text)
+            // 跟随插值过的位置；屏幕气泡用这一帧的相机
+            .add_systems(PostUpdate, (world_ui::place_bars, world_ui::place_bubbles).after(PhysicsStepped).after(camera::camera_rig))
+            .add_message::<LevelStart>()
+            .add_systems(PreUpdate, level::switch_level.run_if(resource_changed::<Scene>).before(sync::sync_sprites))
+            .add_systems(PreUpdate, synced.run_if(resource_changed::<Scene>).after(level::switch_level).before(PointerWorld))
             .add_systems(PreUpdate, match2d::match_2d.after(sync_nodes::sync_camera3d).after(camera::sync_camera).before(PointerWorld))
             .add_systems(Update, (behave::spin, behave::tap, behave::burst, behave::float_text, physics::push, audio::play_sound, anim::animate))
             // 补间最后写，盖过 spin / push 这一帧的改动
             .add_systems(Update, (anim::start_tweens, anim::tween).chain().after(behave::spin).after(physics::push))
-            .add_systems(PostUpdate, (behave::follow, physics::collide.after(PhysicsStepped), camera::camera_rig.after(PhysicsStepped), match2d::match_2d.after(camera::camera_rig)));
+            // 精灵和关节都同步完了再连：关节可以在精灵之后才出现，反过来也行
+            .add_systems(PostUpdate, joints::resolve.before(PhysicsStepped))
+            .add_systems(PostUpdate, attach::attach.after(PhysicsStepped).before(behave::follow))
+            // 拖尾读这一帧最后的位置：物理、跟随都改完以后
+            .configure_sets(
+                PostUpdate,
+                nge_particles::Particles3dSimulated.after(PhysicsStepped).after(attach::attach).after(behave::follow),
+            )
+            .add_systems(PostUpdate, effects::lighting.after(PhysicsStepped).after(behave::follow).after(camera::camera_rig))
+            .add_systems(PostUpdate, (behave::follow, physics::collide.after(PhysicsStepped), audio::listen.after(camera::camera_rig).before(nge_audio::AudioUpdated), camera::camera_rig.after(PhysicsStepped), match2d::match_2d.after(camera::camera_rig)));
     }
 }
 
@@ -159,6 +211,18 @@ pub(crate) mod testing {
 
     /// 4×2 的图集，每格 8×8。
     pub fn app() -> App {
+        build(|_| {})
+    }
+
+    /// 先加 `plugin`（比如带假连接的联网插件）再加场景插件。
+    #[allow(dead_code)]
+    pub fn app_with(plugin: impl nge_ecs::Plugin) -> App {
+        build(move |app| {
+            app.add_plugins(plugin);
+        })
+    }
+
+    fn build(extra: impl FnOnce(&mut App)) -> App {
         let mut png = Vec::new();
         image::RgbaImage::new(32, 16).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
         let source = nge_assets::MemorySource::default().with(BEEP, nge_audio::testing::wav(1.0));
@@ -166,8 +230,9 @@ pub(crate) mod testing {
         app.add_plugins(nge_assets::AssetPlugin::new().source(std::sync::Arc::new(source)))
             .add_plugins(nge_audio::AudioPlugin::mock())
             .add_plugins(Render3dPlugin)
-            .add_plugins(Render2dPlugin)
-            .add_plugins(ScenePlugin::new().texture("plain", &png).atlas("grid", &png, Grid { cols: 4, rows: 2 }));
+            .add_plugins(Render2dPlugin);
+        extra(&mut app);
+        app.add_plugins(ScenePlugin::new().texture("plain", &png).atlas("grid", &png, Grid { cols: 4, rows: 2 }));
         app
     }
 
@@ -176,7 +241,7 @@ pub(crate) mod testing {
         use nge_render3d::{Assets3d, MaterialId, Mesh, Model, Part};
         let mut assets = world.resource_mut::<Assets3d>();
         let mesh = assets.add_mesh(Mesh::cube(2.0)).unwrap();
-        assets.add_model(Model { parts: vec![Part { mesh, material: MaterialId::DEFAULT, local: glam::Mat4::IDENTITY }] }).unwrap()
+        assets.add_model(Model { parts: vec![Part::new(mesh, MaterialId::DEFAULT, glam::Mat4::IDENTITY)], ..Default::default() }).unwrap()
     }
 
     pub fn frame(app: &mut App, scene: Option<JsonValue>) -> Vec<(String, JsonValue)> {

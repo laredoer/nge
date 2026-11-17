@@ -2,7 +2,7 @@
 
 A game engine written in Rust whose game view is a native component inside [NSH](https://nsh.dev): levels, HUDs and menus are declared in TSX, performance-sensitive logic is written in Rust, and edits to the TSX hot-reload without a restart.
 
-Development and testing happen on macOS; iOS builds. Android and the web come later.
+Development and testing happen on macOS; iOS builds; the web (WebGPU) builds for `examples/sanguo`. Android comes later.
 
 ## Features
 
@@ -22,7 +22,10 @@ You need Rust (the version is pinned in `rust-toolchain.toml`) and the nsh 0.4 c
 ```sh
 nsh run examples/platformer            # macOS: edits to App.tsx hot-reload, edits to Rust rebuild and restart
 nsh run examples/platformer --target ios  # the iOS simulator
+tools/nsh-web.sh package --target web -o out examples/sanguo  # a static site in out/sanguo
 ```
+
+The web build needs the `wasm32-unknown-unknown` target, `wasm-bindgen-cli` 0.2.129 and Homebrew's `llvm@20`; serve `out/sanguo` with any static server and open it in a recent Chrome or Edge (see [docs/web.md](docs/web.md)).
 
 On an iPhone: `nsh package --target ios --sign <certificate> --profile <profile>` in the example's directory, then `tools/resign-ios.sh` (works around an nsh 0.4.0 signing issue, see [docs/native-components.md](docs/native-components.md)) and install the `.ipa`.
 

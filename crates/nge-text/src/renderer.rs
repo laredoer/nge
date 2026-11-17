@@ -13,7 +13,10 @@ use nge_ecs::{RenderFrame, Renderer};
 use nge_render2d::{Camera2d, ClearColor, Transform2d};
 
 use crate::layout::{to_srgb8, top_left};
-use crate::{Font, FontId, ScreenText, Text2d};
+use crate::{Font, FontId, ScreenText, Text2d, TextBox};
+
+/// 和相机一样，缩放太小时按这个算，不除出无穷大。
+const MIN_ZOOM: f32 = 1e-4;
 
 /// 行高 = 字号 × 它。
 const LINE_HEIGHT: f32 = 1.25;
@@ -41,11 +44,12 @@ struct Key {
     face: Option<Face>,
     px: f32,
     width: Option<f32>,
+    visible: Option<usize>,
 }
 
 impl Key {
-    fn matches(&self, text: &str, face: Option<&Face>, px: f32, width: Option<f32>) -> bool {
-        self.text == text && self.face.as_ref() == face && self.px == px && self.width == width
+    fn matches(&self, text: &str, face: Option<&Face>, px: f32, width: Option<f32>, visible: Option<usize>) -> bool {
+        self.text == text && self.face.as_ref() == face && self.px == px && self.width == width && self.visible == visible
     }
 }
 
@@ -68,28 +72,51 @@ pub(crate) struct TextRenderer {
 
 impl Default for TextRenderer {
     fn default() -> Self {
-        // 扫描系统字体在 Mac 上要几百毫秒：一开始就放到后台线程，不卡渲染线程
-        let (tx, rx) = std::sync::mpsc::channel();
-        let spawned = std::thread::Builder::new().name("nge-system-fonts".into()).spawn(move || {
-            let mut db = fontdb::Database::new();
-            load_system_fonts(&mut db);
-            let _ = tx.send(db.faces().cloned().collect());
-        });
-        let system_fonts = match spawned {
-            Ok(_) => Some(rx),
-            Err(e) => {
-                log::warn!("起不了扫描系统字体的线程，不指定字体的文字不会画出来: {e}");
-                None
-            }
-        };
+        let (db, system_fonts) = default_fonts();
         Self {
             gpu: None,
-            fonts: FontSystem::new_with_locale_and_db("en-US".into(), fontdb::Database::new()),
+            fonts: FontSystem::new_with_locale_and_db("en-US".into(), db),
             faces: HashMap::new(),
             system_fonts,
             shaped: HashMap::new(),
         }
     }
+}
+
+/// 一开始的字体库和后台扫描中的系统字体。
+#[cfg(not(target_arch = "wasm32"))]
+fn default_fonts() -> (fontdb::Database, Option<Receiver<Vec<fontdb::FaceInfo>>>) {
+    // 扫描系统字体在 Mac 上要几百毫秒：一开始就放到后台线程，不卡渲染线程
+    let (tx, rx) = std::sync::mpsc::channel();
+    let spawned = std::thread::Builder::new().name("nge-system-fonts".into()).spawn(move || {
+        let mut db = fontdb::Database::new();
+        load_system_fonts(&mut db);
+        let _ = tx.send(db.faces().cloned().collect());
+    });
+    let system_fonts = match spawned {
+        Ok(_) => Some(rx),
+        Err(e) => {
+            log::warn!("起不了扫描系统字体的线程，不指定字体的文字不会画出来: {e}");
+            None
+        }
+    };
+    (fontdb::Database::new(), system_fonts)
+}
+
+/// 浏览器读不到系统字体：用内置的。
+#[cfg(target_arch = "wasm32")]
+fn default_fonts() -> (fontdb::Database, Option<Receiver<Vec<fontdb::FaceInfo>>>) {
+    (builtin_fonts(), None)
+}
+
+/// 内置的 Inter Bold 当 sans-serif：只有拉丁字母、数字和符号，够画数字、「!」和性能数字；
+/// 中文的界面用页面上的文字（见 docs/web.md）。
+#[cfg(any(target_arch = "wasm32", test))]
+fn builtin_fonts() -> fontdb::Database {
+    let mut db = fontdb::Database::new();
+    db.load_font_data(include_bytes!("../fonts/Inter-Bold.ttf").to_vec());
+    db.set_sans_serif_family("Inter");
+    db
 }
 
 /// 这一帧要画的一段文字。
@@ -129,7 +156,10 @@ impl Renderer for TextRenderer {
         }
 
         let clear = *world.resource::<ClearColor>();
-        let load = world.resource_mut::<RenderFrame>().color_load(clear);
+        let mut frame = world.resource_mut::<RenderFrame>();
+        // glyphon 把所有文字合成一次 draw
+        frame.count(u32::from(!placed.is_empty()), placed.len() as u32);
+        let load = frame.color_load(clear);
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("text"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -184,7 +214,7 @@ impl TextRenderer {
                     db.set_sans_serif_family(family);
                 }
                 if self.has_default_font() {
-                    shape(&mut self.fonts, Key { text: "0123456789+-".into(), face: None, px: 16.0, width: None });
+                    shape(&mut self.fonts, Key { text: "0123456789+-".into(), face: None, px: 16.0, width: None, visible: None });
                 } else {
                     log::warn!("没找到系统字体，不指定字体的文字不会画出来");
                 }
@@ -220,6 +250,7 @@ impl TextRenderer {
         let scale = gfx.viewport.scale();
         let mut seen = HashSet::new();
         let mut placed = Vec::new();
+        let mut boxes = Vec::new();
         let mut texts = world.query::<(Entity, &Text2d, &Transform2d, Has<ScreenText>)>();
         for (entity, text, transform, on_screen) in texts.iter(world) {
             let Some(face) = self.face_for(text.font, system_ready).map(|f| f.cloned()) else { continue };
@@ -228,9 +259,9 @@ impl TextRenderer {
             let px = (text.size * zoom * scale).max(1.0);
             let width = text.max_width.map(|w| w * zoom * scale);
             let shaped = match self.shaped.get_mut(&entity) {
-                Some(shaped) if shaped.key.matches(&text.text, face, px, width) => shaped,
+                Some(shaped) if shaped.key.matches(&text.text, face, px, width, text.visible) => shaped,
                 _ => {
-                    let key = Key { text: text.text.clone(), face: face.cloned(), px, width };
+                    let key = Key { text: text.text.clone(), face: face.cloned(), px, width, visible: text.visible };
                     let shaped = shape(&mut self.fonts, key);
                     self.shaped.insert(entity, shaped);
                     self.shaped.get_mut(&entity).expect("刚插入")
@@ -240,9 +271,16 @@ impl TextRenderer {
             let corner = top_left(at, shaped.size, text.anchor);
             let [r, g, b, a] = to_srgb8(text.color);
             placed.push(Placed { entity, left: corner.x, top: corner.y, color: Color::rgba(r, g, b, a) });
+            boxes.push((entity, TextBox(text_box(shaped.size, zoom, scale))));
             seen.insert(entity);
         }
         self.shaped.retain(|entity, _| seen.contains(entity));
+        // 变了才写，不让 `Changed<TextBox>` 每帧都触发
+        for (entity, size) in boxes {
+            if world.get::<TextBox>(entity) != Some(&size) {
+                world.entity_mut(entity).insert(size);
+            }
+        }
         placed
     }
 }
@@ -258,11 +296,17 @@ fn first_family<'a>(db: &fontdb::Database, families: &[&'a str]) -> Option<&'a s
 }
 
 /// fontdb 在 iOS 上按 Linux 找字体目录，一个也找不到；iOS 的系统字体在 `/System/Library/Fonts` 的各个子目录里，应用能读。
+#[cfg(not(target_arch = "wasm32"))]
 fn load_system_fonts(db: &mut fontdb::Database) {
     #[cfg(target_os = "ios")]
     db.load_fonts_dir("/System/Library/Fonts");
     #[cfg(not(target_os = "ios"))]
     db.load_system_fonts();
+}
+
+/// 排版后的框（像素）→ point：世界文字再除以相机缩放。
+fn text_box(px: Vec2, zoom: f32, scale: f32) -> Vec2 {
+    px / (zoom.max(MIN_ZOOM) * scale)
 }
 
 fn shape(fonts: &mut FontSystem, key: Key) -> Shaped {
@@ -272,7 +316,15 @@ fn shape(fonts: &mut FontSystem, key: Key) -> Shaped {
         Some(face) => Attrs::new().family(Family::Name(&face.family)).weight(face.weight).style(face.style).stretch(face.stretch),
         None => Attrs::new().family(Family::SansSerif),
     };
-    buffer.set_text(&key.text, &attrs, Shaping::Advanced, None);
+    // 只显示前几个字：整段一起排，后面的字透明，换行和框的大小都不变
+    let split = key.visible.and_then(|n| key.text.char_indices().nth(n)).map(|(i, _)| i);
+    match split {
+        Some(i) => {
+            let hidden = attrs.clone().color(Color::rgba(0, 0, 0, 0));
+            buffer.set_rich_text([(&key.text[..i], attrs.clone()), (&key.text[i..], hidden)], &attrs, Shaping::Advanced, None);
+        }
+        None => buffer.set_text(&key.text, &attrs, Shaping::Advanced, None),
+    }
     buffer.shape_until_scroll(fonts, false);
     let size = buffer.layout_runs().fold(Vec2::ZERO, |size, run| Vec2::new(size.x.max(run.line_w), size.y.max(run.line_top + run.line_height)));
     Shaped { key, buffer, size }
@@ -285,16 +337,16 @@ mod tests {
     #[test]
     fn faces_remember_weight_so_families_can_share_a_name() {
         let mut fonts = Assets::<Font>::default();
-        let bold = fonts.add(Font(std::sync::Arc::new(include_bytes!("../tests/data/Inter-Bold.ttf").to_vec())));
+        let bold = fonts.add(Font(std::sync::Arc::new(include_bytes!("../fonts/Inter-Bold.ttf").to_vec())));
         let broken = fonts.add(Font(std::sync::Arc::new(b"true but not a font".to_vec())));
         let mut renderer = TextRenderer::default();
         renderer.register_fonts(&fonts);
         let face = renderer.faces[&bold].clone().unwrap();
         assert_eq!((face.family.as_str(), face.weight), ("Inter", fontdb::Weight::BOLD));
         assert_eq!(renderer.faces[&broken], None);
-        let key = Key { text: "a".into(), face: Some(face.clone()), px: 10.0, width: None };
+        let key = Key { text: "a".into(), face: Some(face.clone()), px: 10.0, width: None, visible: None };
         let regular = Face { weight: fontdb::Weight::NORMAL, ..face };
-        assert!(!key.matches("a", Some(&regular), 10.0, None), "同名不同字重要重排");
+        assert!(!key.matches("a", Some(&regular), 10.0, None, None), "同名不同字重要重排");
     }
 
     #[test]
@@ -310,7 +362,7 @@ mod tests {
         #[cfg(target_os = "macos")]
         {
             assert!(renderer.fonts.db().len() > 0, "扫到的系统字体并进了字体库");
-            let shaped = shape(&mut renderer.fonts, Key { text: "+1".into(), face: None, px: 16.0, width: None });
+            let shaped = shape(&mut renderer.fonts, Key { text: "+1".into(), face: None, px: 16.0, width: None, visible: None });
             assert!(shaped.buffer.layout_runs().map(|run| run.glyphs.len()).sum::<usize>() > 0, "默认字体排得出字形");
         }
         assert!(renderer.system_fonts_ready(), "加载完以后一直是 ready");
@@ -330,7 +382,7 @@ mod tests {
     #[test]
     fn default_font_text_waits_for_system_fonts() {
         let mut fonts = Assets::<Font>::default();
-        let bold = fonts.add(Font(std::sync::Arc::new(include_bytes!("../tests/data/Inter-Bold.ttf").to_vec())));
+        let bold = fonts.add(Font(std::sync::Arc::new(include_bytes!("../fonts/Inter-Bold.ttf").to_vec())));
         let mut renderer = TextRenderer::default();
         renderer.register_fonts(&fonts);
         assert_eq!(renderer.face_for(None, false), None, "系统字体没扫完");
@@ -338,10 +390,58 @@ mod tests {
         assert_eq!(renderer.face_for(Some(bold), false).map(|f| f.map(|f| f.family.clone())), Some(Some("Inter".into())), "指定的字体不等系统字体");
     }
 
+    fn inter() -> (TextRenderer, Face) {
+        let mut fonts = Assets::<Font>::default();
+        let bold = fonts.add(Font(std::sync::Arc::new(include_bytes!("../fonts/Inter-Bold.ttf").to_vec())));
+        let mut renderer = TextRenderer::default();
+        renderer.register_fonts(&fonts);
+        let face = renderer.faces[&bold].clone().unwrap();
+        (renderer, face)
+    }
+
+    /// 每个字形是不是透明的。
+    fn hidden(shaped: &Shaped) -> Vec<bool> {
+        shaped.buffer.layout_runs().flat_map(|run| run.glyphs.iter().map(|g| g.color_opt.is_some_and(|c| c.a() == 0)).collect::<Vec<_>>()).collect()
+    }
+
+    #[test]
+    fn hidden_characters_keep_their_place_but_are_transparent() {
+        let (mut renderer, face) = inter();
+        let key = |visible| Key { text: "HHé H".into(), face: Some(face.clone()), px: 20.0, width: None, visible };
+        let all = shape(&mut renderer.fonts, key(None));
+        let two = shape(&mut renderer.fonts, key(Some(2)));
+        assert_eq!(hidden(&all), [false; 5]);
+        assert_eq!(hidden(&two), [false, false, true, true, true], "按字数算，é 是一个字");
+        assert_eq!(two.size, all.size, "后面的字照样占地方");
+        assert_eq!(hidden(&shape(&mut renderer.fonts, key(Some(3)))), [false, false, false, true, true], "多字节的字不切坏");
+        assert_eq!(hidden(&shape(&mut renderer.fonts, key(Some(0)))), [true; 5]);
+        assert_eq!(hidden(&shape(&mut renderer.fonts, key(Some(9)))), [false; 5], "超过字数就是全显示");
+        assert!(!key(Some(2)).matches("HHé H", Some(&face), 20.0, None, Some(3)), "显示的字数变了要重排");
+        assert!(key(Some(2)).matches("HHé H", Some(&face), 20.0, None, Some(2)));
+    }
+
+    #[test]
+    fn text_box_is_measured_in_points() {
+        assert_eq!(text_box(Vec2::new(80.0, 40.0), 2.0, 2.0), Vec2::new(20.0, 10.0), "世界文字除以缩放和像素密度");
+        assert_eq!(text_box(Vec2::new(80.0, 40.0), 1.0, 2.0), Vec2::new(40.0, 20.0));
+        assert!(text_box(Vec2::new(80.0, 40.0), 0.0, 1.0).is_finite(), "缩放是 0 时不出无穷大");
+    }
+
+    #[test]
+    fn builtin_font_draws_default_text() {
+        let mut fonts = FontSystem::new_with_locale_and_db("en-US".into(), builtin_fonts());
+        let shaped = shape(&mut fonts, Key { text: "!16.6 ms".into(), face: None, px: 16.0, width: None, visible: None });
+        let glyphs: Vec<_> = shaped.buffer.layout_runs().flat_map(|run| run.glyphs.iter().map(|g| g.glyph_id)).collect();
+        assert_eq!(glyphs.len(), 8);
+        assert!(glyphs.iter().all(|&id| id != 0), "每个字都有字形，没有落到 .notdef");
+        let renderer = TextRenderer { fonts, system_fonts: None, ..TextRenderer::default() };
+        assert_eq!(renderer.face_for(None, true), Some(None), "不指定字体的文字用它画");
+    }
+
     #[test]
     fn sans_serif_falls_to_the_first_family_that_exists() {
         let mut db = fontdb::Database::new();
-        db.load_font_data(include_bytes!("../tests/data/Inter-Bold.ttf").to_vec());
+        db.load_font_data(include_bytes!("../fonts/Inter-Bold.ttf").to_vec());
         assert_eq!(first_family(&db, &["PingFang SC", "Inter", "Helvetica"]), Some("Inter"));
         assert_eq!(first_family(&db, &["PingFang SC"]), None);
     }

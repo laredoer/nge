@@ -97,6 +97,13 @@ impl Proxy {
         }
     }
 
+    /// 原样转给引擎（Android：攒着的消息、新的画面）。
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    pub fn send(&self, msg: Msg) {
+        self.engine.send(msg);
+    }
+
+    #[cfg_attr(target_os = "android", allow(dead_code))]
     pub fn prop(&self, name: &str, value: Option<&JsonValue>) {
         self.engine.send(Msg::Prop(name.to_owned(), value.cloned()));
     }

@@ -211,7 +211,15 @@ impl<A: Asset> fmt::Debug for AssetEvent<A> {
 type Job = Box<dyn FnOnce(&dyn AssetSource) -> Done + Send>;
 type Done = Box<dyn FnOnce(&mut World) + Send>;
 
-/// 按 uri 加载资源：读文件和解码在一个后台线程上做，每帧 `PreUpdate` 收回结果。
+/// 谁来读文件、解码。
+enum Worker {
+    /// 后台线程（原生）。
+    Thread(std::thread::JoinHandle<()>),
+    /// 没有线程（wasm）：任务排着，[`AssetServer::apply`] 时在当前线程上当场做。
+    Inline { jobs: Receiver<Job>, done: Sender<Done>, source: Arc<dyn AssetSource> },
+}
+
+/// 按 uri 加载资源：读文件和解码在一个后台线程上做（wasm 上在 `apply` 里当场做），每帧 `PreUpdate` 收回结果。
 #[derive(Resource)]
 pub struct AssetServer {
     jobs: Option<Sender<Job>>,
@@ -220,11 +228,14 @@ pub struct AssetServer {
     known: HashMap<(TypeId, String), u32>,
     /// 置位后后台线程不再接新任务。
     stop: Arc<AtomicBool>,
-    worker: Option<std::thread::JoinHandle<()>>,
+    worker: Mutex<Option<Worker>>,
 }
 
 impl AssetServer {
     pub fn new(source: Arc<dyn AssetSource>) -> Self {
+        if cfg!(target_arch = "wasm32") {
+            return Self::inline(source);
+        }
         let (jobs, job_rx) = mpsc::channel::<Job>();
         let (done_tx, done) = mpsc::channel::<Done>();
         let stop = Arc::new(AtomicBool::new(false));
@@ -239,7 +250,28 @@ impl AssetServer {
                 }
             })
             .expect("创建资源加载线程失败");
-        Self { jobs: Some(jobs), done: Mutex::new(done), pending: 0, known: HashMap::new(), stop, worker: Some(worker) }
+        Self::with_worker(jobs, done, stop, Worker::Thread(worker))
+    }
+
+    /// 不起线程：任务在 [`AssetServer::apply`] 时当场做（wasm 上没有线程）。
+    pub(crate) fn inline(source: Arc<dyn AssetSource>) -> Self {
+        let (jobs, job_rx) = mpsc::channel::<Job>();
+        let (done_tx, done) = mpsc::channel::<Done>();
+        Self::with_worker(jobs, done, Arc::new(AtomicBool::new(false)), Worker::Inline { jobs: job_rx, done: done_tx, source })
+    }
+
+    fn with_worker(jobs: Sender<Job>, done: Receiver<Done>, stop: Arc<AtomicBool>, worker: Worker) -> Self {
+        Self { jobs: Some(jobs), done: Mutex::new(done), pending: 0, known: HashMap::new(), stop, worker: Mutex::new(Some(worker)) }
+    }
+
+    /// 没有后台线程时，把排着的任务当场做完。
+    fn run_inline(&self) {
+        let worker = self.worker.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(Worker::Inline { jobs, done, source }) = &*worker {
+            for job in jobs.try_iter() {
+                let _ = done.send(job(&**source));
+            }
+        }
     }
 
     /// 立即返回句柄；同一种资源的同一个 uri 只加载一次。
@@ -292,6 +324,7 @@ impl AssetServer {
         loop {
             let done: Vec<Done> = {
                 let server = world.resource::<AssetServer>();
+                server.run_inline();
                 let rx = server.done.lock().unwrap_or_else(|e| e.into_inner());
                 if wait && server.pending > 0 { rx.recv().into_iter().chain(rx.try_iter()).collect() } else { rx.try_iter().collect() }
             };
@@ -319,8 +352,9 @@ impl Drop for AssetServer {
         // 排着队的不再做，后台线程读完手上这个就退出
         self.stop.store(true, Ordering::Release);
         self.jobs = None;
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
+        let worker = self.worker.get_mut().unwrap_or_else(|e| e.into_inner()).take();
+        if let Some(Worker::Thread(thread)) = worker {
+            let _ = thread.join();
         }
     }
 }
@@ -377,6 +411,28 @@ mod tests {
         assert_eq!(assets.get(a).unwrap().0, "hello");
         assert_eq!(world.resource::<AssetServer>().pending(), 0);
         assert_eq!(events::<Text>(&mut world), ["Loaded(Handle<Text>(0))"]);
+    }
+
+    /// wasm 上没有线程：任务排着，下一次收结果（不等也一样）时当场做完，包括解码时再读的相对文件。
+    #[test]
+    fn without_a_thread_loads_happen_in_apply() {
+        let mut world = World::new();
+        let source = MemorySource::default().with("asset:/a.txt", "hello").with("asset:/p.txt", "a.txt");
+        world.insert_resource(AssetServer::inline(Arc::new(source)));
+        world.init_resource::<Assets<Text>>();
+        world.init_resource::<Messages<AssetEvent<Text>>>();
+        world.init_resource::<Assets<Pointer>>();
+        world.init_resource::<Messages<AssetEvent<Pointer>>>();
+        let a = load::<Text>(&mut world, "asset:/a.txt");
+        let p = load::<Pointer>(&mut world, "asset:/p.txt");
+        let missing = load::<Text>(&mut world, "asset:/none.txt");
+        assert_eq!(world.resource::<Assets<Text>>().state(a), LoadState::Loading, "load 时不做");
+        AssetServer::apply(&mut world, false);
+        assert_eq!(world.resource::<Assets<Text>>().get(a).unwrap().0, "hello");
+        assert_eq!(world.resource::<Assets<Pointer>>().get(p).unwrap().0, "hello");
+        assert!(matches!(world.resource::<Assets<Text>>().state(missing), LoadState::Failed(_)));
+        assert_eq!(world.resource::<AssetServer>().pending(), 0);
+        AssetServer::apply(&mut world, true);
     }
 
     #[test]

@@ -1,4 +1,4 @@
-//! 渲染线程：独立的帧循环，靠 surface 的 vsync 节奏出帧，不依赖主线程。
+//! 渲染线程（原生）：独立的帧循环，靠 surface 的 vsync 节奏出帧，不依赖主线程。一帧做什么见 `frame.rs`。
 //!
 //! 主线程（平台层）只负责创建 surface、转发视口变化 / command / prop，
 //! 并在 View 离开窗口、App 进后台之前同步暂停渲染线程（[`Engine::pause`]）：
@@ -6,38 +6,26 @@
 
 use std::any::Any;
 use std::panic::AssertUnwindSafe;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender, TryRecvError};
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
-use serde_json::Value as JsonValue;
+use web_time::Instant;
 
-use crate::bridge::{ENGINE_ERROR, EngineError, FRAME_STATS};
-use crate::game::{Ctx, Emit, Game, GameFactory, Gfx, Viewport};
-use crate::stats::FrameStats;
+use crate::bridge::{ENGINE_ERROR, EngineError};
+use crate::frame::{Core, Flow, Gate, Msg, configure, request_gpu};
+use crate::game::{Emit, GameFactory};
 
-/// 单帧 dt 上限，避免卡顿后物理一步跨太远。
-const MAX_DT: f32 = 0.05;
 /// 拿不到 drawable（被遮挡、最小化）时的退避。
 const IDLE_BACKOFF: Duration = Duration::from_millis(16);
 /// 等渲染线程确认暂停的上限（正常情况下最多一帧）。
 const PAUSE_TIMEOUT: Duration = Duration::from_millis(250);
 /// 等渲染线程退出的上限。
 const QUIT_TIMEOUT: Duration = Duration::from_millis(500);
-
-/// 主线程发给渲染线程的消息。
-pub enum Msg {
-    Viewport(Viewport),
-    Command(String, JsonValue),
-    Prop(String, Option<JsonValue>),
-    /// 停止取画面和提交 GPU 命令；进入暂停后回复确认。
-    Pause(SyncSender<()>),
-    Resume,
-    Quit,
-}
 
 /// 渲染线程的句柄；drop 时让线程退出并等它结束（保证 surface 先于 View 释放）。
 pub struct Engine {
@@ -84,7 +72,8 @@ impl Engine {
         let thread = std::thread::Builder::new()
             .name("nge-render".into())
             .spawn(move || {
-                let result = std::panic::catch_unwind(AssertUnwindSafe(|| run(instance, surface, &emit, factory, rx, &flag)));
+                let emit = Rc::new(emit);
+                let result = std::panic::catch_unwind(AssertUnwindSafe(|| run(instance, surface, emit.clone(), factory, rx, &flag)));
                 let error = match result {
                     Ok(Ok(())) => None,
                     Ok(Err(e)) => Some(e),
@@ -157,117 +146,55 @@ fn panic_message(panic: &Box<dyn Any + Send>) -> String {
     format!("渲染线程 panic: {detail}")
 }
 
-struct Surface {
-    surface: wgpu::Surface<'static>,
-    config: wgpu::SurfaceConfiguration,
-    /// GPU 支持的最大纹理边长，视口超出时截断。
-    max_side: u32,
-    /// surface 已丢失（需要重建），不再尝试取画面。
-    lost: bool,
-}
-
-impl Surface {
-    fn resize(&mut self, device: &wgpu::Device, pixels: [u32; 2]) {
-        let [w, h] = pixels.map(|p| p.clamp(1, self.max_side));
-        if [self.config.width, self.config.height] != [w, h] {
-            self.config.width = w;
-            self.config.height = h;
-            self.surface.configure(device, &self.config);
-        }
-    }
-}
-
 /// 渲染线程当前的状态。
-struct Loop<'a> {
-    game: Box<dyn Game>,
-    gfx: Gfx,
-    surface: Surface,
-    emit: &'a Emit,
+struct Loop {
+    core: Core,
     rx: Receiver<Msg>,
-}
-
-enum Flow {
-    Continue,
-    Pause(SyncSender<()>),
-    Quit,
-}
-
-/// WebGPU 默认上限，硬件做不到的按硬件的来（iOS 模拟器的阶段间变量比默认少一个）。
-fn device_limits(supported: &wgpu::Limits) -> wgpu::Limits {
-    wgpu::Limits::default().or_worse_values_from(supported)
 }
 
 fn run(
     instance: wgpu::Instance,
     surface: wgpu::Surface<'static>,
-    emit: &Emit,
+    emit: Rc<Emit>,
     factory: GameFactory,
     rx: Receiver<Msg>,
     in_frames: &AtomicBool,
 ) -> Result<(), String> {
     // 等到第一个有效视口、且没有处于暂停时再初始化 GPU；期间收到的消息先攒着
-    let mut pending = Vec::new();
-    let mut paused = false;
-    let mut viewport = None;
-    while paused || viewport.is_none() {
-        match rx.recv().map_err(|_| "主线程已断开".to_string())? {
-            Msg::Viewport(v) if !v.is_empty() => viewport = Some(v),
-            Msg::Viewport(_) => {}
-            Msg::Pause(ack) => {
-                paused = true;
-                let _ = ack.send(());
-            }
-            Msg::Resume => paused = false,
-            Msg::Quit => return Ok(()),
-            other => pending.push(other),
+    let mut gate = Gate::default();
+    let viewport = loop {
+        if let Some(viewport) = gate.ready() {
+            break viewport;
         }
-    }
-    let viewport = viewport.expect("循环保证已有视口");
-
-    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-        compatible_surface: Some(&surface),
-        ..Default::default()
-    }))
-    .map_err(|e| e.to_string())?;
-    let descriptor = wgpu::DeviceDescriptor { required_limits: device_limits(&adapter.limits()), ..Default::default() };
-    let (device, queue) = pollster::block_on(adapter.request_device(&descriptor)).map_err(|e| e.to_string())?;
-    device.on_uncaptured_error(Arc::new(|e| log::error!("wgpu 错误: {e}")));
-
-    let max_side = device.limits().max_texture_dimension_2d;
-    let [w, h] = viewport.pixels.map(|p| p.clamp(1, max_side));
-    let mut config = surface.get_default_config(&adapter, w, h).ok_or("surface 不被该 adapter 支持")?;
-    // Fifo：get_current_texture 阻塞到下一个 vsync，渲染线程自己就有了节奏
-    config.present_mode = wgpu::PresentMode::Fifo;
-    config.desired_maximum_frame_latency = 2;
-    surface.configure(&device, &config);
-
-    let gfx = Gfx { device, queue, format: config.format, viewport };
-    let game = factory(&gfx);
-    let mut state = Loop {
-        game,
-        gfx,
-        surface: Surface { surface, config, max_side, lost: false },
-        emit,
-        rx,
+        if !gate.push(rx.recv().map_err(|_| "主线程已断开".to_string())?) {
+            return Ok(());
+        }
     };
-    for msg in pending {
-        state.apply(msg);
+
+    // 等的时候换过画面（Android 切了一次后台）就用新的
+    let surface = gate.surface.take().unwrap_or(surface);
+    let gpu = pollster::block_on(request_gpu(&instance, surface))?;
+    let (gfx, surface, cache) = configure(gpu, viewport)?;
+    let game = factory(&gfx);
+    let mut state = Loop { core: Core::new(game, gfx, surface, emit, cache), rx };
+    for msg in gate.take() {
+        state.core.apply(msg);
     }
     // 先置标志再取消息：主线程看到 false 时发出的 Pause 一定会被下面第一次取到
     in_frames.store(true, Ordering::SeqCst);
     state.frames()
 }
 
-impl Loop<'_> {
+impl Loop {
     fn frames(&mut self) -> Result<(), String> {
-        let mut last = Instant::now();
-        let mut stats = FrameStats::new(last);
         loop {
+            // 处理 NSH 发来的消息（场景 JSON 解析等）也算在更新里
+            let start = Instant::now();
             // 逐条取：暂停期间 paused() 直接从 rx 收后续消息，不能先攒到本地
             loop {
                 match self.rx.try_recv() {
                     Ok(msg) => {
-                        if !self.handle(msg, &mut last, &mut stats) {
+                        if !self.handle(msg) {
                             return Ok(());
                         }
                     }
@@ -275,22 +202,13 @@ impl Loop<'_> {
                     Err(TryRecvError::Disconnected) => return Ok(()),
                 }
             }
-
-            let now = Instant::now();
-            let dt = (now - last).as_secs_f32().min(MAX_DT);
-            last = now;
-            self.game.update(&mut Ctx::new(self.gfx.viewport, self.emit), dt);
-
-            if self.draw() {
-                if let Some(report) = stats.frame(Instant::now()) {
-                    (self.emit)(FRAME_STATS.name(), FRAME_STATS.encode(&report));
-                }
+            if self.core.step(start) {
                 continue;
             }
             // 拿不到画面时不空转；同时还能及时响应消息
             match self.rx.recv_timeout(IDLE_BACKOFF) {
                 Ok(msg) => {
-                    if !self.handle(msg, &mut last, &mut stats) {
+                    if !self.handle(msg) {
                         return Ok(());
                     }
                 }
@@ -301,17 +219,15 @@ impl Loop<'_> {
     }
 
     /// 处理一条消息；返回 false 表示该退出了。
-    fn handle(&mut self, msg: Msg, last: &mut Instant, stats: &mut FrameStats) -> bool {
-        match self.apply(msg) {
+    fn handle(&mut self, msg: Msg) -> bool {
+        match self.core.apply(msg) {
             Flow::Continue => true,
             Flow::Quit => false,
             Flow::Pause(ack) => {
                 if !self.paused(ack) {
                     return false;
                 }
-                // 暂停期间的时间不计入 dt，也不计入帧统计
-                *last = Instant::now();
-                *stats = FrameStats::new(*last);
+                self.core.resumed();
                 true
             }
         }
@@ -328,70 +244,9 @@ impl Loop<'_> {
                     let _ = ack.send(());
                 }
                 Ok(msg) => {
-                    self.apply(msg);
+                    self.core.apply(msg);
                 }
             }
         }
-    }
-
-    fn apply(&mut self, msg: Msg) -> Flow {
-        let ctx = &mut Ctx::new(self.gfx.viewport, self.emit);
-        match msg {
-            Msg::Viewport(v) => {
-                if !v.is_empty() && v != self.gfx.viewport {
-                    self.gfx.viewport = v;
-                    self.surface.resize(&self.gfx.device, v.pixels);
-                }
-            }
-            Msg::Command(name, args) => self.game.command(ctx, &name, &args),
-            Msg::Prop(name, value) => self.game.prop(ctx, &name, value.as_ref()),
-            Msg::Pause(ack) => return Flow::Pause(ack),
-            Msg::Resume => {}
-            Msg::Quit => return Flow::Quit,
-        }
-        Flow::Continue
-    }
-
-    /// 绘制一帧；返回 false 表示这一帧没拿到画面。
-    fn draw(&mut self) -> bool {
-        if self.surface.lost {
-            return false;
-        }
-        let frame = match self.surface.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
-            wgpu::CurrentSurfaceTexture::Outdated => {
-                self.surface.surface.configure(&self.gfx.device, &self.surface.config);
-                return false;
-            }
-            wgpu::CurrentSurfaceTexture::Lost => {
-                // surface 需要重建，这一版先停止渲染并上报
-                self.surface.lost = true;
-                log::error!("surface 丢失，停止渲染");
-                (self.emit)(ENGINE_ERROR.name(), ENGINE_ERROR.encode(&EngineError { message: "surface lost".into() }));
-                return false;
-            }
-            _ => return false,
-        };
-        let target = frame.texture.create_view(&Default::default());
-        let mut encoder = self.gfx.device.create_command_encoder(&Default::default());
-        self.game.render(&self.gfx, &mut encoder, &target);
-        self.gfx.queue.submit([encoder.finish()]);
-        self.gfx.queue.present(frame);
-        true
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn device_limits_never_ask_more_than_the_adapter_has() {
-        // iOS 模拟器：阶段间变量只有 15 个，比 WebGPU 默认的 16 少
-        let simulator = wgpu::Limits { max_inter_stage_shader_variables: 15, ..wgpu::Limits::default() };
-        assert_eq!(device_limits(&simulator).max_inter_stage_shader_variables, 15);
-        // 硬件更好时不多要，按默认值
-        let big = wgpu::Limits { max_texture_dimension_2d: 16384, ..wgpu::Limits::default() };
-        assert_eq!(device_limits(&big), wgpu::Limits::default());
     }
 }

@@ -1,9 +1,12 @@
 //! iOS：引擎挂在一个 UIView 上；主线程的 CADisplayLink 只采样视口，出帧在渲染线程。
+//! 手柄和硬件键盘在 display link 里每帧读一遍 GameController（见 docs/ios-input.md）。
 
 use std::cell::{Cell, OnceCell, RefCell};
+use std::collections::BTreeSet;
 use std::ptr::NonNull;
 use std::rc::{Rc, Weak};
 
+use nge_core::bridge::{GAMEPAD, GamepadInput, KEY, KEY_EVENT, KeyInput};
 use nge_core::{Engine, GameFactory, Viewport, create_surface};
 use nsh_platform_ios::{ComponentContext, ComponentFactory, NativeComponent};
 use objc2::rc::Retained;
@@ -12,11 +15,12 @@ use block2::RcBlock;
 use objc2_foundation::{NSNotification, NSNotificationCenter, NSObject, NSRunLoop, NSRunLoopCommonModes};
 use objc2_quartz_core::CADisplayLink;
 use objc2_quartz_core::CAFrameRateRange;
-use objc2_ui_kit::{UIApplication, UIApplicationDidEnterBackgroundNotification, UIApplicationState, UIApplicationWillEnterForegroundNotification, UITraitEnvironment, UIView, UIWindow};
+use objc2_ui_kit::{UIApplication, UIApplicationDidBecomeActiveNotification, UIApplicationDidEnterBackgroundNotification, UIApplicationState, UIApplicationWillEnterForegroundNotification, UIApplicationWillResignActiveNotification, UITraitEnvironment, UIView, UIWindow};
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle, UiKitDisplayHandle, UiKitWindowHandle};
 use serde_json::{Value as JsonValue, json};
 
 use crate::shared::Proxy;
+use crate::{gc, hid, pad};
 
 /// 把 `factory` 包成 NSH 原生组件工厂，注册到宿主的 `Components`。
 pub fn component(factory: GameFactory) -> ComponentFactory {
@@ -46,12 +50,36 @@ fn watch_app_state() {
         let token = unsafe { center.addObserverForName_object_queue_usingBlock(Some(name), None, None, &handler) };
         std::mem::forget(token);
     }
+    // 控制中心、来电、分屏切走焦点：App 没进后台，但输入归别人了（只管输入，不暂停渲染）
+    if let Some(mtm) = MainThreadMarker::new() {
+        let active = UIApplication::sharedApplication(mtm).applicationState() == UIApplicationState::Active;
+        INPUT_ACTIVE.with(|a| a.set(active));
+    }
+    for (name, active) in unsafe { [(UIApplicationWillResignActiveNotification, false), (UIApplicationDidBecomeActiveNotification, true)] } {
+        let handler = RcBlock::new(move |_: NonNull<NSNotification>| set_input_active(active));
+        let token = unsafe { center.addObserverForName_object_queue_usingBlock(Some(name), None, None, &handler) };
+        std::mem::forget(token);
+    }
+}
+
+/// App 失去 / 拿回焦点（主线程）：失去时按着的键和手柄补发松开，之后不读输入。
+fn set_input_active(active: bool) {
+    INPUT_ACTIVE.with(|a| a.set(active));
+    if !active {
+        LIVE.with(|live| live.borrow().iter().filter_map(Weak::upgrade).for_each(|shared| shared.release_input()));
+    }
 }
 
 struct Shared {
     // 字段按声明顺序释放：proxy（内含 Engine，join 渲染线程）先于 view
     proxy: Option<Proxy>,
     view: Retained<HostView>,
+    ctx: ComponentContext,
+    /// 转发过的硬件键盘按键。
+    keyboard: RefCell<hid::Keyboard>,
+    /// 上一帧按着的手柄键和摇杆。
+    pad_keys: RefCell<BTreeSet<&'static str>>,
+    sticks: Cell<[[f32; 2]; 2]>,
 }
 
 thread_local! {
@@ -59,6 +87,8 @@ thread_local! {
     static LIVE: RefCell<Vec<Weak<Shared>>> = const { RefCell::new(Vec::new()) };
     /// App 当前是否在前台；后台新建的 View 也要按它起步。
     static APP_ACTIVE: Cell<bool> = const { Cell::new(true) };
+    /// App 是否拿着焦点（active）：控制中心、来电横幅、分屏切走时是 false，这时不读手柄和键盘。
+    static INPUT_ACTIVE: Cell<bool> = const { Cell::new(true) };
 }
 
 /// App 进后台 / 回前台（主线程）：后台不能再提交 GPU 命令，否则会被系统杀掉。
@@ -68,6 +98,9 @@ fn set_app_active(active: bool) {
         let mut live = live.borrow_mut();
         live.retain(|w| w.strong_count() > 0);
         for shared in live.iter().filter_map(Weak::upgrade) {
+            if !active {
+                shared.release_input();
+            }
             if let Some(proxy) = &shared.proxy {
                 proxy.set_active(active);
             }
@@ -75,7 +108,71 @@ fn set_app_active(active: bool) {
     });
 }
 
+/// 视图自己或者哪一层父视图隐藏了（UIKit 没有 `isHiddenOrHasHiddenAncestor`）。
+fn hidden(view: &UIView) -> bool {
+    if view.isHidden() {
+        return true;
+    }
+    let mut current = view.superview();
+    while let Some(v) = current {
+        if v.isHidden() {
+            return true;
+        }
+        current = v.superview();
+    }
+    false
+}
+
 impl Shared {
+    fn forward(&self, code: &'static str, down: bool) {
+        let key = KeyInput { code: code.to_owned(), down, repeat: false };
+        if let Some(proxy) = &self.proxy {
+            proxy.command(KEY.name(), &KEY.encode(&key));
+        }
+        self.ctx.emit(KEY_EVENT.name(), KEY_EVENT.encode(&key));
+    }
+
+    /// 每帧读一遍手柄和硬件键盘：App 在前台、拿着焦点，视图在窗口里、自己和父视图都没隐藏时才读，不然按「什么都没按」算，按着的就松开了。
+    fn poll_input(&self) {
+        let eligible = APP_ACTIVE.with(Cell::get) && INPUT_ACTIVE.with(Cell::get) && self.view.window().is_some() && !hidden(&self.view);
+        if !eligible {
+            return self.release_input();
+        }
+        let mut keys = BTreeSet::new();
+        gc::read_keyboard(&mut keys);
+        self.update_keyboard(&keys);
+        self.update_pads(&gc::read_pads());
+    }
+
+    /// 按着的键、手柄全部补发松开，摇杆归零。
+    fn release_input(&self) {
+        self.update_keyboard(&BTreeSet::new());
+        self.update_pads(&[]);
+    }
+
+    fn update_keyboard(&self, now: &BTreeSet<&'static str>) {
+        let changes = self.keyboard.borrow_mut().update(now);
+        for (code, down) in changes {
+            self.forward(code, down);
+        }
+    }
+
+    fn update_pads(&self, readings: &[pad::Reading]) {
+        let (now, sticks) = pad::merge(readings);
+        let changes = pad::diff(&self.pad_keys.borrow(), &now, self.sticks.get(), sticks);
+        *self.pad_keys.borrow_mut() = now;
+        self.sticks.set(sticks);
+        for code in changes.released {
+            self.forward(code, false);
+        }
+        for code in changes.pressed {
+            self.forward(code, true);
+        }
+        if let (Some([left, right]), Some(proxy)) = (changes.sticks, &self.proxy) {
+            proxy.command(GAMEPAD.name(), &GAMEPAD.encode(&GamepadInput { left, right }));
+        }
+    }
+
     fn viewport(&self) -> Viewport {
         let size = self.view.bounds().size;
         let scale = unsafe { self.view.traitCollection().displayScale() };
@@ -136,6 +233,7 @@ define_class!(
         #[unsafe(method(tick:))]
         fn tick(&self, _link: &CADisplayLink) {
             let shared = self.ivars();
+            shared.poll_input();
             if let Some(proxy) = &shared.proxy {
                 proxy.tick(shared.viewport());
             }
@@ -182,7 +280,7 @@ impl GameView {
                 None
             }
         };
-        let shared = Rc::new(Shared { proxy, view });
+        let shared = Rc::new(Shared { proxy, view, ctx, keyboard: RefCell::default(), pad_keys: RefCell::default(), sticks: Cell::default() });
         let _ = shared.view.ivars().set(Rc::downgrade(&shared));
         LIVE.with(|live| {
             let mut live = live.borrow_mut();

@@ -5,6 +5,7 @@
 
 mod gpu;
 mod image;
+pub mod ktx2;
 mod server;
 mod source;
 
@@ -15,6 +16,7 @@ use bevy_ecs::prelude::*;
 use nge_ecs::{App, Plugin, PreUpdate};
 
 pub use gpu::GpuImages;
+pub use ktx2::{BlockFormat, Compressed};
 pub use image::{Image, ImageId, MAX_TEXTURE_SIDE};
 pub use server::{Asset, AssetEvent, AssetServer, Assets, Handle, LoadContext, LoadState};
 pub use source::{AssetSource, Chain, DirSource, MemorySource, SourceFiles, asset_path, bundle_dir, platform_source, set_source};

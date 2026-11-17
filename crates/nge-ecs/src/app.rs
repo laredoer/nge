@@ -9,11 +9,12 @@ use bevy_ecs::schedule::{IntoScheduleConfigs, ScheduleLabel};
 use bevy_ecs::system::ScheduleSystem;
 use glam::Vec2;
 use nge_core::bridge::{GAMEPAD, KEY, TOUCH};
-use nge_core::{Ctx, Game, GameFactory, Gfx, Viewport, wgpu};
+use nge_core::{Ctx, FrameTiming, Game, GameFactory, Gfx, Viewport, wgpu};
 use serde_json::Value as JsonValue;
 
 use crate::input::Input;
-use crate::render::{ClearColor, RenderFrame};
+use crate::perf::Perf;
+use crate::render::{ClearColor, Interleave, RenderFrame};
 use crate::resources::{NshCommand, Outbox, Props, Screen, Time};
 
 /// 第一帧 Update 之前跑一次。
@@ -45,9 +46,22 @@ pub trait Renderer: 'static {
     fn render(&mut self, world: &mut World, gfx: &Gfx, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView);
 }
 
+/// 后处理：开着时渲染器画到一张离屏纹理上，再由它画到屏幕上（见 docs/effects2d.md）。
+pub trait PostProcess: 'static {
+    /// 这一帧要不要后处理。
+    fn active(&self, world: &World) -> bool;
+    /// 每帧都调（不做后处理的帧也调）：好在用到之前把管线编好。
+    fn warm(&mut self, _world: &World, _gfx: &Gfx) {}
+    /// 把 `source`（这一帧画好的）处理后画到 `target`。
+    fn process(&mut self, world: &mut World, gfx: &Gfx, encoder: &mut wgpu::CommandEncoder, source: &wgpu::TextureView, target: &wgpu::TextureView);
+}
+
 pub struct App {
     world: World,
     renderers: Vec<Box<dyn Renderer>>,
+    post: Option<Box<dyn PostProcess>>,
+    /// 后处理用的离屏纹理，尺寸和格式变了才重建。
+    offscreen: Option<(wgpu::TextureView, [u32; 2], wgpu::TextureFormat)>,
     /// 每帧末尾轮转的消息队列（双缓冲），不轮转会无限增长。
     message_updaters: Vec<fn(&mut World)>,
     pub(crate) props: HashMap<&'static str, PropHandler>,
@@ -74,12 +88,16 @@ impl App {
         world.init_resource::<Input>();
         world.init_resource::<ClearColor>();
         world.init_resource::<RenderFrame>();
+        world.init_resource::<Interleave>();
+        world.init_resource::<Perf>();
         for schedule in [Schedule::new(Startup), Schedule::new(PreUpdate), Schedule::new(Update), Schedule::new(PostUpdate), Schedule::new(Last)] {
             world.add_schedule(schedule);
         }
         let mut app = Self {
             world,
             renderers: Vec::new(),
+            post: None,
+            offscreen: None,
             message_updaters: Vec::new(),
             props: HashMap::new(),
             commands: HashMap::new(),
@@ -129,6 +147,12 @@ impl App {
         self
     }
 
+    /// 给系统集排顺序（比如让别的插件的系统集排在自己的系统后面）。
+    pub fn configure_sets<M>(&mut self, schedule: impl ScheduleLabel, sets: impl IntoScheduleConfigs<bevy_ecs::schedule::InternedSystemSet, M>) -> &mut Self {
+        self.world.resource_mut::<Schedules>().configure_sets(schedule, sets);
+        self
+    }
+
     pub fn insert_resource(&mut self, resource: impl Resource) -> &mut Self {
         self.world.insert_resource(resource);
         self
@@ -142,6 +166,12 @@ impl App {
     /// 排在所有已注册的渲染器前面（先画，在最底下）。
     pub fn prepend_renderer(&mut self, renderer: impl Renderer) -> &mut Self {
         self.renderers.insert(0, Box::new(renderer));
+        self
+    }
+
+    /// 设置后处理（只有一个，后设的替换前面的）。
+    pub fn set_post_process(&mut self, post: impl PostProcess) -> &mut Self {
+        self.post = Some(Box::new(post));
         self
     }
 
@@ -238,13 +268,56 @@ impl Game for EcsGame {
         }
     }
 
-    fn render(&mut self, gfx: &Gfx, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView) {
-        let App { world, renderers, .. } = &mut self.0;
-        world.resource_mut::<RenderFrame>().reset();
-        for renderer in renderers {
-            renderer.render(world, gfx, encoder, target);
-        }
+    fn timing(&mut self, timing: FrameTiming) {
+        let world = &mut self.0.world;
+        let (draws, instances) = world.resource::<RenderFrame>().counts();
+        world.resource_scope(|world, mut perf: Mut<Perf>| {
+            // 资源在 bevy 里也是实体，不算
+            perf.record(timing, draws, instances, || world.query_filtered::<(), Without<bevy_ecs::resource::IsResource>>().iter(world).count() as u32);
+        });
     }
+
+    fn render(&mut self, gfx: &Gfx, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView) {
+        let App { world, renderers, post, offscreen, .. } = &mut self.0;
+        world.resource_mut::<RenderFrame>().reset();
+        if let Some(post) = post.as_mut() {
+            post.warm(world, gfx);
+        }
+        let Some(post) = post.as_mut().filter(|p| p.active(world)) else {
+            // 不做后处理时放掉离屏纹理
+            *offscreen = None;
+            for renderer in renderers {
+                renderer.render(world, gfx, encoder, target);
+            }
+            return;
+        };
+        let extent = target.texture().size();
+        let size = [extent.width, extent.height];
+        if offscreen.as_ref().is_none_or(|(_, s, f)| *s != size || *f != gfx.format) {
+            *offscreen = Some((offscreen_view(gfx, size), size, gfx.format));
+        }
+        let Some((view, ..)) = offscreen.as_ref() else { return };
+        for renderer in renderers.iter_mut() {
+            renderer.render(world, gfx, encoder, view);
+        }
+        post.process(world, gfx, encoder, view, target);
+    }
+}
+
+/// 渲染器先画到这里，后处理再从这里取。
+fn offscreen_view(gfx: &Gfx, [width, height]: [u32; 2]) -> wgpu::TextureView {
+    gfx.device
+        .create_texture(&wgpu::TextureDescriptor {
+            label: Some("post source"),
+            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: gfx.format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        })
+        .create_view(&Default::default())
 }
 
 /// 把构建 App 的函数包成引擎的游戏工厂，交给平台层注册。App 在渲染线程上构建。
@@ -265,6 +338,20 @@ mod tests {
 
     #[derive(Resource, Default)]
     struct Log(Vec<String>);
+
+    #[test]
+    fn timing_goes_into_perf_with_this_frames_draws_and_entities() {
+        let mut game = EcsGame(App::new());
+        #[derive(Component)]
+        struct Thing;
+        game.0.world.spawn_batch((0..5).map(|_| Thing));
+        game.0.world.spawn_empty();
+        game.0.world.resource_mut::<RenderFrame>().count(4, 120);
+        game.timing(FrameTiming { frame: 0.6, update: 0.001, render: 0.002, wait: 0.5 });
+        let report = *game.0.world.resource::<Perf>().report().expect("一帧就满了半秒");
+        assert_eq!((report.draws, report.instances, report.entities), (4, 120, 6), "资源不算");
+        assert!((report.wait_ms - 500.0).abs() < 1e-3, "{report:?}");
+    }
 
     #[test]
     fn remembers_added_plugins() {

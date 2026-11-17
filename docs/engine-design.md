@@ -75,10 +75,34 @@
 | **2.5D 相机** | `Camera3d::ortho` 正交投影，`camera3d.match2d` 让 3D 相机跟着 2D 相机；见 [camera25d.md](camera25d.md) | 平台跳跃终点前的 3D 箱子随相机跟随、震屏始终和关卡对齐 |
 | **示例换成生成的宿主** | 其余 8 个示例照平台跳跃改用 `#[native_components]`，删掉 dev host、`ios_app`、`HttpSource`；iOS 的前后台暂停改成组件自己监听通知；见 [generated-hosts.md](generated-hosts.md) | 每个示例 `nsh run` 能跑、`nsh check` 通过 |
 | **视差背景** | 精灵和瓦片地图的 `parallax`（一个数或 `[x, y]`），渲染和点击都按画的位置；z < 0 的精灵画在 3D 后面；见 [parallax.md](parallax.md) | 平台跳跃的远山和树按不同速度跟着相机，3D 箱子在背景前面 |
-| **M6 Android** | SurfaceView 和 Vulkan，JNI 胶水层 | 示例游戏在 Android 真机上能跑 |
+| **关卡切换和存档** | 场景的 `level` 换了值时实体全部重建、清掉一次性效果、相机直接对准，Rust 收到 `LevelStart`；TSX 的 `saved()` 把 signal 存在设备上；见 [levels.md](levels.md) | 平台跳跃两关，通关进下一关，数字键选已解锁的关，最好成绩重开后还在 |
+| **Tiled 地图导入** | `ts/tiled.ts` 的 `tiled()` 把 Tiled 的 JSON 地图转成瓦片地图和对象列表，实心、z、视差按属性；不支持的地图报错并说怎么改；见 [tiled.md](tiled.md) | 平台跳跃第三关「云端」是 Tiled 地图，对象层摆金币、敌人、移动平台 |
+| **背景重复** | 精灵的 `repeat`（`"x"`、`"y"`、`"xy"`）沿世界的轴一个挨一个铺满视野，和视差一起用；只画和视野相交的几份；见 [repeat.md](repeat.md) | 平台跳跃的远山换成一张山丘贴图横向重复，跑到哪都有 |
+| **iOS 手柄和硬件键盘** | iOS 的 display link 每帧读 GameController：手柄和 Mac 共用读数和合并，硬件键盘按 HID 用法码换成同一套键名；按着 ⌘ 的不发，进后台补发松开；见 [ios-input.md](ios-input.md) | 平台跳跃在 iPad 上用键盘或手柄玩，数字键选关 |
+| **关节和 2D 刚体带动 3D 模型** | `nge-physics2d` 的 `Joint`（焊死、转动、滑动、绳子、弹簧，带角度范围和马达），TSX 的 `scene.joints` 按精灵 id 连；模型节点的 `attach` 跟着精灵的位置和角度走；调试视图画关节；见 [joints.md](joints.md) | 平台跳跃有一串甩着的铁链吊球，终点前的 3D 箱子能推着走、跳上去 |
+| **2D 特效** | 着色器库（内置 flash、outline、wave、circle 和 grayscale、vignette、pixelate，TSX 的 `scene.shaders` 写 WGSL）；精灵的 `shader`、`params`，模板遮罩（`mask`、`masked`），2D 点光源和环境光（`scene.lighting`），后处理链（`scene.post`）；编不过的着色器报错不崩；见 [effects2d.md](effects2d.md) | 平台跳跃的金币扫过亮光，被撞回去时闪白，终点上方有圆形传送门；第三关是夜里，角色带灯、四角压暗 |
+| **3D 补齐** | 方向光阴影（`shadows`，阴影图 + 3×3 PCF）；glTF 蒙皮和骨骼 / 节点动画（`Animator`，GPU 蒙皮，模型节点的 `animation`）；`camera3d.interleave` 让模型和精灵按深度混排；见 [3d-more.md](3d-more.md) | 平台跳跃终点挂着挥动的 3D 旗子，角色从布后面跳过；箱子顶上的小箱子投下影子 |
+| **管线预热** | 着色器库到位后后台线程先编好所有 2D 精灵管线和后处理管线，渲染线程拿现成的，没编好的照常当场编；见 [pipeline-warmup.md](pipeline-warmup.md) | 平台跳跃第一次闪白、进传送门、第三关开暗角时不再卡一下 |
+| **性能面板** | 引擎记下每帧更新、渲染、等待各花多少毫秒，以及 draw call、实例数、实体数（`Perf`，`Game::timing`），左上角的面板每半秒更新（`PerfOverlay`，TSX 的 `scene.perf`）；见 [perf-overlay.md](perf-overlay.md) | 平台跳跃按 P 开关性能面板 |
+| **开发版也开优化** | `.cargo/config.toml` 让 `nsh run` 和 `cargo test` 的依赖全开优化、自己的 crate 轻度优化；帧时间基准 `frame_bench`；见 [fast-dev.md](fast-dev.md) | 基准场景一帧的更新从 6.6 ms 降到 0.19 ms，改一行引擎代码重编约 3 秒 |
+| **寻路和 AI** | 新 crate `nge-ai`：格子 A*（不切墙角、路径拉直）、小状态机 `Fsm`、追击 `Chaser`（看见就绕墙追，追丢了回家）；瓦片地图自带 `NavGrid`，精灵写 `chase` 就会追，状态变了发 `chase` 事件；见 [ai.md](ai.md) | 平台跳跃前两关的幽灵绕开平台追角色 |
+| **角色控制器** | `nge-physics2d` 的 `Character`（底下是 rapier 的 `KinematicCharacterController`）：游戏只给速度，引擎负责重力、沿墙滑、爬坡、贴地、上矮台阶、被脚下的平台带着走、推箱子；场景写 `body.kind: "character"`；见 [character.md](character.md) | 平台跳跃的角色换上它，第一关加一段斜坡 |
+| **3D 物理** | 新 crate `nge-physics3d`（rapier3d）：盒子、球、胶囊刚体，碰撞消息、接触、射线；模型节点写 `body` 就有刚体，`collide`、`push` 对模型也管用；见 [physics3d.md](physics3d.md) | 平台跳跃第一关的一摞 3D 箱子，角色跑过去撞散 |
+| **音频补齐** | 混音分组（音乐、音效、界面）各自的音量、低通、混响；带位置的声音按离相机的距离衰减、按左右定声像；`scene.audio.buses`、`sound` 的 `bus` / `x` / `y`；见 [audio-more.md](audio-more.md) | 平台跳跃夜里那关的音效有回声，幽灵发现角色时从它那儿响一声 |
+| **世界里的 UI** | `bars`：跟着精灵的进度条，值平滑过渡；`bubbles`：背景框按文字撑开的气泡，能固定在屏幕上当对话框；`typing` 打字机效果，打完发 `typed`；`Text2d.visible`、`TextBox`；见 [world-ui.md](world-ui.md) | 平台跳跃角色头顶的血条（失手三次整关重来）、每关开始时的关卡名气泡 |
+| **存档槽** | `saveSlots()`：几个槽各存一份带版本号、保存时间、概要的数据；读档时按版本一级一级升级，坏档报成 `broken` 不崩；能接过 `saved()` 的旧存档；见 [saves.md](saves.md) | 平台跳跃三个存档位，按 S 换，以前的进度自动进第一个 |
+| **本地化** | `i18n()`：每种语言一份文案表，`{参数}`、按语言的复数规则，默认跟系统语言、找不到时退到同语言别的地区和默认语言，换语言界面自己刷新；`missing()` 查缺的文案；见 [localization.md](localization.md) | 平台跳跃中英文两套文案，按 L 切 |
+| **压缩纹理** | 贴图可以是 KTX2：ASTC、BC1 / BC3 / BC7、ETC2，带 mipmap；设备支持就直接上传压缩数据，不支持在 CPU 上解成 RGBA8；`ktx2` 读写、PNG 转 KTX2（BC3）的小工具；见 [compressed-textures.md](compressed-textures.md) | 平台跳跃的远山换成 BC3 的 KTX2 |
+| **3D 粒子和拖尾** | `ParticleEmitter3d`：方向锥里发射、朝着相机的方片，透明（从远往近）或叠加；`Trail3d`：跟着实体的带子，越老越细越淡；`Billboards` 在网格之后画，被模型挡住、不写深度；场景的 `emitters3d` 和模型的 `trail`；见 [particles3d.md](particles3d.md) | 平台跳跃第一关箱子旁的篝火，被撞飞的箱子拖尾巴 |
+| **2D 渲染补齐** | `NormalMap`：法线图让受光的精灵按表面朝向明暗（灯有 `height`）；`Occluder2d`：精灵的矩形或多边形挡住开了 `shadows` 的灯，硬阴影；后处理里的 `bloom` 是内置的多遍效果；`PostEffect.layer` 可以只给 z < 0 的背景层；见 [render2d-more.md](render2d-more.md) | 平台跳跃每关有 bloom 和远景模糊，夜里的石碑有凹凸、挡住角色的灯 |
+| **3D 渲染补齐** | 材质 `blend` 的半透明网格按到相机的距离由远到近画；`SpotLight` 聚光灯；聚光灯、点光源（六面）能投影子，方向光可以分 2–4 段级联；`Animator::play(clip, fade)` 淡入淡出；glTF 的变形（morph target）和 `weights` 动画；见 [render3d-more.md](render3d-more.md) | 平台跳跃第一关有照着箱子堆、投影子的聚光灯，一只半透明的果冻靠近时从 idle 淡到 squish |
+| **Web** | `wasm32` 上浏览器主线程用 `requestAnimationFrame` 驱动引擎，只用 WebGPU；仓库里改过的 `nsh-platform-web` 支持原生组件；资源启动前取进内存，键盘、声音（第一次按键后出声）；见 [web.md](web.md) | `nsh package --target web` 打出的长坂坡在浏览器里能玩 |
+| **联网** | `nge-net`：WebSocket 连接（原生 tokio-tungstenite 在单独线程、浏览器 `WebSocket`），断线指数退避重连；postcard 协议；`NetSync` 每秒 20 次广播位置，`Remote` 缓冲 100 ms 插值、容忍乱序丢包；`Http` 的 GET / POST（原生 ureq、浏览器 fetch）；`nge-relay` 中继（房间、进出通知、心跳、人数 / 大小 / 频率上限，顺带排行榜）；场景的 `net`、TSX 的 `netRoom()` / `httpClient()`；见 [networking.md](networking.md) | 平台跳跃两个窗口同一关互相看见（半透明、头顶名字），N 开关，中继连不上照常单机，通关成绩进排行榜 |
+| **编辑器** | `examples/editor`：用 nge 做的关卡编辑器，画布就是平台跳跃的游戏视图（编辑时 `timeScale: 0`、不放角色和刚体）；带版本号的关卡文件格式 `ts/level.ts`（读入校验、保存格式化）；命令模式的撤销重做、点选 / 框选 / 拖动 / 吸附、瓦片刷、复制粘贴、属性校验都是纯函数；⌘R 用当前关卡试玩，Esc 回来；见 [editor.md](editor.md) | 平台跳跃第二关「石阶」从关卡文件读，编辑器里能打开、改、保存、直接试玩 |
+| **M6 Android** | 仓库里改过的 `nsh-platform-android` 支持 Rust 写的原生组件（`SurfaceView`），wgpu 只走 Vulkan，画面没了暂停、回来换新的 surface；Android 键码和手柄的轴换成和 Mac 一样的键名；不用 Gradle，`tools/nsh-android.sh` 编好 Java 运行时再交给 `nsh package`；Vulkan 上的管线存到磁盘（`codeCacheDir`），坏了、版本不对当没有；见 [android.md](android.md) | 平台跳跃在 Android 模拟器上能玩，第二次启动读到管线缓存 |
 
 ## 待定
 
 - 正式名称和 crate 前缀
 - 是否给 nsh 上游提 PR：iOS `run_app` 支持注册组件，以及能否从原生层直接拿到输入以降低延迟
-- 编辑器和工具链（场景编辑、资源打包）放在 M3 之后再评估
+- 工具链的其余部分（资源打包、编辑器里编辑 Tiled 地图和多个瓦片层）：关卡编辑器已经有了（见 [editor.md](editor.md)），这些等有需要再做

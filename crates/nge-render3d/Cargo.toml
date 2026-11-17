@@ -14,7 +14,7 @@ bevy_ecs.workspace = true
 glam.workspace = true
 bytemuck.workspace = true
 image.workspace = true
-gltf = { version = "1.4", default-features = false, features = ["import", "utils"] }
+gltf = { version = "1.4", default-features = false, features = ["import", "utils", "names"] }
 percent-encoding = "2"
 log.workspace = true
 

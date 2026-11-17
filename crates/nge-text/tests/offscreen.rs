@@ -11,7 +11,7 @@ use nge_text::prelude::*;
 
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 const SIZE: u32 = 128;
-const INTER: &[u8] = include_bytes!("data/Inter-Bold.ttf");
+const INTER: &[u8] = include_bytes!("../fonts/Inter-Bold.ttf");
 const FONT_URI: &str = "asset:/@t/inter.ttf";
 
 struct Offscreen {
@@ -25,7 +25,7 @@ impl Offscreen {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let adapter = pollster::block_on(instance.request_adapter(&Default::default())).ok()?;
         let (device, queue) = pollster::block_on(adapter.request_device(&Default::default())).ok()?;
-        let gfx = Gfx { device, queue, format: FORMAT, viewport: Viewport { size: [SIZE as f32; 2], pixels: [SIZE; 2] } };
+        let gfx = Gfx { screen: None, pipeline_cache: None, device, queue, format: FORMAT, viewport: Viewport { size: [SIZE as f32; 2], pixels: [SIZE; 2] } };
         let build = Arc::new(build);
         let game = nge_ecs::factory(move || {
             let mut app = App::new();
@@ -193,4 +193,75 @@ fn zoom_scales_world_text() {
     .unwrap();
     let big = zoomed.frame_until_drawn().len();
     assert!(big as f32 > small as f32 * 3.0, "放大两倍，亮像素约四倍：{small} → {big}");
+}
+
+/// 排在文字渲染器后面，记下这一帧到它为止的（draw 次数，实例数）。
+struct CountProbe(Arc<Mutex<(u32, u32)>>);
+
+impl nge_ecs::Renderer for CountProbe {
+    fn render(&mut self, world: &mut World, _: &Gfx, _: &mut wgpu::CommandEncoder, _: &wgpu::TextureView) {
+        *self.0.lock().unwrap() = world.resource::<nge_ecs::RenderFrame>().counts();
+    }
+}
+
+#[test]
+fn all_text_is_one_draw() {
+    let counts = Arc::new(Mutex::new((0, 0)));
+    let probe = counts.clone();
+    let build = scene(memory(), |world, font| {
+        world.spawn((label(font), Transform2d::default()));
+        world.spawn((label(font), Transform2d::from_xy(0.0, 30.0)));
+    });
+    let Some(mut offscreen) = Offscreen::new(move |app| {
+        build(app);
+        app.add_renderer(CountProbe(probe.clone()));
+    }) else {
+        return;
+    };
+    offscreen.frame_until_drawn();
+    assert_eq!(*counts.lock().unwrap(), (1, 2), "两段字一次 draw");
+}
+
+/// 排在文字渲染器后面，记下所有文字框的大小。
+struct BoxProbe(Arc<Mutex<Vec<Vec2>>>);
+
+impl nge_ecs::Renderer for BoxProbe {
+    fn render(&mut self, world: &mut World, _: &Gfx, _: &mut wgpu::CommandEncoder, _: &wgpu::TextureView) {
+        *self.0.lock().unwrap() = world.query::<&TextBox>().iter(world).map(|b| b.0).collect();
+    }
+}
+
+/// 摆一段 `HH`（只显示 `visible` 个字），相机缩放 `zoom`；返回亮像素和文字框。
+fn typed(visible: Option<usize>, zoom: f32) -> Option<(Vec<Vec2>, Vec<Vec2>)> {
+    let boxes = Arc::new(Mutex::new(Vec::new()));
+    let probe = boxes.clone();
+    let build = scene(memory(), move |world, font| {
+        world.spawn((Text2d { visible, ..label(font) }, Transform2d::default()));
+        world.spawn(Camera2d { zoom, ..Default::default() });
+    });
+    let mut offscreen = Offscreen::new(move |app| {
+        build(app);
+        app.add_renderer(BoxProbe(probe.clone()));
+    })?;
+    let lit = offscreen.frame_until_drawn();
+    let boxes = boxes.lock().unwrap().clone();
+    Some((lit, boxes))
+}
+
+#[test]
+fn typing_hides_the_rest_and_the_box_is_written_back() {
+    let Some((all, full_box)) = typed(None, 1.0) else {
+        return eprintln!("没有 GPU，跳过");
+    };
+    let (half, half_box) = typed(Some(1), 1.0).unwrap();
+    let right = |lit: &[Vec2]| lit.iter().fold(f32::MIN, |m, p| m.max(p.x));
+    let left = |lit: &[Vec2]| lit.iter().fold(f32::MAX, |m, p| m.min(p.x));
+    assert!((left(&half) - left(&all)).abs() < 1.0, "第一个字在原来的位置上 {} / {}", left(&half), left(&all));
+    assert!(right(&half) < right(&all) - 5.0, "第二个字没画 {} / {}", right(&half), right(&all));
+    assert_eq!(full_box.len(), 1);
+    assert_eq!(half_box, full_box, "没显示的字照样占地方");
+    let b = full_box[0];
+    assert!(b.x > 20.0 && b.x < 60.0 && b.y > 20.0 && b.y < 40.0, "24 号的 HH 大约这么大 {b}");
+    let (_, zoomed) = typed(None, 2.0).unwrap();
+    assert!((zoomed[0] - b).length() < 0.5, "世界文字的框按世界单位，不随缩放变 {b} / {}", zoomed[0]);
 }

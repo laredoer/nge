@@ -1,12 +1,15 @@
 //! 音频（kira）：按 `asset:/` 加载 [`Sound`]（wav / ogg / mp3），用 [`Audio`] 播放、循环、调音量。
 //! 没有音频设备时所有调用都是空操作。
+//! 浏览器上页面被按过、点过之前不能出声：先不建音频设备，平台层在第一次按键 / 点按的回调里调 [`unlock`]，
+//! 下一帧接上；之前的音效丢掉，循环的（音乐）排着等（见 docs/web.md）。
 
 mod audio;
 
-pub use audio::{Audio, MAX_STARTS_PER_FRAME, MAX_VOICES, Play, Voice};
+pub use audio::{Audio, Bus, DEFAULT_RANGE, MAX_STARTS_PER_FRAME, MAX_VOICES, Play, Voice, spatial};
 
 use std::io::Cursor;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use bevy_ecs::prelude::*;
 use kira::backend::mock::MockBackend;
@@ -35,26 +38,93 @@ impl Asset for Sound {
 #[derive(Default)]
 pub struct AudioPlugin {
     mock: bool,
+    /// 测试用：像浏览器那样等解锁。
+    #[cfg(test)]
+    locked: bool,
 }
 
 impl AudioPlugin {
     /// 不出声的后端（测试用），可以数正在播的声音。
     pub fn mock() -> Self {
-        Self { mock: true }
+        Self { mock: true, ..Self::default() }
     }
+
+    #[cfg(test)]
+    pub(crate) fn locked_mock() -> Self {
+        Self { mock: true, locked: true }
+    }
+
+    fn locked(&self) -> bool {
+        #[cfg(test)]
+        if self.locked {
+            return true;
+        }
+        cfg!(target_arch = "wasm32") && !self.mock
+    }
+}
+
+/// [`unlock`] 建好、等 [`Audio`] 下一帧接过去的音频设备。
+static UNLOCKED: Mutex<Option<Manager>> = Mutex::new(None);
+/// 接上了解锁来的设备、还活着的 [`Audio`] 有几个：都没了（游戏视图重建）时下一次手势再建。
+pub(crate) static LIVE: AtomicUsize = AtomicUsize::new(0);
+
+pub(crate) fn take_unlocked() -> Option<Manager> {
+    UNLOCKED.lock().unwrap_or_else(|e| e.into_inner()).take()
+}
+
+/// 没有活着的、也没有等着接的设备时用 `make` 建一个。
+#[cfg_attr(not(any(target_arch = "wasm32", test)), allow(dead_code))]
+pub(crate) fn unlock_with(make: impl FnOnce() -> Option<Manager>) {
+    if LIVE.load(Ordering::SeqCst) > 0 {
+        return;
+    }
+    let mut slot = UNLOCKED.lock().unwrap_or_else(|e| e.into_inner());
+    if slot.is_none() {
+        *slot = make();
+    }
+}
+
+/// 浏览器：在用户按键、点按的事件回调里（同步）调用，建音频设备（WebAudio 只能在这时候开始出声）。
+/// 已经有设备时什么都不做；游戏视图重建（旧的 [`Audio`] 没了）后的下一次手势再建。
+/// 设备建好以后浏览器把它挂起了（切走标签页、系统打断）由平台层恢复。
+#[cfg(target_arch = "wasm32")]
+pub fn unlock() {
+    static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    unlock_with(|| match AudioManager::<DefaultBackend>::new(AudioManagerSettings::default()) {
+        Ok(m) => Some(Manager::Device(m)),
+        Err(e) => {
+            if !WARNED.swap(true, Ordering::Relaxed) {
+                log::warn!("没有可用的音频设备，声音关掉: {e}");
+            }
+            None
+        }
+    });
+}
+
+#[cfg(test)]
+pub(crate) fn mock_manager() -> Manager {
+    Manager::Mock(AudioManager::<MockBackend>::new(AudioManagerSettings::default()).expect("mock 后端"))
 }
 
 impl Plugin for AudioPlugin {
     fn build(&self, app: &mut App) {
         nge_assets::ensure_plugin(app);
+        if self.locked() {
+            app.init_asset::<Sound>()
+                .insert_resource(Audio::locked())
+                .add_systems(PostUpdate, audio::update.in_set(AudioUpdated));
+            return;
+        }
         let manager = if self.mock {
             AudioManager::<MockBackend>::new(AudioManagerSettings::default()).map(Manager::Mock).map_err(|()| "mock 后端创建失败".to_owned())
         } else {
             AudioManager::<DefaultBackend>::new(AudioManagerSettings::default()).map(Manager::Device).map_err(|e| e.to_string())
         };
         let manager = manager.inspect_err(|e| log::warn!("没有可用的音频设备，声音关掉: {e}")).ok();
+        let mut audio = Audio::new(manager.map(Mutex::new));
+        audio.add_buses();
         app.init_asset::<Sound>()
-            .insert_resource(Audio::new(manager.map(Mutex::new)))
+            .insert_resource(audio)
             .add_systems(PostUpdate, audio::update.in_set(AudioUpdated));
     }
 }
@@ -69,7 +139,7 @@ pub(crate) enum Manager {
 }
 
 pub mod prelude {
-    pub use crate::{Audio, AudioPlugin, Play, Sound, Voice};
+    pub use crate::{Audio, AudioPlugin, Bus, Play, Sound, Voice};
 }
 
 /// 测试用的工具。

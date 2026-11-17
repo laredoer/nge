@@ -5,7 +5,8 @@ use std::collections::{HashMap, HashSet};
 use bevy_ecs::prelude::*;
 use glam::{Vec2, Vec4};
 use nge_ecs::Time;
-use nge_render2d::{Parallax, Sprite, SpriteImage, Transform2d};
+use nge_render2d::{Parallax, Repeat, Sprite, SpriteImage, Transform2d};
+use nge_text::PerfOverlay;
 
 use crate::anim::FrameAnimation;
 use crate::behave::{Spin, Tappable};
@@ -72,9 +73,9 @@ pub(crate) fn sync_sprites(mut commands: Commands, scene: Res<Scene>, mut assets
         };
         let mut entity = commands.entity(entity);
         entity.remove::<(Spin, Tappable)>().insert(sprite);
-        // 有刚体时位置归物理管：声明的位置没变就只更新缩放和 z，不把它拉回去
+        // 有刚体时位置归物理管、有 chase 时归追击管：声明的位置没变就只更新缩放和 z，不把它拉回去
         let placed = before.is_some_and(|b| (b.x, b.y, b.rotation) == (node.x, node.y, node.rotation));
-        if node.body.is_some() && placed {
+        if (node.body.is_some() || node.chase.is_some()) && placed {
             entity.queue(move |mut e: EntityWorldMut| {
                 if let Some(mut t) = e.get_mut::<Transform2d>() {
                     (t.scale, t.z) = (transform.scale, transform.z);
@@ -101,6 +102,20 @@ pub(crate) fn sync_sprites(mut commands: Commands, scene: Res<Scene>, mut assets
             }
             None => entity.remove::<Parallax>(),
         };
+        match node.repeat {
+            Some(r) => {
+                if node.body.is_some() {
+                    log::warn!("节点 {:?} 有 body 又设了 repeat：只有原来那一份有碰撞体", node.id);
+                }
+                if node.tap {
+                    log::warn!("节点 {:?} 设了 tap 又设了 repeat：只有原来那一份能点", node.id);
+                }
+                entity.insert(Repeat::from(r))
+            }
+            None => entity.remove::<Repeat>(),
+        };
+        crate::effects::apply_sprite(&mut entity, node, &mut assets);
+        crate::ai::apply_chase(&mut entity, before, node);
         // anim 没变时接着播，不从头开始
         if before.map(|b| &b.anim) != Some(&node.anim) {
             let anim = node.anim.as_ref().and_then(|a| FrameAnimation::new(a.frames.clone(), a.fps, a.looped));
@@ -130,6 +145,15 @@ pub(crate) fn sync_time_scale(scene: Res<Scene>, mut time: ResMut<Time>, mut las
     time.scale = scale;
     time.delta = time.real_delta * scale;
     time.elapsed += f64::from(time.delta) - f64::from(old);
+}
+
+/// `scene.perf`：声明变了才写 [`PerfOverlay`]，Rust 自己开关的不会被每帧覆盖；声明去掉时关掉。
+pub(crate) fn sync_perf(scene: Res<Scene>, mut overlay: ResMut<PerfOverlay>, mut last: Local<Option<bool>>) {
+    if *last == scene.perf {
+        return;
+    }
+    *last = scene.perf;
+    overlay.0 = scene.perf.unwrap_or(false);
 }
 
 #[cfg(test)]
@@ -163,6 +187,26 @@ mod tests {
         assert_eq!(parallax(&mut app), None, "无穷大按 1（不加视差）");
         frame(&mut app, Some(json!({ "sprites": [{ "id": "far", "w": 10 }] })));
         assert_eq!(parallax(&mut app), None, "去掉就回到跟着世界走");
+    }
+
+    #[test]
+    fn repeat_is_declared_and_removed() {
+        let mut app = app();
+        let repeat = |app: &mut nge_ecs::App| {
+            let world = app.world_mut();
+            world.query::<&nge_render2d::Repeat>().iter(world).next().copied()
+        };
+        frame(&mut app, Some(json!({ "sprites": [{ "id": "hills", "w": 10, "repeat": "x" }] })));
+        assert_eq!(repeat(&mut app), Some(nge_render2d::Repeat { x: true, y: false }));
+        frame(&mut app, Some(json!({ "sprites": [{ "id": "hills", "w": 10, "repeat": "xy" }] })));
+        assert_eq!(repeat(&mut app), Some(nge_render2d::Repeat { x: true, y: true }));
+        frame(&mut app, Some(json!({ "sprites": [{ "id": "hills", "w": 10, "repeat": "y" }] })));
+        assert_eq!(repeat(&mut app), Some(nge_render2d::Repeat { x: false, y: true }));
+        frame(&mut app, Some(json!({ "sprites": [{ "id": "hills", "w": 10 }] })));
+        assert_eq!(repeat(&mut app), None, "去掉就只画一份");
+        frame(&mut app, Some(json!({ "sprites": [{ "id": "hills", "w": 10, "repeat": "x" }] })));
+        frame(&mut app, Some(json!({ "sprites": [{ "id": "hills", "w": 10, "repeat": "z" }] })));
+        assert_eq!(repeat(&mut app), Some(nge_render2d::Repeat { x: true, y: false }), "写错的值整份场景解析失败，保持上一份");
     }
 
     #[test]
@@ -254,6 +298,25 @@ mod tests {
         let time = *app.world().resource::<Time>();
         assert_eq!((time.scale, time.delta), (1.0, 0.5), "去掉 timeScale 回到 1");
         assert!((time.elapsed - 0.75).abs() < 1e-6, "elapsed 按改过的 delta 算 {}", time.elapsed);
+    }
+
+    #[test]
+    fn perf_panel_follows_the_scene_only_when_the_declaration_changes() {
+        let mut app = app();
+        let on = |app: &nge_ecs::App| app.world().resource::<PerfOverlay>().0;
+        frame(&mut app, Some(json!({ "sprites": [] })));
+        assert!(!on(&app));
+        frame(&mut app, Some(json!({ "perf": true })));
+        assert!(on(&app));
+        // Rust 关掉后，场景没改就不再打开
+        app.world_mut().resource_mut::<PerfOverlay>().0 = false;
+        frame(&mut app, Some(json!({ "perf": true })));
+        assert!(!on(&app));
+        frame(&mut app, Some(json!({ "perf": false })));
+        frame(&mut app, Some(json!({ "perf": true })));
+        assert!(on(&app));
+        frame(&mut app, Some(json!({ "sprites": [] })));
+        assert!(!on(&app), "去掉声明就关");
     }
 
     #[test]

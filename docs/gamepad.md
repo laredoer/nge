@@ -1,4 +1,4 @@
-# 手柄（Mac）
+# 手柄（Mac，iOS 见 ios-input.md）
 
 > 前置：键盘（[keyboard.md](keyboard.md)）。
 
@@ -45,14 +45,14 @@
 ## 实现上的决定
 
 - 新文件 `crates/nge-platform/src/pad.rs`：手柄一帧的读数 `Reading`（按钮按着没有、摇杆和扳机的值）→ 按着的键名、死区后的摇杆，几个读数合并，和上一帧比出要转发的松开 / 按下 / 摇杆，都是纯函数，单元测试覆盖。
-- 补发松开有四处：每帧读数、任何窗口 resign key 的通知、视图离开窗口、视图被隐藏（`viewDidHide`，display link 这时可能不回调）。`macos.rs` 只负责从 `GCController` / `GCExtendedGamepad` 读数。
+- 补发松开有四处：每帧读数、任何窗口 resign key 的通知、视图离开窗口、视图被隐藏（`viewDidHide`，display link 这时可能不回调）。从 `GCController` / `GCExtendedGamepad` 读数在 `gc.rs`，macOS 和 iOS 共用。
 - 只认 `extendedGamepad`（现在的手柄都有）；老的 micro gamepad（Siri Remote）不认。
 - 引擎侧：`nge-core` 增加内置 command `gamepad`（保留名）和 `GamepadInput`；`nge-ecs` 的 `Input` 记两根摇杆，`App::command` 收它。
-- iOS 也有 GameController，读数和合并逻辑都在 `pad.rs` 里，以后 iOS 只要在自己的 display link 里调一下；这次不做。
+- iOS 也有 GameController，读数（`gc.rs`）和合并逻辑（`pad.rs`）两边共用，见 [ios-input.md](ios-input.md)。
 
 ## 不做
 
-- iOS / Android 的手柄、多人分手柄、震动、手柄灯、键位重映射、扳机模拟量、陀螺仪 / 触摸板。
+- Android 的手柄（iOS 后来做了，见 [ios-input.md](ios-input.md)）、多人分手柄、震动、手柄灯、键位重映射、扳机模拟量、陀螺仪 / 触摸板。
 - 「按住不放自动重复」：菜单要的话游戏自己按时间做。
 
 ## 验收记录（2026-11-04，Mac）

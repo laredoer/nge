@@ -55,11 +55,11 @@ nsh 0.3 的 `nsh/keymap` 只报快捷键「按下了」（`KeyCommand`），没�
 - 平台层自己记一份按着的键，用来补发松开；引擎那边的 `Input` 只看收到的事件。松开只要按下时转发过就转发，不管当时焦点在哪。
 - 「切走时补发松开」有三处：任何窗口 resign key 的通知、display link 的每帧回调、每个按键事件开头；视图离开窗口时也补发。
 - 按着 ⌘ 按下的键不转发；松开 ⌘ 以后这个键的自动重复会当成一次新的按下转发（`repeat: false`），引擎和 TSX 的状态一致。
-- 判断逻辑（`keys::decide`）是不依赖 AppKit 的纯函数，单元测试覆盖；`macos.rs` 只负责从 `NSEvent` / `NSWindow` 取出事实。
+- 判断逻辑（`input::decide`，在 `input.rs`，浏览器也用它，见 [web.md](web.md)）是不依赖 AppKit 的纯函数，单元测试覆盖；`macos.rs` 只负责从 `NSEvent` / `NSWindow` 取出事实。
 
 ## 范围外
 
-- iOS / iPad 的硬件键盘（`pressesBegan`）、Android
+- Android（iOS / iPad 的硬件键盘后来用 GameController 做了，见 [ios-input.md](ios-input.md)）
 - 手柄：见 [gamepad.md](gamepad.md)
 - 文本输入（游戏里打字）、键位重映射
 

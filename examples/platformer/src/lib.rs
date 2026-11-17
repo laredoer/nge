@@ -1,4 +1,4 @@
-//! 平台跳跃：关卡（瓦片地图）、金币、终点和相机都在 `App.tsx` 里声明；
+//! 平台跳跃：关卡（瓦片地图）、金币、终点和相机都在 `game.tsx` 里声明；
 //! Rust 只管每帧的角色控制：读键盘、看脚下有没有地、设速度，踩敌人、被敌人撞或掉下去了送回起点，按 R 重新开始；
 //! 起跳、踩敌人和掉坑的音效也在这里放。
 
@@ -15,11 +15,11 @@ use nge_ecs::{App, Input, Outbox, Startup, Time, Update};
 use nge_physics2d::{Contact, Physics, Velocity};
 use nge_render2d::{Render2dPlugin, Transform2d};
 use nge_render3d::Render3dPlugin;
-use nge_scene::{SceneId, ScenePlugin};
+use nge_scene::{LevelStart, SceneId, ScenePlugin};
 use nsh_core::prelude::assets;
 use serde::Serialize;
 
-/// 角色精灵的 id（`App.tsx` 里声明）。
+/// 角色精灵的 id（`game.tsx` 里声明）。
 pub const PLAYER: &str = "player";
 /// 掉出关卡、被送回起点时发给 TSX。
 pub const RESPAWN: EventKey<Respawn> = EventKey::new("respawn");
@@ -66,6 +66,7 @@ const RIGHT: [&str; 4] = ["ArrowRight", "KeyD", "GamepadRight", "GamepadLeftStic
 const JUMP_KEYS: [&str; 4] = ["Space", "ArrowUp", "KeyW", "GamepadA"];
 /// 手柄的菜单键（Xbox ≡ / PS Options / Switch +）也能重来。
 const RESTART_KEYS: [&str; 2] = ["KeyR", "GamepadMenu"];
+const PERF_KEY: &str = "KeyP";
 const JUMP_SOUND: &str = "asset:/@platformer/jump.wav";
 const FALL_SOUND: &str = "asset:/@platformer/fall.wav";
 const STOMP_SOUND: &str = "asset:/@platformer/stomp.wav";
@@ -147,22 +148,14 @@ fn control(
     // 碰到的敌人：从上面落下来是踩到，别的方向是被撞
     let (stomps, hits): (Vec<&Contact>, Vec<&Contact>) =
         contacts.iter().filter(|c| is_enemy(c.other) && !ctl.stomped.contains(&c.other)).partition(|c| c.normal.y > GROUND_NORMAL);
-    // 脚下的东西（法线朝上）；移动平台有速度，地图的碰撞体没有。同时踩着地面和平台时跟着动得快的那个
-    let ground = contacts
-        .iter()
-        .filter(|c| c.normal.y > GROUND_NORMAL)
-        .map(|c| physics.velocity(c.other).map_or(Vec2::ZERO, |g| g.linear))
-        .max_by(|a, b| a.length_squared().total_cmp(&b.length_squared()));
-    // 刚起跳的下一帧可能还有地面的预测接触点：比脚下往上走得快就不算着地，免得连跳两次（上升的平台上照样能跳）
-    let grounded = ground.is_some_and(|g| v.linear.y - g.y <= 1.0);
+    // 脚下有东西（法线朝上）。角色控制器的接触是走完这一帧之后贴着的，起跳后的下一帧已经离开地面
+    let grounded = contacts.iter().any(|c| c.normal.y > GROUND_NORMAL);
     ctl.airborne = if grounded { 0.0 } else { ctl.airborne + dt };
     ctl.jump_pressed = if JUMP_KEYS.iter().any(|k| input.key_pressed(k)) { 0.0 } else { ctl.jump_pressed + dt };
 
     let accel = if grounded { GROUND_ACCEL } else { AIR_ACCEL };
     let mut velocity = v.linear;
-    // 站在横移的平台上：跟着平台走（关卡没有摩擦，不加的话平台会从脚底下滑走）
-    let carry = ground.filter(|_| grounded).map_or(0.0, |g| g.x);
-    velocity.x = move_toward(velocity.x, input.axis(&LEFT, &RIGHT) * SPEED + carry, accel * dt);
+    velocity.x = move_toward(velocity.x, input.axis(&LEFT, &RIGHT) * SPEED, accel * dt);
     let holding = JUMP_KEYS.iter().any(|k| input.key_down(k));
     if ctl.jump_pressed <= BUFFER && ctl.airborne <= COYOTE {
         // 缓冲里的跳到落地时键已经松开了：直接按短跳
@@ -201,6 +194,13 @@ fn control(
     }
 }
 
+/// 换关：重生点、掉坑次数、踩过的敌人都是上一关的，重新来。
+fn reset_on_level_start(mut starts: MessageReader<LevelStart>, mut ctl: ResMut<Controller>) {
+    if starts.read().count() > 0 {
+        *ctl = Controller::default();
+    }
+}
+
 pub fn app() -> App {
     build(AudioPlugin::default())
 }
@@ -219,7 +219,7 @@ fn build(audio: AudioPlugin) -> App {
         .init_resource::<Sfx>()
         .add_systems(Startup, load_sfx)
         .init_resource::<debug::DebugView>()
-        .add_systems(Update, (control, debug::debug_view).chain());
+        .add_systems(Update, (reset_on_level_start, control, debug::debug_view, toggle_perf).chain());
     app
 }
 
@@ -231,6 +231,9 @@ pub fn factory() -> nge_core::GameFactory {
 #[nsh_core::prelude::native_module("platformer/native")]
 fn native(registry: &mut nsh_core::prelude::Registry) {
     registry.assets(assets!());
+    // Android 的生成宿主不调组件注册函数：在这里把游戏视图注册进仓库里改过的 nsh-platform-android（见 docs/android.md）
+    #[cfg(target_os = "android")]
+    nge_platform::android::register(factory());
 }
 
 /// 把游戏视图注册进生成的宿主。
@@ -244,6 +247,13 @@ fn components(components: &nsh_platform_macos::Components) {
 #[nsh_core::prelude::native_components(ios)]
 fn components(components: &nsh_platform_ios::Components) {
     components.register(nge_core::GAME_COMPONENT, nge_platform::ios::component(factory()));
+}
+
+/// 按 P 开关左上角的性能面板（见 docs/perf-overlay.md）。
+fn toggle_perf(input: Res<Input>, mut overlay: ResMut<nge_text::PerfOverlay>) {
+    if input.key_pressed(PERF_KEY) {
+        overlay.0 = !overlay.0;
+    }
 }
 
 #[cfg(test)]
@@ -265,7 +275,7 @@ mod tests {
         json!({
             "physics": { "gravity": [0, -1800] },
             "tilemaps": [{ "id": "level", "texture": "asset:/@platformer/tiles.png", "grid": [3, 1], "tile": 32, "cols": 40, "x": -640, "y": 0, "data": data, "solid": [1], "friction": 0 }],
-            "sprites": [{ "id": PLAYER, "w": 24, "h": 32, "y": 16, "body": { "fixedRotation": true, "friction": 0 } }],
+            "sprites": [{ "id": PLAYER, "w": 24, "h": 32, "y": 16, "body": { "kind": "character", "friction": 0 } }],
         })
     }
 
@@ -281,6 +291,26 @@ mod tests {
 
     fn key(app: &mut App, code: &str, down: bool) {
         app.command("key", &json!({ "code": code, "down": down }));
+    }
+
+    #[test]
+    fn networking_never_blocks_and_remote_players_are_not_the_player() {
+        let mut app = app();
+        let mut scene = level(None);
+        // 连不上的中继：照常单机玩，状态是连接中
+        scene["net"] = json!({ "url": "ws://127.0.0.1:1", "room": "platformer-1", "name": "P100", "sync": [PLAYER] });
+        scene["sprites"].as_array_mut().unwrap().push(json!({ "id": "net:7:player", "x": 100, "y": 16, "w": 24, "h": 32, "color": "#5dade280" }));
+        app.prop("scene", Some(&scene));
+        let started = std::time::Instant::now();
+        let events = run(&mut app, 20);
+        key(&mut app, "ArrowRight", true);
+        run(&mut app, 30);
+        assert!(started.elapsed().as_secs_f32() < 2.0, "联网不卡主循环");
+        assert!(events.iter().any(|(name, e)| name == "net" && e["status"] == "connecting"), "{events:?}");
+        assert!(player(&mut app).1.x > 0.0, "自己照常走");
+        let world = app.world_mut();
+        let (_, t) = world.query::<(&SceneId, &Transform2d)>().iter(world).find(|(id, _)| id.0 == "net:7:player").unwrap();
+        assert_eq!(t.translation, Vec2::new(100.0, 16.0), "没收到数据的远端角色不动，也不受控制");
     }
 
     #[test]
@@ -435,7 +465,34 @@ mod tests {
         let respawn = (0..120).find_map(|_| run(&mut app, 1).into_iter().find(|(n, _)| n == "respawn")).expect("掉进坑里");
         assert_eq!(respawn.1, json!({ "falls": 1 }));
         let (p, v) = player(&mut app);
-        assert!((p - start).length() < 0.1 && v.length() < 1e-3, "送回起点、速度清零 {p} {v}");
+        assert!((p - start).length() < 0.5 && v.length() < 1e-3, "送回起点、速度清零 {p} {v}");
+    }
+
+    /// 换关时重生点、掉坑次数重新算：新关卡的起点不一样。
+    #[test]
+    fn a_new_level_resets_the_spawn_and_the_falls() {
+        let mut app = app();
+        let scene = |level: u32, x: f32| {
+            let mut s = level_with_pit();
+            s["level"] = json!(level);
+            s["sprites"][0]["x"] = json!(x);
+            s
+        };
+        app.prop("scene", Some(&scene(1, 0.0)));
+        run(&mut app, 20);
+        key(&mut app, "ArrowRight", true);
+        (0..120).find(|_| run(&mut app, 1).iter().any(|(n, _)| n == "respawn")).expect("第一关掉坑");
+        key(&mut app, "ArrowRight", false);
+        app.prop("scene", Some(&scene(2, -200.0)));
+        run(&mut app, 20);
+        key(&mut app, "ArrowRight", true);
+        let respawn = (0..240).find_map(|_| run(&mut app, 1).into_iter().find(|(n, _)| n == "respawn")).expect("第二关掉坑");
+        assert_eq!(respawn.1, json!({ "falls": 1 }), "掉坑次数从 0 重新数");
+        assert!((player(&mut app).0.x + 200.0).abs() < 0.1, "送回第二关的起点");
+    }
+
+    fn level_with_pit() -> Value {
+        level(Some((22, 24)))
     }
 
     fn voices(app: &mut App) -> usize {
@@ -483,17 +540,27 @@ mod tests {
         assert!(run(&mut app, 5).iter().all(|(n, _)| n != "restart"), "暂停时不重来");
     }
 
-    /// App.tsx 里用到的声音都在打包的资源里。
+    /// game.tsx 里用到的声音都在打包的资源里。
     #[test]
     fn sounds_are_bundled() {
         let uris: Vec<_> = assets!().iter().map(|f| f.uri).collect();
         for name in ["jump", "fall", "stomp", "coin", "win"] {
             assert!(uris.contains(&format!("asset:/@platformer/{name}.wav").as_str()), "{name} 不在 {uris:?}");
         }
-        let tsx = include_str!("../App.tsx");
+        let tsx = [include_str!("../game.tsx"), include_str!("../levels.ts")].concat();
         assert!(tsx.contains("asset:/@platformer/coin.wav") && tsx.contains("asset:/@platformer/win.wav"));
-        assert!(tsx.contains(&format!("id: `{ENEMY}${{i}}`")), "App.tsx 的敌人 id 用 {ENEMY} 开头");
+        assert!(tsx.contains(&format!("id: `{ENEMY}${{i}}`")), "levels.ts 的敌人 id 用 {ENEMY} 开头");
         assert!(uris.contains(&"asset:/@platformer/crate.glb") && tsx.contains("asset:/@platformer/crate.glb"), "2.5D 的箱子");
+        assert!(uris.contains(&"asset:/@platformer/hills.ktx2") && tsx.contains("asset:/@platformer/hills.ktx2"), "横向重复的远山");
+        assert!(!uris.iter().any(|u| u.ends_with("hills.png")), "PNG 源图放在 tools/，不打包");
+    }
+
+    /// 远山是 BC3 压缩贴图，带 mipmap，宽高是块的整数倍（GPU 能直接用）。
+    #[test]
+    fn hills_are_a_compressed_texture() {
+        let image = nge_assets::Image::decode(include_bytes!("../assets/hills.ktx2")).unwrap();
+        let c = image.compressed.expect("压缩贴图");
+        assert_eq!((image.size, c.format, c.srgb, c.levels.len()), (nge_ecs::glam::UVec2::new(256, 160), nge_assets::BlockFormat::Bc3, true, 9));
     }
 
     #[test]
@@ -510,7 +577,7 @@ mod tests {
         let events = run(&mut app, 1);
         assert_eq!(events.iter().filter(|(n, _)| n == "restart").count(), 1, "{events:?}");
         let (p, v) = player(&mut app);
-        assert!((p - start).length() < 0.1 && v.length() < 1e-3, "回到起点、速度清零 {p} {v}");
+        assert!((p - start).length() < 0.5 && v.length() < 1e-3, "回到起点、速度清零 {p} {v}");
         assert!(run(&mut app, 10).iter().all(|(n, _)| n != "restart"), "按住不重复");
         key(&mut app, "KeyR", false);
         key(&mut app, "ArrowRight", true);
@@ -523,6 +590,94 @@ mod tests {
         let enemy = json!({ "id": format!("{ENEMY}0"), "x": x, "y": 12, "w": 24, "h": 24, "body": { "kind": "kinematic", "friction": 0 } });
         scene["sprites"].as_array_mut().unwrap().push(enemy);
         scene
+    }
+
+    /// 30° 的斜坡（和 levels.ts 的 rampOf 一样摆：顶面从 (100, 0) 到 (100 + 96√3, 96)）：角色控制器走上去一直贴着坡，走到顶上。
+    #[test]
+    fn walks_up_a_ramp() {
+        let mut app = app();
+        let mut scene = level(None);
+        let (a, b) = (Vec2::new(100.0, 0.0), Vec2::new(100.0 + 96.0 * 3f32.sqrt(), 96.0));
+        let d = b - a;
+        let n = Vec2::new(-d.y, d.x).normalize();
+        let center = (a + b) / 2.0 - n * 8.0;
+        scene["sprites"].as_array_mut().unwrap().push(json!({ "id": "ramp", "x": center.x, "y": center.y, "w": d.length(), "h": 16,
+            "rotation": d.y.atan2(d.x).to_degrees(), "body": { "kind": "fixed", "friction": 0 } }));
+        app.prop("scene", Some(&scene));
+        run(&mut app, 20);
+        key(&mut app, "ArrowRight", true);
+        let mut highest: f32 = 0.0;
+        for _ in 0..90 {
+            run(&mut app, 1);
+            highest = highest.max(player(&mut app).0.y);
+        }
+        assert!(highest > 96.0 + 15.0, "走到坡顶 {highest}");
+    }
+
+    /// 右上方的幽灵：角色走近了才追，飞过来撞到角色，角色回到起点。
+    #[test]
+    fn a_ghost_chases_once_you_come_close_and_knocks_you_back() {
+        let mut app = app();
+        let mut scene = level(None);
+        let ghost = json!({ "id": format!("{ENEMY}ghost-0"), "x": 400, "y": 60, "w": 22, "h": 22, "body": { "kind": "kinematic", "friction": 0 },
+            "chase": { "target": PLAYER, "speed": 150, "sight": 250 } });
+        scene["sprites"].as_array_mut().unwrap().push(ghost);
+        app.prop("scene", Some(&scene));
+        assert!(named(&run(&mut app, 30), "chase").is_empty(), "离得远，看不见");
+        key(&mut app, "ArrowRight", true);
+        let seen = (0..120).find_map(|_| named(&run(&mut app, 1), "chase").first().map(|e| (*e).clone())).expect("走近了");
+        assert_eq!((seen["id"].as_str(), seen["state"].as_str()), (Some("enemy-ghost-0"), Some("chase")));
+        key(&mut app, "ArrowRight", false);
+        let x = player(&mut app).0.x;
+        assert!(x > 100.0, "走了一段才看见 {x}");
+        let respawn = (0..180).find(|_| !named(&run(&mut app, 1), "respawn").is_empty());
+        assert!(respawn.is_some(), "幽灵飞过来撞到了角色");
+    }
+
+    /// 和 levels.ts 的 towerAt 一样摆的一摞 3D 箱子（边长 14、留 1 的缝）：摞着自己不倒；角色跑过 sensor 时发 collide，
+    /// 游戏推一下就散开。
+    #[test]
+    fn a_tower_of_3d_crates_stands_and_scatters_when_pushed() {
+        let mut app = app();
+        let mut scene = level(None);
+        let (x, s) = (200.0, 14.0);
+        let mut models = vec![json!({ "id": "floor", "model": "asset:/@platformer/crate.glb", "x": x, "y": -10, "z": -20, "scale": 0.001,
+            "body": { "kind": "fixed", "size": [384, 20, 192] } })];
+        for (n, (i, row)) in [(-1.0, 0.0), (0.0, 0.0), (1.0, 0.0), (-0.5, 1.0), (0.5, 1.0), (0.0, 2.0)].into_iter().enumerate() {
+            models.push(json!({ "id": format!("box-{n}"), "model": "asset:/@platformer/crate.glb", "x": x + i * (s + 1.0), "y": s / 2.0 + row * s,
+                "z": -20, "scale": s, "body": { "density": 0.5 } }));
+        }
+        scene["physics3d"] = json!({ "gravity": [0, -1800, 0] });
+        scene["models"] = json!(models);
+        scene["sprites"].as_array_mut().unwrap()[0]["body"]["collide"] = json!(true);
+        scene["sprites"].as_array_mut().unwrap().push(json!({ "id": "tower-trigger", "x": x - 3.0 * s, "y": 32, "w": 8, "h": 64, "body": { "kind": "fixed", "sensor": true } }));
+        app.prop("scene", Some(&scene));
+        let boxes = |app: &mut App| -> Vec<nge_ecs::glam::Vec3> {
+            let world = app.world_mut();
+            let mut found: Vec<(String, nge_ecs::glam::Vec3)> = world.query::<(&SceneId, &nge_render3d::Transform3d)>().iter(world)
+                .filter(|(id, _)| id.0.starts_with("box-")).map(|(id, t)| (id.0.clone(), t.translation)).collect();
+            found.sort_by(|a, b| a.0.cmp(&b.0));
+            found.into_iter().map(|(_, p)| p).collect()
+        };
+        run(&mut app, 2);
+        let stacked = boxes(&mut app);
+        run(&mut app, 120);
+        for (a, b) in stacked.iter().zip(boxes(&mut app)) {
+            assert!(a.distance(b) < 1.0, "摞着不倒 {a} → {b}");
+        }
+        key(&mut app, "ArrowRight", true);
+        let hit = (0..120).find_map(|_| {
+            named(&run(&mut app, 1), "collide").into_iter().find(|e| e["started"] == json!(true) && (e["a"] == "tower-trigger" || e["b"] == "tower-trigger")).cloned()
+        });
+        assert!(hit.is_some(), "角色跑过 sensor");
+        for n in 0..6 {
+            app.command("push", &json!({ "id": format!("box-{n}"), "x": 160 + n * 25, "y": 120 + n * 40, "z": if n % 2 == 1 { 60 } else { -60 } }));
+        }
+        run(&mut app, 90);
+        let after = boxes(&mut app);
+        let spread = after.iter().map(|p| p.x).fold(f32::MIN, f32::max) - after.iter().map(|p| p.x).fold(f32::MAX, f32::min);
+        assert!(spread > 60.0, "散开了 {after:?}");
+        assert!(after.iter().all(|p| p.y > 0.0 && p.y < 60.0), "落在地上 {after:?}");
     }
 
     fn named<'a>(events: &'a [(String, Value)], name: &str) -> Vec<&'a Value> {
@@ -594,6 +749,23 @@ mod tests {
     }
 
     #[test]
+    fn p_toggles_the_perf_panel() {
+        let mut app = app();
+        app.prop("scene", Some(&level(None)));
+        run(&mut app, 2);
+        let on = |app: &App| app.world().resource::<nge_text::PerfOverlay>().0;
+        assert!(!on(&app));
+        key(&mut app, "KeyP", true);
+        run(&mut app, 1);
+        key(&mut app, "KeyP", false);
+        run(&mut app, 3);
+        assert!(on(&app), "按一次打开，场景每帧同步也不会关掉");
+        key(&mut app, "KeyP", true);
+        run(&mut app, 1);
+        assert!(!on(&app), "再按一次关掉");
+    }
+
+    #[test]
     fn q_toggles_the_debug_view_of_queries() {
         let mut app = app();
         app.prop("scene", Some(&with_enemy(level(None), 60.0)));
@@ -618,7 +790,7 @@ mod tests {
         assert!(overlays(&mut app).is_empty(), "再按一次关掉");
     }
 
-    /// App.tsx 的金币是 sensor、角色开了 collide：走过去时发 collide，金币不挡路。
+    /// game.tsx 的金币是 sensor、角色开了 collide：走过去时发 collide，金币不挡路。
     #[test]
     fn walking_through_a_coin_reports_it() {
         let mut app = app();
@@ -682,5 +854,83 @@ mod tests {
         app.prop("scene", Some(&level(None)));
         run(&mut app, 1);
         assert!(player(&mut app).1.y.abs() < 1.0, "暂停中按的跳不留到继续后 {:?}", player(&mut app));
+    }
+
+    /// effects.ts 里自己写的着色器都编得过：按「名字: `代码`」取出来，`fn effect` 的按精灵着色器、`fn post` 的按后处理校验。
+    #[test]
+    fn demo_shaders_compile() {
+        let ts = include_str!("../effects.ts");
+        let start = ts.find("export const SHADERS").expect("有 SHADERS");
+        let end = start + ts[start..].find("\n};").expect("SHADERS 结束");
+        let mut found = 0;
+        for chunk in ts[start..end].split("`").skip(1).step_by(2) {
+            let checked = if chunk.contains("fn post(") { nge_render2d::Shaders::check_post(chunk) } else { nge_render2d::Shaders::check_sprite(chunk) };
+            if let Err(e) = checked {
+                panic!("{chunk}\n编不过：{e}");
+            }
+            found += 1;
+        }
+        assert_eq!(found, 3, "shimmer、starfield、blur");
+    }
+
+    /// 终点的旗子带蒙皮和 wave 动画：播起来布的末端前后摆。
+    #[test]
+    fn flag_waves() {
+        use nge_render3d::{Animator, Assets3d, Image, Model3d, Pose, Transform3d};
+
+        let mut app = App::new();
+        app.add_plugins(Render3dPlugin);
+        let model = app
+            .world_mut()
+            .resource_scope(|world, mut assets: Mut<Assets3d>| assets.load_gltf(&mut world.resource_mut::<Assets<Image>>(), include_bytes!("../assets/flag.glb")))
+            .unwrap();
+        let loaded = app.world().resource::<Assets3d>().model(model).unwrap();
+        assert_eq!((loaded.parts[0].skin, loaded.skeleton.skins[0].joints.len()), (Some(0), 4));
+        let flag = app.world_mut().spawn((Model3d(model), Transform3d::default(), Animator::new("wave"))).id();
+        let tip: Vec<f32> = (0..8)
+            .map(|_| {
+                app.tick(VIEWPORT, 0.125);
+                // 节点按父在前展开：骨头 0–3，最后是布
+                app.world().get::<Pose>(flag).unwrap().nodes[3].w_axis.z
+            })
+            .collect();
+        let (lo, hi) = tip.iter().fold((f32::MAX, f32::MIN), |(lo, hi), &z| (lo.min(z), hi.max(z)));
+        assert!(hi - lo > 0.1, "{tip:?}");
+    }
+
+    /// 幽灵果冻：半透明材质、一个变形目标；idle 不动，从 idle 淡到 squish 时权重慢慢起来。
+    #[test]
+    fn jelly_is_translucent_and_fades_into_a_squish() {
+        use nge_render3d::{Animator, Assets3d, Image, Model3d, Pose, Transform3d};
+
+        let uris: Vec<_> = assets!().iter().map(|f| f.uri).collect();
+        let ts = [include_str!("../game.tsx"), include_str!("../levels.ts")].concat();
+        assert!(uris.contains(&"asset:/@platformer/jelly.glb") && ts.contains("asset:/@platformer/jelly.glb"));
+        let mut app = App::new();
+        app.add_plugins(Render3dPlugin);
+        let model = app
+            .world_mut()
+            .resource_scope(|world, mut assets: Mut<Assets3d>| assets.load_gltf(&mut world.resource_mut::<Assets<Image>>(), include_bytes!("../assets/jelly.glb")))
+            .unwrap();
+        let assets = app.world().resource::<Assets3d>();
+        let loaded = assets.model(model).unwrap();
+        let names: Vec<&str> = loaded.animations.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(names, ["idle", "squish"]);
+        let part = &loaded.parts[0];
+        assert!(assets.material(part.material).blend && assets.material(part.material).base_color.w < 1.0, "半透明");
+        assert_eq!(assets.mesh(part.mesh).unwrap().targets.len(), 1);
+
+        let jelly = app.world_mut().spawn((Model3d(model), Transform3d::default(), Animator::new("idle"))).id();
+        let weight = |app: &mut App| {
+            app.tick(VIEWPORT, 0.05);
+            app.world().get::<Pose>(jelly).unwrap().weights[0][0]
+        };
+        assert_eq!((weight(&mut app), weight(&mut app)), (0.0, 0.0), "idle 不动");
+        app.world_mut().get_mut::<Animator>(jelly).unwrap().play("squish", 0.25);
+        let fading: Vec<f32> = (0..4).map(|_| weight(&mut app)).collect();
+        let full: Vec<f32> = (0..3).map(|_| weight(&mut app)).collect();
+        // 淡入时只占一部分，淡完以后按 squish 本身的曲线（0.3 秒压到底）
+        assert!(fading.iter().all(|&w| w < 0.6) && fading[3] > 0.0, "{fading:?}");
+        assert!(full.iter().any(|&w| w > 0.8), "{full:?}");
     }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "nge-core"
-description = "NSH 游戏引擎核心：Game trait、渲染线程帧循环、帧统计"
+description = "NSH 游戏引擎核心：Game trait、帧循环（原生的渲染线程、浏览器的 rAF）、帧统计"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
@@ -8,8 +8,15 @@ license.workspace = true
 
 [dependencies]
 wgpu.workspace = true
-pollster.workspace = true
 raw-window-handle.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 log.workspace = true
+web-time.workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+pollster.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen-futures.workspace = true
+web-sys = { workspace = true, features = ["HtmlCanvasElement"] }

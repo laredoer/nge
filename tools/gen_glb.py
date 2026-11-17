@@ -2,7 +2,7 @@
 """生成 nge 用的 glTF 测试 / 示例模型（.glb，贴图内嵌），只用标准库。
 
 用法：python3 tools/gen_glb.py
-输出：crates/nge-render3d/tests/data/test.glb、examples/model/assets/crate.glb
+输出：crates/nge-render3d/tests/data/{test,morph}.glb、examples/{model,platformer}/assets/crate.glb、examples/platformer/assets/{flag,jelly}.glb
 """
 import json
 import math
@@ -39,14 +39,18 @@ class Builder:
         self.gltf["bufferViews"].append(view)
         return len(self.gltf["bufferViews"]) - 1
 
-    def accessor(self, values, kind, component=5126):
-        fmt = {5126: "f", 5125: "I"}[component]
+    def accessor(self, values, kind, component=5126, vertex=True):
+        """vertex=False：不是顶点 / 索引数据（逆绑定矩阵、动画），bufferView 不写 target。"""
+        fmt = {5126: "f", 5125: "I", 5123: "H"}[component]
         flat = [c for v in values for c in (v if isinstance(v, (list, tuple)) else [v])]
-        target = 34963 if component == 5125 else 34962
+        target = (34963 if component == 5125 else 34962) if vertex else None
         acc = {"bufferView": self.view(struct.pack(f"<{len(flat)}{fmt}", *flat), target), "componentType": component, "count": len(values), "type": kind}
         if kind == "VEC3" and component == 5126:
             acc["min"] = [min(v[i] for v in values) for i in range(3)]
             acc["max"] = [max(v[i] for v in values) for i in range(3)]
+        if kind == "SCALAR" and not vertex:
+            # 动画的时间轴要写 min / max
+            acc["min"], acc["max"] = [min(values)], [max(values)]
         self.gltf["accessors"].append(acc)
         return len(self.gltf["accessors"]) - 1
 
@@ -147,6 +151,147 @@ def crate_model():
         b.write(ROOT / f"examples/{example}/assets/crate.glb")
 
 
+def quat(axis, angle):
+    """绕单位轴 axis 转 angle 弧度的四元数 (x, y, z, w)。"""
+    s = math.sin(angle / 2)
+    return (axis[0] * s, axis[1] * s, axis[2] * s, math.cos(angle / 2))
+
+
+def qmul(a, b):
+    ax, ay, az, aw = a
+    bx, by, bz, bw = b
+    return (aw * bx + ax * bw + ay * bz - az * by, aw * by - ax * bz + ay * bw + az * bx, aw * bz + ax * by - ay * bx + az * bw, aw * bw - ax * bx - ay * by - az * bz)
+
+
+def flag_model():
+    """终点的旗子：宽 1、高 0.6 的布从原点往右、往下挂，4 节骨头连成一串（每节 0.25），动画 wave 让每节错开相位绕 y 摆、绕 z 微微下垂。"""
+    b = Builder()
+    segments, width, height, rows = 4, 1.0, 0.6, 3
+    step = width / segments
+    pos, nor, joints, weights, idx = [], [], [], [], []
+    for r in range(rows):
+        for c in range(segments + 1):
+            pos.append((c * step, -height * r / (rows - 1), 0.0))
+            nor.append((0, 0, 1))
+            # 第 c 列跟着第 c - 1 节骨头（它的起点在左边一列）；第 0 列在旗杆上不动
+            joints.append((max(c - 1, 0), 0, 0, 0))
+            weights.append((1.0, 0.0, 0.0, 0.0))
+    for r in range(rows - 1):
+        for c in range(segments):
+            a, d = r * (segments + 1) + c, (r + 1) * (segments + 1) + c
+            idx += [a, d, d + 1, a, d + 1, a + 1]
+    prim = {
+        "attributes": {
+            "POSITION": b.accessor(pos, "VEC3"),
+            "NORMAL": b.accessor(nor, "VEC3"),
+            "JOINTS_0": b.accessor(joints, "VEC4", 5123),
+            "WEIGHTS_0": b.accessor(weights, "VEC4"),
+        },
+        "indices": b.accessor(idx, "SCALAR", 5125),
+        "material": 0,
+    }
+    b.gltf["meshes"] = [{"name": "cloth", "primitives": [prim]}]
+    b.gltf["materials"] = [{"name": "cloth", "pbrMetallicRoughness": {"baseColorFactor": [0.9, 0.18, 0.12, 1.0], "metallicFactor": 0.0, "roughnessFactor": 0.9}, "doubleSided": True}]
+    # 节点 0 是布（挂蒙皮），1–4 是骨头：1 在原点，后面每节往右 step
+    bones = list(range(1, segments + 1))
+    b.gltf["nodes"] = [{"name": "cloth", "mesh": 0, "skin": 0}] + [
+        {"name": f"bone{k}", **({"translation": [step, 0, 0]} if k else {}), **({"children": [k + 2]} if k + 1 < segments else {})} for k in range(segments)
+    ]
+    inverse_bind = [(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, -k * step, 0, 0, 1) for k in range(segments)]
+    b.gltf["skins"] = [{"joints": bones, "inverseBindMatrices": b.accessor(inverse_bind, "MAT4", vertex=False)}]
+    keys = 16
+    times = [i / keys for i in range(keys + 1)]
+    time_acc = b.accessor(times, "SCALAR", vertex=False)
+    channels, samplers = [], []
+    for k in range(segments):
+        values = []
+        for t in times:
+            phase = 2 * math.pi * t - k * 0.9
+            swing = math.radians(14 + 6 * k) * math.sin(phase)
+            droop = math.radians(-4) * (1 + math.sin(phase + 1.3)) * (1 if k else 0)
+            values.append(qmul(quat((0, 1, 0), swing), quat((0, 0, 1), droop)))
+        samplers.append({"input": time_acc, "output": b.accessor(values, "VEC4", vertex=False)})
+        channels.append({"sampler": k, "target": {"node": bones[k], "path": "rotation"}})
+    b.gltf["animations"] = [{"name": "wave", "channels": channels, "samplers": samplers}]
+    b.gltf["scenes"] = [{"nodes": [1, 0]}]
+    b.gltf["scene"] = 0
+    b.write(ROOT / "examples/platformer/assets/flag.glb")
+
+
+def morph_model():
+    """变形测试模型：宽 1、高 1 的竖直方块（朝 +Z），目标 0 把顶边抬高 1，目标 1 整体右移 0.5。
+    网格默认权重 [0.25, 0]；节点 0 自己写了 [0.5, 0]（节点优先），节点 1 用网格的；动画 squish 线性地 0 → (1, 0.5) → 0。"""
+    b = Builder()
+    pos = [(-0.5, 0, 0), (0.5, 0, 0), (0.5, 1, 0), (-0.5, 1, 0)]
+    lift = [(0, 0, 0), (0, 0, 0), (0, 1, 0), (0, 1, 0)]
+    prim = {
+        "attributes": {"POSITION": b.accessor(pos, "VEC3"), "NORMAL": b.accessor([(0, 0, 1)] * 4, "VEC3")},
+        "indices": b.accessor([0, 1, 2, 0, 2, 3], "SCALAR", 5125),
+        "targets": [
+            {"POSITION": b.accessor(lift, "VEC3"), "NORMAL": b.accessor([(0, 0.5, 0)] * 4, "VEC3")},
+            {"POSITION": b.accessor([(0.5, 0, 0)] * 4, "VEC3")},
+        ],
+    }
+    b.gltf["meshes"] = [{"name": "bump", "primitives": [prim], "weights": [0.25, 0.0]}]
+    b.gltf["nodes"] = [{"name": "squish", "mesh": 0, "weights": [0.5, 0.0]}, {"name": "plain", "mesh": 0, "translation": [2, 0, 0]}]
+    times = b.accessor([0.0, 0.5, 1.0], "SCALAR", vertex=False)
+    weights = b.accessor([0.0, 0.0, 1.0, 0.5, 0.0, 0.0], "SCALAR", vertex=False)
+    b.gltf["animations"] = [{"name": "squish", "channels": [{"sampler": 0, "target": {"node": 0, "path": "weights"}}], "samplers": [{"input": times, "output": weights}]}]
+    b.gltf["scenes"] = [{"nodes": [0, 1]}]
+    b.gltf["scene"] = 0
+    b.write(ROOT / "crates/nge-render3d/tests/data/morph.glb")
+
+
+def jelly_model():
+    """平台跳跃的幽灵果冻：底面半径 0.5、高 0.6 的半透明圆顶（BLEND），底在 y = 0。
+    一个变形目标把它压扁摊开；动画 idle 权重一直是 0，squish 0 → 1 → 0 压一下弹回来。"""
+    b = Builder()
+    rings, segments, radius, height = 6, 24, 0.5, 0.6
+    pos, nor, idx = [], [], []
+    for i in range(rings + 1):
+        phi = math.pi / 2 * i / rings
+        r, y = radius * math.cos(phi), height * math.sin(phi)
+        for j in range(segments + 1):
+            theta = 2 * math.pi * j / segments
+            x, z = r * math.cos(theta), -r * math.sin(theta)
+            # 椭球的梯度当法线；顶点处退化成朝上
+            n = (x / radius ** 2, y / height ** 2, z / radius ** 2)
+            length = math.sqrt(sum(c * c for c in n)) or 1.0
+            pos.append((x, y, z))
+            nor.append(tuple(c / length for c in n) if i < rings else (0.0, 1.0, 0.0))
+    for i in range(rings):
+        for j in range(segments):
+            a, c = i * (segments + 1) + j, (i + 1) * (segments + 1) + j
+            idx += [a, a + 1, c + 1, a, c + 1, c]
+    squish = [(0.35 * x, -0.5 * y, 0.35 * z) for x, y, z in pos]
+    prim = {
+        "attributes": {"POSITION": b.accessor(pos, "VEC3"), "NORMAL": b.accessor(nor, "VEC3")},
+        "indices": b.accessor(idx, "SCALAR", 5125),
+        "material": 0,
+        "targets": [{"POSITION": b.accessor(squish, "VEC3")}],
+    }
+    b.gltf["meshes"] = [{"name": "jelly", "primitives": [prim], "weights": [0.0]}]
+    b.gltf["materials"] = [{
+        "name": "jelly",
+        "pbrMetallicRoughness": {"baseColorFactor": [0.55, 0.85, 1.0, 0.55], "metallicFactor": 0.0, "roughnessFactor": 0.25},
+        "emissiveFactor": [0.08, 0.16, 0.24],
+        "alphaMode": "BLEND",
+    }]
+    b.gltf["nodes"] = [{"name": "jelly", "mesh": 0}]
+
+    def weights(name, times, values):
+        sampler = {"input": b.accessor(times, "SCALAR", vertex=False), "output": b.accessor(values, "SCALAR", vertex=False)}
+        return {"name": name, "channels": [{"sampler": 0, "target": {"node": 0, "path": "weights"}}], "samplers": [sampler]}
+
+    b.gltf["animations"] = [weights("idle", [0.0, 1.0], [0.0, 0.0]), weights("squish", [0.0, 0.3, 0.6], [0.0, 1.0, 0.0])]
+    b.gltf["scenes"] = [{"nodes": [0]}]
+    b.gltf["scene"] = 0
+    b.write(ROOT / "examples/platformer/assets/jelly.glb")
+
+
 if __name__ == "__main__":
     test_model()
+    morph_model()
     crate_model()
+    flag_model()
+    jelly_model()
