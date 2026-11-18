@@ -428,6 +428,60 @@ export interface Emitter3dNode {
   blend?: Blend;
   /** 同时存活的上限，默认 10000。 */
   max?: number;
+  // 下面是 3D 粒子补齐（见 docs/particles3d-more.md）：写错的字段 warn 一次后当没写，别的照用；多余的键也 warn。
+  /** 出生时的转角范围（度）；不写时一整圈随机（序列帧的火苗要正着就写 [0, 0]）。 */
+  angle?: [number, number];
+  /** 在哪出生（本地坐标），默认一个点。 */
+  shape?: EmitShapeNode;
+  /** 发射方向：`cone` 用 direction + spread（默认），`normal` 沿出生处的法线（再按 spread 散开），`random` 全方向均匀。 */
+  emitDirection?: "cone" | "normal" | "random";
+  /** 大小随寿命 `[t, 边长][]`，t 是年龄 / 寿命；设了就不用 size。 */
+  sizeCurve?: [number, number][];
+  /** 透明度随寿命，乘到颜色的透明度上。 */
+  alphaCurve?: [number, number][];
+  /** 速度随寿命，乘到每帧的位移上。 */
+  speedCurve?: [number, number][];
+  /** 颜色随寿命 `[t, "#rrggbbaa"][]`；设了就不用 color。 */
+  colorGradient?: [number, string][];
+  /** 速度阻尼：每秒乘 e^-drag。 */
+  drag?: number;
+  /** 湍流（curl noise）：strength 是加速度，frequency 每单位几格（默认 1），scroll 每秒沿 y 移几格。 */
+  noise?: { strength?: number; frequency?: number; scroll?: number };
+  /** 朝向：朝相机（默认）、沿速度拉长、水平躺着，或固定朝向的欧拉角 [x, y, z]（度）。 */
+  facing?: "camera" | "velocity" | "horizontal" | [number, number, number];
+  /** `facing: "velocity"` 时的拉长系数：长 = 边长 + 速度 × stretch，默认 0.1。 */
+  stretch?: number;
+  /** 序列帧：grid 是 [列, 行]，从左上角按行数；不写 fps 时按寿命播完一遍。 */
+  sheet?: { grid: [number, number]; frames?: number; fps?: number; randomStart?: boolean; blend?: boolean };
+  /** 软粒子：离后面的不透明表面不到这么远时淡出（GL 后端上没有，退成硬边）。 */
+  soft?: number;
+  /** 受环境光和方向光影响。 */
+  lit?: boolean;
+  /** 碰撞：地面高度 ground、场景碰撞体 scene；bounce 反弹（默认 0.5）、friction 摩擦、kill 碰到就死、radius 粒子半径。 */
+  collision?: { ground?: number; scene?: boolean; bounce?: number; friction?: number; kill?: boolean; radius?: number };
+  /** 子发射器：父粒子出生、死亡、碰撞时在它的位置 burst count 个；最多套 3 层。 */
+  subEmitters?: SubEmitterNode[];
+}
+
+/** 发射形状；角度用度。 */
+export type EmitShapeNode =
+  | { kind: "point" }
+  | { kind: "sphere" | "hemisphere"; radius: number; surface?: boolean }
+  | { kind: "box"; size: [number, number, number]; surface?: boolean }
+  /** 本地 xz 平面上的圆环，inner = 0 是圆盘，inner = radius 是一圈线。 */
+  | { kind: "circle"; radius: number; inner?: number }
+  /** 底面半径 radius 的圆盘，越靠边越往外偏，最外圈偏 angle。 */
+  | { kind: "cone"; radius: number; angle: number }
+  /** glTF 模型的表面，按三角形面积取点。 */
+  | { kind: "mesh"; model: string; scale?: number | [number, number, number] };
+
+/** 子发射器。`emitter` 的 rate、id、位置不起作用；碰撞时本地 +Y 对着碰到的面的法线。 */
+export interface SubEmitterNode {
+  on: "birth" | "death" | "collision";
+  count: number;
+  /** 继承父粒子速度的比例，默认 0。 */
+  inherit?: number;
+  emitter: Omit<Emitter3dNode, "id" | "x" | "y" | "z">;
 }
 
 /** 模型的 3D 刚体和碰撞体。和 2D 刚体在两个世界里，互不碰撞。 */

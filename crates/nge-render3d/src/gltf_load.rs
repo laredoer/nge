@@ -411,31 +411,39 @@ pub struct GltfModel(pub Handle<Gltf>);
 #[derive(bevy_ecs::prelude::Resource, Default)]
 pub(crate) struct GltfModels(HashMap<Handle<Gltf>, Option<ModelId>>);
 
+/// glTF 展开成的模型（同一个 glTF 只展开一次，和模型实体共用）：还在加载是 `None`，加载或展开失败是 `Some(None)`。
+pub fn gltf_model(world: &mut bevy_ecs::prelude::World, handle: Handle<Gltf>) -> Option<Option<ModelId>> {
+    use bevy_ecs::prelude::*;
+    use nge_assets::LoadState;
+
+    if let Some(&model) = world.resource::<GltfModels>().0.get(&handle) {
+        return Some(model);
+    }
+    let model = match world.resource::<Assets<Gltf>>().state(handle) {
+        LoadState::Loading => return None,
+        LoadState::Failed(_) => None,
+        LoadState::Loaded => {
+            let model = world.resource_scope(|world, mut assets: Mut<Assets3d>| {
+                world.resource_scope(|world, mut images: Mut<Assets<Image>>| {
+                    let gltf = world.resource::<Assets<Gltf>>().get(handle).expect("刚确认过已加载");
+                    assets.add_gltf(&mut images, gltf)
+                })
+            });
+            model.map_err(|e| log::warn!("glTF {handle:?} 展开失败: {e}")).ok()
+        }
+    };
+    world.resource_mut::<GltfModels>().0.insert(handle, model);
+    Some(model)
+}
+
 /// `PreUpdate`，收回加载结果之后。
 pub(crate) fn resolve_gltf_models(world: &mut bevy_ecs::prelude::World) {
     use bevy_ecs::prelude::*;
-    use nge_assets::LoadState;
 
     let mut waiting = world.query_filtered::<(Entity, &GltfModel), Without<crate::Model3d>>();
     let waiting: Vec<(Entity, Handle<Gltf>)> = waiting.iter(world).map(|(e, g)| (e, g.0)).collect();
     for (entity, handle) in waiting {
-        let model = match world.resource::<GltfModels>().0.get(&handle) {
-            Some(&model) => model,
-            None => match world.resource::<Assets<Gltf>>().state(handle) {
-                LoadState::Loading => continue,
-                LoadState::Failed(_) => None,
-                LoadState::Loaded => {
-                    let model = world.resource_scope(|world, mut assets: Mut<Assets3d>| {
-                        world.resource_scope(|world, mut images: Mut<Assets<Image>>| {
-                            let gltf = world.resource::<Assets<Gltf>>().get(handle).expect("刚确认过已加载");
-                            assets.add_gltf(&mut images, gltf)
-                        })
-                    });
-                    model.map_err(|e| log::warn!("glTF {handle:?} 展开失败: {e}")).ok()
-                }
-            },
-        };
-        world.resource_mut::<GltfModels>().0.insert(handle, model);
+        let Some(model) = gltf_model(world, handle) else { continue };
         let mut entity = world.entity_mut(entity);
         match model {
             Some(model) => entity.insert(crate::Model3d(model)),

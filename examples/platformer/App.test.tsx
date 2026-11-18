@@ -1,7 +1,8 @@
 // `nsh test`：无头 runner 里没有游戏视图，测按钮的显示和按住的手指怎么换成按键。
 import { expect, open, test } from "nsh/test";
 import { act, actionButtonId, heldKey, rumble, rumbleStop } from "../../ts/nge";
-import { campfireAt, finish, HERO, JELLY_ANIM, JELLY_FADE, JELLY_Z, JELLY_ZONE, jellyAt, LEVELS, NEW_PROGRESS, progressOf, rampOf, ROWS, TOWER_BOX, TOWER_TRIGGER, towerAt, towerSpot } from "./levels";
+import { campfireAt, finish, FLAME_SHEET, HERO, JELLY_ANIM, JELLY_FADE, JELLY_Z, JELLY_ZONE, jellyAt, LEVELS, NEW_PROGRESS, progressOf, rampOf, ROWS, TOWER_BOX, TOWER_TRIGGER, towerAt, towerSpot } from "./levels";
+import { TEXTURES } from "./prefabs";
 
 // 触屏按钮按动作发，不发键名：改了键也照样管用（见 docs/input-actions.md）；走路是虚拟摇杆（docs/touch-input.md）
 const BUTTONS = ["id:stick-move", "id:act-jump", "id:act-restart"];
@@ -178,18 +179,32 @@ test("第一关有一摞 3D 箱子：摞在 3D 地面上、一个挨一个不重
   expect(LEVELS[1].built.tower).toBe(null);
 });
 
-test("塔边一堆 3D 篝火：叠加混合往上飘，在箱子同一个深度；箱子带着拖尾", () => {
+test("塔边一堆 3D 篝火：序列帧火苗往上飘，拉长的火星落地溅起火花，在箱子同一个深度；箱子带着拖尾", () => {
   const x = LEVELS[0].built.tower!;
   const { models } = towerAt(x, 0);
   const [floor, ...boxes] = models;
-  const fire = campfireAt(x);
-  expect(fire.blend).toBe("add");
-  expect(fire.z).toBe(floor.z);
-  expect(fire.y!).toBeGreaterThanOrEqual(0);
-  expect(fire.x! > Math.max(...boxes.map((b) => b.x!)) + TOWER_BOX).toBe(true);
-  expect(fire.direction![1]).toBeGreaterThan(0);
-  expect(fire.spread!).toBeLessThan(45);
-  expect(fire.rate!).toBeGreaterThan(0);
+  const [flames, sparks] = campfireAt(x);
+  for (const fire of [flames, sparks]) {
+    expect(fire.blend).toBe("add");
+    expect(fire.z).toBe(floor.z);
+    expect(fire.y!).toBeGreaterThanOrEqual(0);
+    expect(fire.x! > Math.max(...boxes.map((b) => b.x!)) + TOWER_BOX).toBe(true);
+    expect(fire.rate!).toBeGreaterThan(0);
+  }
+  expect(flames.direction![1]).toBeGreaterThan(0);
+  expect(flames.spread!).toBeLessThan(45);
+  // 序列帧：4 × 4 格、正着放、随机起始帧、相邻帧混合
+  expect(flames.texture).toBe(FLAME_SHEET);
+  expect(flames.sheet).toEqual({ grid: [4, 4], randomStart: true, blend: true });
+  expect(flames.angle).toEqual([0, 0]);
+  expect(flames.sizeCurve!.length).toBeGreaterThan(2);
+  // 火星：沿速度拉长，碰到地面（地面盒子的顶 = floor.y + 高 / 2）就死，溅起子发射器
+  expect(sparks.facing).toBe("velocity");
+  expect(sparks.collision).toEqual({ ground: floor.y! + floor.body!.size![1] / 2, kill: true, radius: 0.5 });
+  expect(sparks.gravity![1]).toBeLessThan(0);
+  const [splash] = sparks.subEmitters!;
+  expect([splash.on, splash.count > 0, splash.emitter.facing]).toEqual(["collision", true, "velocity"]);
+  expect(TEXTURES[FLAME_SHEET]).toEqual({ mipmaps: false });
   expect(floor.trail).toBe(undefined);
   for (const b of boxes) {
     expect(b.trail?.minDistance ?? 0).toBeGreaterThan(0);

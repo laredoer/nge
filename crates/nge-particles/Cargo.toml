@@ -11,6 +11,7 @@ nge-ecs.workspace = true
 nge-render2d.workspace = true
 nge-render3d.workspace = true
 nge-assets.workspace = true
+nge-physics3d.workspace = true
 bevy_ecs.workspace = true
 glam.workspace = true
 log.workspace = true

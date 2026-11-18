@@ -772,7 +772,7 @@ fn billboards(app: &mut App, push: impl Fn(&mut nge_render3d::Billboards) + Send
 }
 
 fn quad(z: f32, size: f32, color: Vec4) -> nge_render3d::Billboard {
-    nge_render3d::Billboard { position: Vec3::new(0.0, 0.0, z), size, rotation: 0.0, color }
+    nge_render3d::Billboard { position: Vec3::new(0.0, 0.0, z), size, color, ..Default::default() }
 }
 
 #[test]
@@ -1200,6 +1200,9 @@ mod quality;
 
 #[path = "offscreen/morph.rs"]
 mod morph;
+
+#[path = "offscreen/particles.rs"]
+mod particles;
 
 /// 一条穿过画面中心的白线（z = -1），前面挡着一个红色方块；`on_top` 时画在最前面。
 fn line_behind_cube(on_top: bool) -> Option<Pixels> {

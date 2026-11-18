@@ -26,12 +26,12 @@ mod sky_gpu;
 
 pub use animation::{Animation, Channel, Interpolation, Node, Property, Skeleton, Skin, Trs};
 pub use animator::{Animator, Fade, Pose};
-pub use billboards::{Billboard, Billboards, Blend, RibbonPoint};
+pub use billboards::{Billboard, Billboards, Blend, FULL_UV, Facing, RibbonPoint};
 pub use assets::{Assets3d, Material, MaterialId, MeshId, Model, ModelId, Part};
 pub use nge_assets::{AssetPlugin, AssetServer, AssetSource, Assets, Image, ImageId, MAX_TEXTURE_SIDE, MemorySource};
 pub use camera::{Camera3d, Transform3d};
 pub use gizmos::{CIRCLE_SEGMENTS, Gizmos3d, Lines};
-pub use gltf_load::{Gltf, GltfModel};
+pub use gltf_load::{Gltf, GltfModel, gltf_model};
 pub use graph_pose::mask;
 pub use light::{AmbientLight, DirectionalLight, MAX_DIRECTIONAL_LIGHTS, MAX_POINT_LIGHTS, MAX_SPOT_LIGHTS, PointLight, SpotLight};
 pub use mesh::{Influence, MAX_MORPH_TARGETS, Mesh, MorphTarget, Vertex};

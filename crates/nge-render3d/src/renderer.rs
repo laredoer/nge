@@ -11,7 +11,7 @@ use nge_assets::{AssetApp, Assets, GpuImages, Image, ImageId};
 
 use crate::animator::animate;
 use crate::billboard_gpu::BillboardGpu;
-use crate::billboards::{Batch, BillboardVertex, Billboards};
+use crate::billboards::{Batch, BillboardVertex, Billboards, Scratch as BillboardScratch};
 use crate::gizmos::Gizmos3d;
 use crate::line_gpu::LineGpu;
 use crate::assets::{Assets3d, MaterialId, MeshId, ModelId};
@@ -119,6 +119,9 @@ struct MeshRenderer {
     casters: Vec<Caster>,
     billboard_vertices: Vec<BillboardVertex>,
     billboard_batches: Vec<Batch>,
+    billboard_scratch: BillboardScratch,
+    /// 这一帧有没有要软化的方片。
+    billboard_soft: bool,
     scratch: Scratch,
 }
 
@@ -145,7 +148,7 @@ impl Renderer for MeshRenderer {
             }
         }
         sort_draws(&mut self.draws);
-        crate::billboards::build(world.resource::<Billboards>(), view, &mut self.billboard_vertices, &mut self.billboard_batches);
+        self.billboard_soft = crate::billboards::build(world.resource::<Billboards>(), view, &mut self.billboard_scratch, &mut self.billboard_vertices, &mut self.billboard_batches);
         let images = world.resource::<GpuImages>();
         // 贴图重传过：缓存的绑定组指着旧纹理
         if gpu.generation != images.generation() {
@@ -177,7 +180,7 @@ impl Renderer for MeshRenderer {
         }
         let forward = camera.eye.rotation * Vec3::NEG_Z;
         globals.0.fog = world.resource::<Fog>().raw(camera.eye.translation, camera.camera.ortho_height().is_none(), forward, gpu.sky.has_sky());
-        let billboard_view = crate::billboard_gpu::ViewRaw { view_proj: globals.0.view_proj, fog: globals.0.fog, sh: globals.0.sh };
+        let billboard_view = crate::billboard_gpu::ViewRaw::new(&globals.0);
         gpu.billboards.prepare(gfx, &billboard_view, &self.billboard_vertices);
         gfx.queue.write_buffer(&gpu.globals, 0, bytemuck::bytes_of(&globals.0));
         let g = &*gpu;
@@ -196,9 +199,12 @@ impl Renderer for MeshRenderer {
         let lines = world.resource::<Gizmos3d>();
         let segments = (lines.depth_tested().len() + lines.top().len()) as u32;
         world.resource_mut::<RenderFrame>().count(gpu.lines.draws(), segments);
-        let depth = gpu.depth_view(gfx, target.texture().size());
+        let depth = gpu.depth_view(gfx, target.texture().size()).clone();
+        let depth = &depth;
         // 混排时深度留给后面的精灵
         let interleave = world.resource::<Interleave>().0;
+        // 有软粒子时方片另开一个 pass，深度只读、同时绑成纹理（GL 上不行，退成硬边）
+        let split = self.billboard_soft && !gpu.billboards.gl;
         if interleave {
             let view_proj = bytemuck::cast(globals.0.view_proj);
             world.resource_mut::<RenderFrame>().set_depth(SceneDepth { view: depth.clone(), view_proj });
@@ -216,7 +222,7 @@ impl Renderer for MeshRenderer {
             })],
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                 view: depth,
-                depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: if interleave { wgpu::StoreOp::Store } else { wgpu::StoreOp::Discard } }),
+                depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: if interleave || split { wgpu::StoreOp::Store } else { wgpu::StoreOp::Discard } }),
                 stencil_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(0), store: wgpu::StoreOp::Discard }),
             }),
             ..Default::default()
@@ -239,9 +245,36 @@ impl Renderer for MeshRenderer {
         if opaque == self.draws.len() {
             gpu.sky.draw(&mut pass, &globals.0);
         }
-        // 透明的方片和带子画在所有网格后面
-        gpu.billboards.draw(&mut pass, &self.billboard_batches, |id| gpu.texture(id));
-        // 调试画线最后画：半透明的方片不会盖住它
+        if !split {
+            // 透明的方片和带子画在所有网格后面
+            gpu.billboards.draw(&mut pass, &self.billboard_batches, false, |id| gpu.texture(id));
+            // 调试画线最后画：半透明的方片不会盖住它
+            gpu.lines.draw(&mut pass);
+            return;
+        }
+        drop(pass);
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("soft billboards"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: target, depth_slice: None, resolve_target: None, ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store } })],
+            // 只读：同一张深度纹理同时绑在 billboards 的 bind group 里
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment { view: depth, depth_ops: None, stencil_ops: None }),
+            ..Default::default()
+        });
+        gpu.billboards.draw(&mut pass, &self.billboard_batches, true, |id| gpu.texture(id));
+        drop(pass);
+        if gpu.lines.draws() == 0 {
+            return;
+        }
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("lines"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: target, depth_slice: None, resolve_target: None, ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store } })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: depth,
+                depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Load, store: if interleave { wgpu::StoreOp::Store } else { wgpu::StoreOp::Discard } }),
+                stencil_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(0), store: wgpu::StoreOp::Discard }),
+            }),
+            ..Default::default()
+        });
         gpu.lines.draw(&mut pass);
     }
 }
@@ -521,9 +554,12 @@ impl Gpu {
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format: DEPTH_FORMAT,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                // 软粒子读深度
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
                 view_formats: &[],
             });
+            let depth_only = texture.create_view(&wgpu::TextureViewDescriptor { aspect: wgpu::TextureAspect::DepthOnly, ..Default::default() });
+            self.billboards.set_depth(&gfx.device, &depth_only);
             self.depth = Some((texture.create_view(&Default::default()), size));
         }
         &self.depth.as_ref().expect("刚创建").0

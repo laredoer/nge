@@ -14,7 +14,7 @@ use serde_json::Value as JsonValue;
 
 use crate::actions::{ActionMap, Actions, ActionsUpdated, Rumble, flush_rumble, update_actions};
 use crate::input::Input;
-use crate::perf::Perf;
+use crate::perf::{ParticleStats, Perf};
 use crate::render::{ClearColor, Interleave, RenderFrame};
 use crate::resources::{NshCommand, Outbox, Props, Screen, Time};
 
@@ -96,6 +96,7 @@ impl App {
         world.init_resource::<RenderFrame>();
         world.init_resource::<Interleave>();
         world.init_resource::<Perf>();
+        world.init_resource::<ParticleStats>();
         for schedule in [Schedule::new(Startup), Schedule::new(PreUpdate), Schedule::new(Update), Schedule::new(PostUpdate), Schedule::new(Last)] {
             world.add_schedule(schedule);
         }
@@ -327,7 +328,9 @@ impl Game for EcsGame {
     fn timing(&mut self, timing: FrameTiming) {
         let world = &mut self.0.world;
         let (draws, instances) = world.resource::<RenderFrame>().counts();
+        let particles = world.resource::<ParticleStats>().alive;
         world.resource_scope(|world, mut perf: Mut<Perf>| {
+            perf.particles(particles);
             // 资源在 bevy 里也是实体，不算
             perf.record(timing, draws, instances, || world.query_filtered::<(), Without<bevy_ecs::resource::IsResource>>().iter(world).count() as u32);
         });
@@ -403,9 +406,10 @@ mod tests {
         game.0.world.spawn_batch((0..5).map(|_| Thing));
         game.0.world.spawn_empty();
         game.0.world.resource_mut::<RenderFrame>().count(4, 120);
+        game.0.world.resource_mut::<ParticleStats>().alive = 33;
         game.timing(FrameTiming { frame: 0.6, update: 0.001, render: 0.002, wait: 0.5 });
         let report = *game.0.world.resource::<Perf>().report().expect("一帧就满了半秒");
-        assert_eq!((report.draws, report.instances, report.entities), (4, 120, 6), "资源不算");
+        assert_eq!((report.draws, report.instances, report.entities, report.particles), (4, 120, 6, 33), "资源不算");
         assert!((report.wait_ms - 500.0).abs() < 1e-3, "{report:?}");
     }
 

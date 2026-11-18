@@ -1,15 +1,55 @@
-//! 3D 粒子发射器（见 docs/particles3d.md）：跟着实体的 `Transform3d`，粒子画成朝着相机的方片。
+//! 3D 粒子发射器（见 docs/particles3d.md、docs/particles3d-more.md）：跟着实体的 `Transform3d`，粒子画成方片。
 
 use bevy_ecs::prelude::*;
 use glam::{Quat, Vec3, Vec4};
 use nge_assets::ImageId;
-use nge_ecs::Time;
-use nge_render3d::{Billboard, Billboards, Blend, Transform3d};
+use nge_ecs::{ParticleStats, Time};
+use nge_physics3d::Physics3d;
+use nge_render3d::{Billboards, Blend, Transform3d};
 
+use crate::collide3d::{ParticleCollision, Raycast};
+use crate::curve::{Curve, Gradient};
 use crate::emitter::DEFAULT_MAX_PARTICLES;
+use crate::noise::Noise3d;
+use crate::pool3d::{Budget, Frame, Pool, Source};
 use crate::rng::Rng;
+use crate::shape3d::{EmitDirection, EmitShape, MeshSurfaces};
+use crate::sheet::SpriteSheet;
 
-/// 3D 粒子发射器。范围参数写成 `(最小, 最大)`；`size` / `color` 是 `(出生, 死亡)`，中间线性插值。
+/// 方片朝哪。
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum ParticleFacing {
+    /// 朝着相机。
+    #[default]
+    Camera,
+    /// 沿速度拉长：长 `size + |速度| × stretch`。
+    Velocity { stretch: f32 },
+    /// 躺在 xz 平面里（地面冲击波）。
+    Horizontal,
+    /// 固定的世界朝向：本地 xy 平面的方片乘这个旋转。
+    Fixed(Quat),
+}
+
+/// 子发射器在父粒子的什么时候 burst。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SubTrigger {
+    Birth,
+    #[default]
+    Death,
+    Collision,
+}
+
+/// 子发射器：父粒子出生、死亡、碰撞时在它的位置 burst `count` 个。`emitter` 的 `rate`、`burst`、`despawn_when_done` 不起作用。
+#[derive(Debug, Clone, PartialEq)]
+pub struct SubEmitter3d {
+    pub on: SubTrigger,
+    pub count: u32,
+    /// 继承父粒子速度的比例。
+    pub inherit: f32,
+    pub emitter: ParticleEmitter3d,
+}
+
+/// 3D 粒子发射器。范围参数写成 `(最小, 最大)`；`size` / `color` 是 `(出生, 死亡)`，中间线性插值（设了曲线时用曲线）。
 #[derive(Component, Debug, Clone, PartialEq)]
 #[require(Particles3d)]
 pub struct ParticleEmitter3d {
@@ -30,14 +70,38 @@ pub struct ParticleEmitter3d {
     pub size: (f32, f32),
     /// 方片转动的角速度（弧度 / 秒），出生时随机取。
     pub spin: (f32, f32),
+    /// 出生时的转角范围（弧度）；不设时在一整圈里随机（序列帧的火苗要正着就设 `(0, 0)`）。
+    pub angle: Option<(f32, f32)>,
     /// 线性 RGBA。
     pub color: (Vec4, Vec4),
     pub texture: ImageId,
     pub blend: Blend,
     /// 同时存活的上限，到了就不再发射。
     pub max: usize,
-    /// 不再持续发射（`rate` 为 0）且粒子全部死完后删除实体。
+    /// 不再持续发射（`rate` 为 0）且粒子（包括子发射器的）全部死完后删除实体。
     pub despawn_when_done: bool,
+    /// 在哪出生（本地坐标）。
+    pub shape: EmitShape,
+    pub emit_direction: EmitDirection,
+    /// 大小随寿命（设了就不用 `size`）。
+    pub size_curve: Option<Curve>,
+    /// 颜色随寿命（设了就不用 `color`）。
+    pub color_gradient: Option<Gradient>,
+    /// 乘到透明度上。
+    pub alpha_curve: Option<Curve>,
+    /// 乘到每帧的位移上。
+    pub speed_curve: Option<Curve>,
+    /// 速度阻尼：每秒乘 `e^-drag`。
+    pub drag: f32,
+    pub noise: Option<Noise3d>,
+    pub facing: ParticleFacing,
+    pub sheet: Option<SpriteSheet>,
+    /// 软化距离（世界单位），0 不软化。
+    pub soft: f32,
+    /// 受环境光和方向光影响。
+    pub lit: bool,
+    pub collision: Option<ParticleCollision>,
+    pub sub_emitters: Vec<SubEmitter3d>,
 }
 
 impl Default for ParticleEmitter3d {
@@ -52,11 +116,26 @@ impl Default for ParticleEmitter3d {
             gravity: Vec3::ZERO,
             size: (0.2, 0.0),
             spin: (0.0, 0.0),
+            angle: None,
             color: (Vec4::ONE, Vec4::new(1.0, 1.0, 1.0, 0.0)),
             texture: ImageId::WHITE,
             blend: Blend::Alpha,
             max: DEFAULT_MAX_PARTICLES,
             despawn_when_done: false,
+            shape: EmitShape::Point,
+            emit_direction: EmitDirection::Cone,
+            size_curve: None,
+            color_gradient: None,
+            alpha_curve: None,
+            speed_curve: None,
+            drag: 0.0,
+            noise: None,
+            facing: ParticleFacing::Camera,
+            sheet: None,
+            soft: 0.0,
+            lit: false,
+            collision: None,
+            sub_emitters: Vec::new(),
         }
     }
 }
@@ -82,15 +161,29 @@ pub struct Particle3d {
     pub spin: f32,
     pub age: f32,
     pub lifetime: f32,
+    /// 序列帧的起始帧。
+    pub frame: f32,
+}
+
+/// 所有 3D 粒子共用的上限（资源，`Particles3dPlugin` 加上）。
+#[derive(Resource, Debug, Clone, Copy, PartialEq)]
+pub struct ParticleBudget3d {
+    /// 粒子总数的软上限（包括子发射器的）：到了就不再发射。
+    pub limit: usize,
+    /// 每帧最多查几次场景碰撞体。
+    pub max_queries: u32,
+}
+
+impl Default for ParticleBudget3d {
+    fn default() -> Self {
+        Self { limit: 20_000, max_queries: 256 }
+    }
 }
 
 /// 发射器的运行状态，随 [`ParticleEmitter3d`] 自动加上。
 #[derive(Component, Debug, Clone)]
 pub struct Particles3d {
-    particles: Vec<Particle3d>,
-    pending: f32,
-    burst_done: bool,
-    warned: bool,
+    pool: Pool,
     rng: Rng,
 }
 
@@ -98,104 +191,61 @@ impl Default for Particles3d {
     fn default() -> Self {
         static SEED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x2545_F491);
         let seed = SEED.fetch_add(0x6D2B_79F5, std::sync::atomic::Ordering::Relaxed);
-        Self { particles: Vec::new(), pending: 0.0, burst_done: false, warned: false, rng: Rng::new(seed) }
+        Self { pool: Pool::default(), rng: Rng::new(seed) }
     }
-}
-
-/// 在以 `axis` 为轴、半角 `spread` 的锥形里按立体角均匀取一个方向；`axis` 是零向量时当成 +Y。
-fn cone(rng: &mut Rng, axis: Vec3, spread: f32) -> Vec3 {
-    // NaN 当成全方向
-    let spread = if spread.is_nan() { std::f32::consts::PI } else { spread.clamp(0.0, std::f32::consts::PI) };
-    // cosθ 在 [cos(spread), 1] 里均匀取，立体角就是均匀的
-    let cos = 1.0 - rng.next_f32() * (1.0 - spread.cos());
-    let sin = (1.0 - cos * cos).max(0.0).sqrt();
-    let phi = rng.next_f32() * std::f32::consts::TAU;
-    let local = Vec3::new(sin * phi.cos(), cos, sin * phi.sin());
-    let axis = axis.try_normalize().unwrap_or(Vec3::Y);
-    Quat::from_rotation_arc(Vec3::Y, axis) * local
 }
 
 impl Particles3d {
+    /// 粒子数，包括子发射器的。
     pub fn len(&self) -> usize {
-        self.particles.len()
+        self.pool.total()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.particles.is_empty()
+        self.len() == 0
     }
 
+    /// 发射器自己的粒子（不含子发射器的）。
     pub fn iter(&self) -> impl Iterator<Item = &Particle3d> {
-        self.particles.iter()
+        self.pool.particles.iter()
     }
 
-    /// 推进 `dt` 秒：老化、移动、发射新粒子。`rotation` 是发射器的朝向。
-    fn step(&mut self, emitter: &ParticleEmitter3d, origin: Vec3, rotation: Quat, dt: f32) {
-        self.particles.retain_mut(|p| {
-            p.age += dt;
-            p.velocity += emitter.gravity * dt;
-            p.position += p.velocity * dt;
-            p.rotation += p.spin * dt;
-            p.age < p.lifetime
-        });
-        let mut count = 0;
-        if !self.burst_done {
-            self.burst_done = true;
-            count += emitter.burst as usize;
-        }
-        self.pending += emitter.rate.max(0.0) * dt;
-        let whole = self.pending.floor();
-        self.pending -= whole;
-        count += whole as usize;
-
-        let room = emitter.max.saturating_sub(self.particles.len());
-        if count > room {
-            if !self.warned {
-                self.warned = true;
-                log::warn!("3D 粒子发射器到了上限 {}，多出的不再发射", emitter.max);
-            }
-            count = room;
-        }
-        let axis = rotation * emitter.direction;
-        self.particles.reserve(count);
-        for _ in 0..count {
-            let direction = cone(&mut self.rng, axis, emitter.spread);
-            let speed = self.rng.range(emitter.speed);
-            let spin = self.rng.range(emitter.spin);
-            let rotation = self.rng.next_f32() * std::f32::consts::TAU;
-            let lifetime = self.rng.range(emitter.lifetime).max(f32::EPSILON);
-            self.particles.push(Particle3d { position: origin, velocity: direction * speed, rotation, spin, age: 0.0, lifetime });
-        }
+    fn advance(&mut self, emitter: &ParticleEmitter3d, transform: &Transform3d, dt: f32, time: f32, budget: &mut Budget, world: Option<&dyn Raycast>, surfaces: &MeshSurfaces) {
+        let mut frame = Frame { dt, time, rng: &mut self.rng, budget, world, surfaces };
+        self.pool.step(emitter, Source::Root { origin: transform.translation, rotation: transform.rotation }, &mut frame, 0);
     }
 
     fn finished(&self, emitter: &ParticleEmitter3d) -> bool {
-        self.burst_done && emitter.rate <= 0.0 && self.particles.is_empty()
-    }
-
-    fn billboards<'a>(&'a self, emitter: &'a ParticleEmitter3d) -> impl Iterator<Item = Billboard> + 'a {
-        let (size0, size1) = emitter.size;
-        let (color0, color1) = emitter.color;
-        self.particles.iter().map(move |p| {
-            let t = (p.age / p.lifetime).clamp(0.0, 1.0);
-            Billboard { position: p.position, size: size0 + (size1 - size0) * t, rotation: p.rotation, color: color0.lerp(color1, t) }
-        })
+        self.pool.burst_done && emitter.rate <= 0.0 && self.pool.total() == 0
     }
 }
 
 pub(crate) fn simulate3d(
     mut commands: Commands,
     time: Res<Time>,
+    limits: Res<ParticleBudget3d>,
+    surfaces: Res<MeshSurfaces>,
+    physics: Option<Res<Physics3d>>,
+    mut stats: ResMut<ParticleStats>,
     mut billboards: ResMut<Billboards>,
     mut emitters: Query<(Entity, &ParticleEmitter3d, &mut Particles3d, Option<&Transform3d>)>,
 ) {
+    // 软上限按这一帧开头的存活数算
+    let alive: usize = emitters.iter().map(|(_, _, p, _)| p.len()).sum();
+    let mut budget = Budget { remaining: limits.limit.saturating_sub(alive), dropped: 0, queries: limits.max_queries, queried: 0 };
+    let world = physics.as_deref().map(|p| p as &dyn Raycast);
+    let mut total = 0;
     for (entity, emitter, mut particles, transform) in &mut emitters {
         let transform = transform.copied().unwrap_or_default();
-        particles.step(emitter, transform.translation, transform.rotation, time.delta);
+        particles.advance(emitter, &transform, time.delta, time.elapsed as f32, &mut budget, world, &surfaces);
         if emitter.despawn_when_done && particles.finished(emitter) {
             commands.entity(entity).despawn();
             continue;
         }
-        billboards.extend(emitter.texture, emitter.blend, particles.billboards(emitter));
+        total += particles.len();
+        particles.pool.billboards(emitter, &mut |texture, blend, b| billboards.push(texture, blend, b));
     }
+    *stats = ParticleStats { alive: total as u32, dropped: budget.dropped as u32, queries: budget.queried };
 }
 
 #[cfg(test)]
@@ -206,6 +256,8 @@ mod tests {
 
     use super::*;
     use crate::Particles3dPlugin;
+    use crate::shape3d::cone;
+    use crate::SubEmitter3d;
 
     const VIEWPORT: Viewport = Viewport { size: [100.0, 100.0], pixels: [100, 100] };
 
@@ -247,6 +299,12 @@ mod tests {
         assert_eq!(app.world().get::<Particles3d>(capped).unwrap().len(), 3);
     }
 
+    /// 不限量地推进 `dt` 秒。
+    fn step(particles: &mut Particles3d, emitter: &ParticleEmitter3d, origin: Vec3, rotation: Quat, dt: f32) {
+        let mut budget = Budget { remaining: usize::MAX, dropped: 0, queries: 0, queried: 0 };
+        particles.advance(emitter, &Transform3d { translation: origin, rotation, ..Default::default() }, dt, 0.0, &mut budget, None, &MeshSurfaces::default());
+    }
+
     #[test]
     fn motion_follows_direction_gravity_spin_and_interpolates() {
         let mut particles = Particles3d::default();
@@ -262,13 +320,15 @@ mod tests {
             ..ParticleEmitter3d::burst(1)
         };
         // 发射器转了 90°（绕 y）：本地 +X 变成世界 -Z
-        particles.step(&emitter, Vec3::new(1.0, 1.0, 1.0), Quat::from_rotation_y(std::f32::consts::FRAC_PI_2), 0.0);
+        step(&mut particles, &emitter, Vec3::new(1.0, 1.0, 1.0), Quat::from_rotation_y(std::f32::consts::FRAC_PI_2), 0.0);
         let start = particles.iter().next().unwrap().rotation;
-        particles.step(&emitter, Vec3::ZERO, Quat::IDENTITY, 1.0);
+        step(&mut particles, &emitter, Vec3::ZERO, Quat::IDENTITY, 1.0);
         let p = particles.iter().next().unwrap();
         assert!((p.position - Vec3::new(1.0, -3.0, -1.0)).length() < 1e-4, "{}", p.position);
         assert!((p.rotation - start - 1.0).abs() < 1e-5);
-        let b = particles.billboards(&emitter).next().unwrap();
+        let mut out = Vec::new();
+        particles.pool.billboards(&emitter, &mut |_, _, b| out.push(b));
+        let b = out[0];
         assert_eq!((b.size, b.color), (0.5, Vec4::splat(0.5)));
     }
 
@@ -290,6 +350,75 @@ mod tests {
         assert!(all.iter().any(|d| d.y < -0.9), "超过 π 的当 π，全方向");
         let nan: Vec<Vec3> = (0..2000).map(|_| cone(&mut rng, Vec3::Y, f32::NAN)).collect();
         assert!(nan.iter().all(|d| d.is_finite()) && nan.iter().any(|d| d.y < -0.9), "NaN 当全方向");
+    }
+
+    #[test]
+    fn the_soft_limit_counts_every_emitter_and_feeds_the_stats() {
+        let mut app = app();
+        app.insert_resource(ParticleBudget3d { limit: 30, ..Default::default() });
+        for _ in 0..2 {
+            app.world_mut().spawn(ParticleEmitter3d { lifetime: (10.0, 10.0), ..ParticleEmitter3d::burst(20) });
+        }
+        app.tick(VIEWPORT, 0.05);
+        assert_eq!(alive(&mut app), 30, "两个发射器合起来不超过 30");
+        assert_eq!(*app.world().resource::<ParticleStats>(), ParticleStats { alive: 30, dropped: 10, queries: 0 });
+        app.tick(VIEWPORT, 0.05);
+        assert_eq!(app.world().resource::<ParticleStats>().dropped, 0, "每帧重新算");
+    }
+
+    #[test]
+    fn despawning_waits_for_the_sub_emitters() {
+        let mut app = app();
+        let mut e = ParticleEmitter3d { lifetime: (0.05, 0.05), ..ParticleEmitter3d::burst(2) };
+        e.sub_emitters = vec![SubEmitter3d { on: SubTrigger::Death, count: 3, inherit: 0.0, emitter: ParticleEmitter3d { lifetime: (0.3, 0.3), ..Default::default() } }];
+        let id = app.world_mut().spawn(e).id();
+        for _ in 0..3 {
+            app.tick(VIEWPORT, 0.05);
+        }
+        assert_eq!(app.world().get::<Particles3d>(id).unwrap().iter().count(), 0, "自己的死完了");
+        assert_eq!(app.world().get::<Particles3d>(id).unwrap().len(), 6);
+        assert_eq!(app.world().resource::<Billboards>().quads(), 6, "子发射器的也画");
+        for _ in 0..8 {
+            app.tick(VIEWPORT, 0.05);
+        }
+        assert!(app.world().get_entity(id).is_err(), "子发射器的也死完才删");
+    }
+
+    #[test]
+    fn particles_hit_scene_colliders() {
+        use nge_physics3d::{Collider, Physics3dPlugin, RigidBody};
+        let mut app = app();
+        app.add_plugins(Physics3dPlugin::default());
+        // 顶面在 y = 0 的固定盒子
+        app.world_mut().spawn((RigidBody::Fixed, Collider::cuboid(Vec3::new(10.0, 1.0, 10.0)), Transform3d::from_xyz(0.0, -0.5, 0.0)));
+        let collision = ParticleCollision { scene: true, bounce: 0.0, ..Default::default() };
+        let e = ParticleEmitter3d { speed: (5.0, 5.0), direction: Vec3::NEG_Y, spread: 0.0, lifetime: (10.0, 10.0), collision: Some(collision), ..ParticleEmitter3d::burst(5) };
+        let id = app.world_mut().spawn((e, Transform3d::from_xyz(0.0, 1.0, 0.0))).id();
+        for _ in 0..30 {
+            app.tick(VIEWPORT, 1.0 / 60.0);
+        }
+        let particles = app.world().get::<Particles3d>(id).unwrap();
+        assert_eq!(particles.len(), 5);
+        assert!(particles.iter().all(|p| p.position.y >= 0.0 && p.position.y < 0.05 && p.velocity.y.abs() < 1e-4), "停在盒子顶上 {:?}", particles.iter().next());
+        assert!(app.world().resource::<ParticleStats>().queries > 0);
+    }
+
+    #[test]
+    fn mesh_shapes_wait_for_the_model_and_emit_from_its_surface() {
+        use nge_render3d::{Assets3d, MaterialId, Mesh, Model, Part};
+        let mut app = app();
+        let model = {
+            let mut assets = app.world_mut().resource_mut::<Assets3d>();
+            let mesh = assets.add_mesh(Mesh::plane(2.0)).unwrap();
+            assets.add_model(Model { parts: vec![Part::new(mesh, MaterialId::DEFAULT, glam::Mat4::from_translation(Vec3::new(5.0, 0.0, 0.0)))], ..Default::default() }).unwrap()
+        };
+        let shape = EmitShape::Mesh(crate::MeshSource::Model { model, scale: Vec3::splat(2.0) });
+        let id = app.world_mut().spawn(ParticleEmitter3d { shape, speed: (0.0, 0.0), lifetime: (10.0, 10.0), ..ParticleEmitter3d::burst(50) }).id();
+        app.tick(VIEWPORT, 0.0);
+        let particles = app.world().get::<Particles3d>(id).unwrap();
+        assert_eq!(particles.len(), 50);
+        // 平面边长 2、挪到 x = 5、再放大 2 倍：x 在 8 … 12，z 在 -2 … 2
+        assert!(particles.iter().all(|p| (8.0 - 1e-4..=12.0 + 1e-4).contains(&p.position.x) && p.position.z.abs() <= 2.0 + 1e-4 && p.position.y.abs() < 1e-4), "{:?}", particles.iter().next());
     }
 
     #[test]

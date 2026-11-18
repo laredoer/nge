@@ -247,7 +247,7 @@ export function Game(props: GameProps = {}) {
     // 3D 箱子摞起来的地面和关卡的地面一样高
     physics3d: { gravity: [0, -1800, 0] },
     models: [now().crate.model, flagOn(now().goal), ...(tower()?.models ?? []), ...(jelly() === null ? [] : [jelly()!.model]), ...now().models],
-    emitters3d: now().tower === null ? [] : [campfireAt(now().tower!)],
+    emitters3d: now().tower === null ? [] : campfireAt(now().tower!),
     bars: [hpBar(falls())],
     bubbles: [...(title() === null ? [] : [titleBubble(levelName(title()!))]), ...nameTags(room.peers())],
     net: netNode(trial === undefined && online.on(), level(), name),

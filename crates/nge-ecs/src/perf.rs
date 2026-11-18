@@ -23,6 +23,19 @@ pub struct PerfReport {
     pub draws: u32,
     pub instances: u32,
     pub entities: u32,
+    /// 3D 粒子数（包括子发射器的），窗口里最后一帧的。
+    pub particles: u32,
+}
+
+/// 3D 粒子这一帧的统计（3D 粒子系统每帧写，见 docs/particles3d-more.md）。
+#[derive(Resource, Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ParticleStats {
+    /// 存活的粒子（包括子发射器的）。
+    pub alive: u32,
+    /// 到了总数上限没发出去的。
+    pub dropped: u32,
+    /// 查了几次场景碰撞体。
+    pub queries: u32,
 }
 
 /// 资源：最近一个窗口的汇总。引擎每帧画完后记一笔，暂停期间不记。
@@ -32,12 +45,18 @@ pub struct Perf {
     frames: u32,
     sum: FrameTiming,
     worst: f32,
+    particles: u32,
 }
 
 impl Perf {
     /// 最近一个窗口的汇总；还没满一个窗口时是 `None`。
     pub fn report(&self) -> Option<&PerfReport> {
         self.report.as_ref()
+    }
+
+    /// 记下这一帧的粒子数，下一次 `record` 出汇总时用。
+    pub fn particles(&mut self, alive: u32) {
+        self.particles = alive;
     }
 
     /// 记一帧；满一个窗口就出汇总、开始下一个窗口。实体数要数一遍，只在出汇总时才调 `entities`。
@@ -65,6 +84,7 @@ impl Perf {
             draws,
             instances,
             entities: entities(),
+            particles: self.particles,
         });
         *self = Self { report: self.report, ..Self::default() };
     }
@@ -85,8 +105,10 @@ mod tests {
             perf.record(frame(1.0 / 60.0), i, 0, || 0);
         }
         assert!(perf.report().is_none(), "还没满半秒");
+        perf.particles(77);
         perf.record(frame(1.0 / 60.0), 42, 900, || 300);
         let r = *perf.report().expect("满半秒了");
+        assert_eq!(r.particles, 77);
         assert!((r.fps - 60.0).abs() < 0.1, "{r:?}");
         assert!((r.frame_ms - 16.667).abs() < 0.01 && (r.worst_ms - 16.667).abs() < 0.01, "{r:?}");
         assert!((r.update_ms - 2.0).abs() < 1e-3 && (r.render_ms - 3.0).abs() < 1e-3 && (r.wait_ms - 11.667).abs() < 0.01, "{r:?}");

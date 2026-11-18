@@ -29,4 +29,6 @@ export function levelTransition(index: number, sounds: string[]): TransitionNode
 export const TEXTURES: Record<string, TextureOptions> = {
   "asset:/@platformer/hero.png": { mipmaps: false },
   "asset:/@platformer/tiles.png": { mipmaps: false },
+  // 篝火的序列帧：缩小时相邻帧的火苗也会混进来
+  "asset:/@platformer/flame.png": { mipmaps: false },
 };

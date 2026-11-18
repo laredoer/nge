@@ -2362,6 +2362,7 @@ dependencies = [
  "nge-assets",
  "nge-core",
  "nge-ecs",
+ "nge-physics3d",
  "nge-render2d",
  "nge-render3d",
  "pollster 1.0.1",

@@ -2,13 +2,25 @@
 //! 每帧打成 [`SpriteInstances`] 交给 2D 批量绘制。
 //! 3D 粒子和拖尾（见 docs/particles3d.md）：跟着 `Transform3d`，每帧打成 `Billboards` 交给 3D 渲染器。
 
+mod collide3d;
+mod curve;
 mod emitter;
 mod emitter3d;
+mod noise;
+mod pool3d;
 mod rng;
+mod shape3d;
+mod sheet;
 mod trail;
 
 pub use emitter::{DEFAULT_MAX_PARTICLES, Particle, ParticleEmitter, Particles};
-pub use emitter3d::{Particle3d, ParticleEmitter3d, Particles3d};
+pub use collide3d::ParticleCollision;
+pub use curve::{Curve, Gradient};
+pub use emitter3d::{Particle3d, ParticleBudget3d, ParticleEmitter3d, ParticleFacing, Particles3d, SubEmitter3d, SubTrigger};
+pub use noise::Noise3d;
+pub use pool3d::MAX_SUB_DEPTH;
+pub use shape3d::{EmitDirection, EmitShape, MeshSource, MeshSurface, MeshSurfaces};
+pub use sheet::{SheetMode, SpriteSheet};
 pub use trail::{Trail3d, TrailPoints};
 
 use bevy_ecs::prelude::*;
@@ -37,7 +49,8 @@ impl Plugin for Particles3dPlugin {
     fn build(&self, app: &mut App) {
         // Billboards 每帧由 Render3dPlugin 清空，没有它会越攒越多
         assert!(app.world().contains_resource::<nge_render3d::Billboards>(), "Particles3dPlugin 要加在 Render3dPlugin 之后");
-        app.add_systems(PostUpdate, (emitter3d::simulate3d, trail::trails).in_set(Particles3dSimulated));
+        app.init_resource::<ParticleBudget3d>().init_resource::<MeshSurfaces>();
+        app.add_systems(PostUpdate, (shape3d::resolve_surfaces, emitter3d::simulate3d, trail::trails).chain().in_set(Particles3dSimulated));
     }
 }
 
@@ -46,5 +59,5 @@ impl Plugin for Particles3dPlugin {
 pub struct Particles3dSimulated;
 
 pub mod prelude {
-    pub use crate::{ParticleEmitter, ParticleEmitter3d, ParticlePlugin, Particles, Particles3dPlugin, Trail3d};
+    pub use crate::{EmitDirection, EmitShape, ParticleEmitter, ParticleEmitter3d, ParticlePlugin, Particles, Particles3dPlugin, SubEmitter3d, SubTrigger, Trail3d};
 }

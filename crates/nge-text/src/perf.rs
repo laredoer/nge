@@ -23,8 +23,8 @@ const COLOR: Vec4 = Vec4::new(0.6, 1.0, 0.6, 1.0);
 pub fn perf_lines(report: Option<&PerfReport>) -> String {
     let Some(r) = report else { return "性能统计中…".into() };
     format!(
-        "{:.0} fps  帧 {:.1} ms（最长 {:.1}）\n更新 {:.1}  渲染 {:.1}  等待 {:.1} ms\ndraw {}  实例 {}  实体 {}",
-        r.fps, r.frame_ms, r.worst_ms, r.update_ms, r.render_ms, r.wait_ms, r.draws, r.instances, r.entities
+        "{:.0} fps  帧 {:.1} ms（最长 {:.1}）\n更新 {:.1}  渲染 {:.1}  等待 {:.1} ms\ndraw {}  实例 {}  实体 {}  粒子 {}",
+        r.fps, r.frame_ms, r.worst_ms, r.update_ms, r.render_ms, r.wait_ms, r.draws, r.instances, r.entities, r.particles
     )
 }
 
@@ -74,8 +74,8 @@ mod tests {
 
     #[test]
     fn lines_show_every_number() {
-        let r = PerfReport { fps: 59.6, frame_ms: 16.78, worst_ms: 33.3, update_ms: 1.24, render_ms: 2.5, wait_ms: 12.96, draws: 42, instances: 1830, entities: 312 };
-        assert_eq!(perf_lines(Some(&r)), "60 fps  帧 16.8 ms（最长 33.3）\n更新 1.2  渲染 2.5  等待 13.0 ms\ndraw 42  实例 1830  实体 312");
+        let r = PerfReport { fps: 59.6, frame_ms: 16.78, worst_ms: 33.3, update_ms: 1.24, render_ms: 2.5, wait_ms: 12.96, draws: 42, instances: 1830, entities: 312, particles: 950 };
+        assert_eq!(perf_lines(Some(&r)), "60 fps  帧 16.8 ms（最长 33.3）\n更新 1.2  渲染 2.5  等待 13.0 ms\ndraw 42  实例 1830  实体 312  粒子 950");
         assert_eq!(perf_lines(None), "性能统计中…");
     }
 
@@ -92,7 +92,7 @@ mod tests {
         app.tick(Default::default(), 0.016);
         let text = panel(&mut app);
         assert_eq!(text.len(), 1, "只有一个面板");
-        assert!(text[0].starts_with("2 fps") && text[0].ends_with("draw 3  实例 10  实体 7"), "{text:?}");
+        assert!(text[0].starts_with("2 fps") && text[0].ends_with("draw 3  实例 10  实体 7  粒子 0"), "{text:?}");
         app.world_mut().resource_mut::<PerfOverlay>().0 = false;
         app.tick(Default::default(), 0.016);
         assert!(panel(&mut app).is_empty());

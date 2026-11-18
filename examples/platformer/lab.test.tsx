@@ -1,6 +1,6 @@
 // 3D 试验场的场景（见 docs/gameplay3d.md）。
 import { expect, test } from "nsh/test";
-import { LAB_HERO, LAB_LEVEL, labAction, labScene, levelAfterLab } from "./lab";
+import { LAB_FIREWORK, LAB_HERO, LAB_LEVEL, LAB_SHOCKWAVE, LAB_SMOKE, labAction, labScene, levelAfterLab } from "./lab";
 
 const scene = labScene();
 const model = (id: string) => scene.models!.find((m) => m.id === id)!;
@@ -66,4 +66,35 @@ test("画质：程序天空、雾、PCSS 软阴影、三段级联带过渡；点
   expect(lights.filter((l) => l.shadows).map((l) => l.kind)).toEqual(["directional", "point", "spot"]);
   expect(lights.find((l) => l.kind === "spot")!.shadowPriority).toBe(1);
   expect(scene.ambient!.brightness).toBe(0.1);
+});
+
+test("3D 粒子：烟花、冲击波、烟都在场景里，摆在地面上、互不重叠", () => {
+  expect(scene.emitters3d!.map((e) => e.id)).toEqual(["lab-firework", "lab-shockwave", "lab-smoke"]);
+  const spots = scene.emitters3d!.map((e) => [e.x!, e.z!]);
+  for (const [i, a] of spots.entries()) for (const b of spots.slice(i + 1)) expect(Math.hypot(a[0] - b[0], a[1] - b[1])).toBeGreaterThan(150);
+  for (const [x, z] of spots) expect(Math.max(Math.abs(x), Math.abs(z)) < 800).toBe(true);
+});
+
+test("烟花：往上打，死的时候在球面上沿法线炸开（子发射器），带阻尼和渐变", () => {
+  expect([LAB_FIREWORK.rate! > 0, LAB_FIREWORK.facing, LAB_FIREWORK.direction ?? [0, 1, 0]]).toEqual([true, "velocity", [0, 1, 0]]);
+  // 炸开时还在往上走或刚过最高点：寿命不超过 速度 / 重力
+  expect(LAB_FIREWORK.lifetime![1] <= LAB_FIREWORK.speed![0] / -LAB_FIREWORK.gravity![1]).toBe(true);
+  const [burst] = LAB_FIREWORK.subEmitters!;
+  expect([burst.on, burst.count, burst.emitter.shape!.kind, burst.emitter.emitDirection]).toEqual(["death", 120, "sphere", "normal"]);
+  expect(burst.emitter.drag! > 0 && burst.emitter.colorGradient!.length > 2).toBe(true);
+  expect(burst.emitter.max! >= burst.count * LAB_FIREWORK.rate! * burst.emitter.lifetime![1]).toBe(true);
+});
+
+test("冲击波：水平铺在地面上方一点，从小扩到大、先亮后淡", () => {
+  expect([LAB_SHOCKWAVE.facing, LAB_SHOCKWAVE.y, LAB_SHOCKWAVE.speed]).toEqual(["horizontal", 1, [0, 0]]);
+  const size = LAB_SHOCKWAVE.sizeCurve!;
+  expect(size[size.length - 1][1] > size[0][1] * 10).toBe(true);
+  expect(LAB_SHOCKWAVE.alphaCurve![0][1]).toBe(0);
+  expect(LAB_SHOCKWAVE.alphaCurve![LAB_SHOCKWAVE.alphaCurve!.length - 1][1]).toBe(0);
+});
+
+test("烟：软粒子、受光、湍流，在石头边上冒", () => {
+  expect([LAB_SMOKE.soft! > 0, LAB_SMOKE.lit, LAB_SMOKE.noise!.strength! > 0, LAB_SMOKE.blend ?? "alpha"]).toEqual([true, true, true, "alpha"]);
+  const rock = model("lab-rock");
+  expect(Math.hypot(LAB_SMOKE.x! - rock.x!, LAB_SMOKE.z! - rock.z!) < 60).toBe(true);
 });

@@ -231,25 +231,59 @@ const TOWER_Z = -20;
 /** 飞出去的箱子拖的尾巴：静止时相邻的点挨得近，尾巴缩回去。 */
 const BOX_TRAIL: TrailNode = { lifetime: 0.35, width: [8, 0], color: ["#fff2a8cc", "#ffb34700"], minDistance: 2, blend: "add" };
 
-/** 塔右边一堆 3D 篝火：叠加混合的火苗往上飘、转着变小，和箱子在同一个深度，箱子飞到前面时挡住它。 */
-export function campfireAt(x: number): Emitter3dNode {
-  return {
+/** 篝火的火苗序列帧：4 × 4 格（tools/make_flame.py 生成）。 */
+export const FLAME_SHEET = "asset:/@platformer/flame.png";
+
+/**
+ * 塔右边一堆 3D 篝火，和箱子在同一个深度，箱子飞到前面时挡住它（3D 粒子补齐，见 docs/particles3d-more.md）：
+ * - 火苗：叠加混合的序列帧，按寿命播完、随机起始帧、相邻帧混合，正着放（转角 0），先变大再收小；
+ * - 火星：沿速度拉长，落到地面（y = 0）就死，落地处溅起一小撮更细的火花（碰撞触发的子发射器）。
+ */
+export function campfireAt(x: number): Emitter3dNode[] {
+  const at = { x: x + 6 * TOWER_BOX, y: 4, z: TOWER_Z };
+  const flames: Emitter3dNode = {
     id: "campfire",
-    x: x + 6 * TOWER_BOX,
-    y: 4,
-    z: TOWER_Z,
-    rate: 60,
-    lifetime: [0.6, 1.1],
-    speed: [30, 60],
+    ...at,
+    rate: 40,
+    lifetime: [0.6, 1.0],
+    speed: [12, 24],
     direction: [0, 1, 0],
-    spread: 20,
-    gravity: [0, 40, 0],
-    size: [12, 2],
-    spin: [-180, 180],
-    color: ["#ffcf5aff", "#ff3a0a00"],
+    spread: 15,
+    gravity: [0, 30, 0],
+    angle: [0, 0],
+    sizeCurve: [[0, 8], [0.3, 15], [1, 5]],
+    color: ["#ffffffff", "#ff6a2000"],
+    texture: FLAME_SHEET,
+    sheet: { grid: [4, 4], randomStart: true, blend: true },
     blend: "add",
-    max: 200,
+    max: 120,
   };
+  const sparks: Emitter3dNode = {
+    id: "campfire-sparks",
+    ...at,
+    y: at.y + 6,
+    rate: 14,
+    lifetime: [1.0, 1.6],
+    speed: [60, 110],
+    spread: 25,
+    gravity: [0, -260, 0],
+    drag: 0.4,
+    size: [1.6, 1],
+    color: ["#ffe08aff", "#ff602000"],
+    facing: "velocity",
+    stretch: 0.04,
+    blend: "add",
+    collision: { ground: 0, kill: true, radius: 0.5 },
+    subEmitters: [
+      {
+        on: "collision",
+        count: 5,
+        emitter: { lifetime: [0.2, 0.4], speed: [20, 45], spread: 60, gravity: [0, -200, 0], size: [1.2, 0], color: ["#fff2b0ff", "#ff802000"], facing: "velocity", stretch: 0.03, blend: "add" },
+      },
+    ],
+    max: 80,
+  };
+  return [flames, sparks];
 }
 
 /** 碰到它就把箱子撞散的 sensor 的 id。 */

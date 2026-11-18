@@ -290,7 +290,7 @@ fn fog_covers_blended_meshes_and_billboards_too() {
         // 远处：左边半透明的绿玻璃、右边绿的方片、中间一个叠加的白方片（盖在地面上）
         app.add_systems(Startup, |world: &mut World| glass(world, Vec4::new(0.0, 1.0, 0.0, 0.8), Mesh::cube(2.0), Transform3d::from_xyz(-2.0, 1.0, -12.0)));
         app.add_systems(Update, |mut b: ResMut<Billboards>| {
-            let quad = |position, color| Billboard { position, size: 2.0, rotation: 0.0, color };
+            let quad = |position, color| Billboard { position, size: 2.0, color, ..Default::default() };
             b.push(ImageId::WHITE, Blend::Alpha, quad(Vec3::new(2.0, 1.0, -12.0), Vec4::new(0.0, 1.0, 0.0, 1.0)));
             b.push(ImageId::WHITE, Blend::Add, quad(Vec3::new(0.0, 0.0, -12.0), Vec4::ONE));
         });

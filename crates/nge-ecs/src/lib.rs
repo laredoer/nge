@@ -17,7 +17,7 @@ mod resources;
 pub use app::{App, Plugin, PostProcess, PostUpdate, PreUpdate, Renderer, Startup, Update, factory};
 pub use actions::{ActionMap, ActionState, Actions, ActionsUpdated, AnalogAxis, AnalogStick, Binding, MAX_RUMBLE_SECONDS, PlayerActions, Rumble};
 pub use input::{Input, Pad, Pointer, Stick, Trigger};
-pub use perf::{FrameTiming, PERF_WINDOW, Perf, PerfReport};
+pub use perf::{FrameTiming, PERF_WINDOW, ParticleStats, Perf, PerfReport};
 pub use render::{ClearColor, Interleave, RenderFrame, SCENE_DEPTH_FORMAT, SceneDepth};
 pub use resources::{NshCommand, Outbox, Props, Screen, Time};
 
