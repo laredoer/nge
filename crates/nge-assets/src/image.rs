@@ -23,6 +23,13 @@ pub struct Image {
     pub rgba: Vec<u8>,
     /// GPU 块压缩数据（来自 KTX2），带 mipmap。
     pub compressed: Option<Compressed>,
+    /// 上传时在 GPU 上生成 mip 链（只对 RGBA 贴图；`GpuImages::set_mipmaps` 优先）。解码出的 PNG / JPEG 默认要。
+    pub mipmaps: bool,
+}
+
+/// 完整的 mip 链有几级：最长边一路减半到 1。
+pub fn mip_levels(size: UVec2) -> u32 {
+    32 - size.max_element().max(1).leading_zeros()
 }
 
 impl Image {
@@ -35,7 +42,7 @@ impl Image {
         if rgba.len() as u64 != expected {
             return Err(format!("像素数据 {} 字节，尺寸 {size} 需要 {expected} 字节", rgba.len()));
         }
-        Ok(Self { size, rgba, compressed: None })
+        Ok(Self { size, rgba, compressed: None, mipmaps: false })
     }
 
     /// 解码 PNG / JPEG / KTX2（按文件头认）。
@@ -44,7 +51,7 @@ impl Image {
             return ktx2::parse(bytes);
         }
         let image = image::load_from_memory(bytes).map_err(|e| format!("图片解码失败: {e}"))?.into_rgba8();
-        Self::from_rgba(UVec2::new(image.width(), image.height()), image.into_raw())
+        Ok(Self { mipmaps: true, ..Self::from_rgba(UVec2::new(image.width(), image.height()), image.into_raw())? })
     }
 }
 
@@ -58,7 +65,7 @@ impl Assets<Image> {
     /// 第 0 号是白色贴图（[`ImageId::WHITE`]）。
     pub fn with_white() -> Self {
         let mut images = Self::default();
-        images.add(Image { size: UVec2::ONE, rgba: vec![255; 4], compressed: None });
+        images.add(Image { size: UVec2::ONE, rgba: vec![255; 4], compressed: None, mipmaps: false });
         images
     }
 
@@ -112,5 +119,26 @@ mod tests {
         let image = Image::decode(&bytes).unwrap();
         assert_eq!((image.size, image.compressed.map(|c| c.format)), (UVec2::new(4, 4), Some(ktx2::BlockFormat::Bc3)));
         assert!(Image::decode(&bytes[..20]).unwrap_err().contains("KTX2"), "头对但是坏了，报 KTX2 的错");
+    }
+
+    #[test]
+    fn only_decoded_pictures_want_mipmaps() {
+        let mut png = Vec::new();
+        image::RgbaImage::new(4, 2).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+        assert!(Image::decode(&png).unwrap().mipmaps, "PNG 默认要");
+        assert!(!Image::from_rgba(UVec2::ONE, vec![0; 4]).unwrap().mipmaps, "程序生成的不要");
+        let ktx = ktx2::write(Some(ktx2::BlockFormat::Bc3), true, UVec2::new(4, 4), &[vec![0; 16]]);
+        assert!(!Image::decode(&ktx).unwrap().mipmaps, "压缩贴图用自己的级");
+        let images = Assets::<Image>::with_white();
+        assert!(!images.get(ImageId::WHITE).unwrap().mipmaps);
+    }
+
+    #[test]
+    fn a_full_chain_halves_down_to_one_pixel() {
+        assert_eq!(mip_levels(UVec2::ONE), 1);
+        assert_eq!(mip_levels(UVec2::new(2, 1)), 2);
+        assert_eq!(mip_levels(UVec2::new(6, 3)), 3);
+        assert_eq!(mip_levels(UVec2::new(256, 160)), 9);
+        assert_eq!(mip_levels(UVec2::new(1, 1000)), 10);
     }
 }

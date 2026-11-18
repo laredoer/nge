@@ -1,0 +1,6 @@
+{
+  "sprites": [
+    { "id": "trunk", "y": 40, "w": 10, "h": 80, "z": -60, "color": "#2a3550", "parallax": [0.5, 1] },
+    { "id": "crown", "y": 90, "w": 44, "rotation": 45, "z": -50, "color": "#2f3d5c", "parallax": [0.5, 1] }
+  ]
+}

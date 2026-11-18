@@ -95,10 +95,10 @@ lenient!(
     sprites => "sprites", tilemaps => "tilemaps", texts => "texts", emitters => "emitters", models => "models",
     emitters3d => "emitters3d", lights => "lights", bars => "bars", bubbles => "bubbles", joints => "joints",
     joints3d => "joints3d", post => "post", lighting_lights => "lighting.lights", tile_slopes => "tilemaps.slopes",
-    tile_animated => "tilemaps.animated", tile_materials => "tilemaps.materials";
+    tile_animated => "tilemaps.animated", tile_materials => "tilemaps.materials", instances => "instances";
     background => "background", camera => "camera", camera3d => "camera3d", ambient => "ambient", physics => "physics",
     physics3d => "physics3d", lighting => "lighting", audio => "audio", time_scale => "timeScale", perf => "perf",
-    net => "net", bounds => "camera.bounds", behavior => "sprites.behavior"
+    net => "net", bounds => "camera.bounds", behavior => "sprites.behavior", transition => "transition"
 );
 
 /// 着色器表：值不是字符串的那一个跳过。
@@ -121,4 +121,28 @@ pub(crate) fn shaders<'de, D: Deserializer<'de>>(d: D) -> Result<std::collection
             }
         })
         .collect())
+}
+
+/// 名字 → 对象的表：值解析不了的那一个跳过。
+fn map<T: DeserializeOwned>(field: &str, value: Value) -> std::collections::HashMap<String, T> {
+    let map = match value {
+        Value::Null => return Default::default(),
+        Value::Object(map) => map,
+        other => {
+            warn_once(format!("场景的 {field} 要是对象，收到 {other}，当没写"));
+            return Default::default();
+        }
+    };
+    map.into_iter()
+        .filter_map(|(name, v)| T::deserialize(v).map(|t| (name.clone(), t)).map_err(|e| warn_once(format!("场景的 {field} 里 {name:?} 写错了，跳过：{e}"))).ok())
+        .collect()
+}
+
+/// 预制体表：不是对象的那一个跳过。
+pub(crate) fn prefabs<'de, D: Deserializer<'de>>(d: D) -> Result<std::collections::HashMap<String, Value>, D::Error> {
+    Ok(map::<serde_json::Map<String, Value>>("prefabs", Value::deserialize(d)?).into_iter().map(|(k, v)| (k, Value::Object(v))).collect())
+}
+
+pub(crate) fn textures<'de, D: Deserializer<'de>, T: DeserializeOwned>(d: D) -> Result<std::collections::HashMap<String, T>, D::Error> {
+    Ok(map("textures", Value::deserialize(d)?))
 }

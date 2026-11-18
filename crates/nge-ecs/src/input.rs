@@ -92,9 +92,32 @@ pub struct Input {
     pads: BTreeMap<u32, Pad>,
     pads_connected: Vec<u32>,
     pads_disconnected: Vec<u32>,
+    blocked: bool,
 }
 
 impl Input {
+    /// 挡住输入（过场里）：每帧算动作之前把按着的东西都当没有，放开后要重新按才算。
+    pub fn block(&mut self, on: bool) {
+        self.blocked = on;
+    }
+
+    pub fn blocked(&self) -> bool {
+        self.blocked
+    }
+
+    /// 当所有东西都没按：不留松开的边沿。手柄还算连着（不发拔出），下一份状态里按着的键算刚按下。
+    pub fn release_all(&mut self) {
+        self.pointers.clear();
+        self.keys_down.clear();
+        self.keys_pressed.clear();
+        self.keys_released.clear();
+        self.sticks = [Vec2::ZERO; 2];
+        self.triggers = [0.0; 2];
+        for pad in self.pads.values_mut() {
+            *pad = Pad::default();
+        }
+    }
+
     /// 收到一次触摸变化。
     pub fn touch(&mut self, phase: TouchPhase, id: u32, screen: Vec2) {
         let existing = self.pointers.iter_mut().find(|p| p.id == id && p.down);

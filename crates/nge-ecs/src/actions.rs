@@ -564,7 +564,15 @@ fn quantize(binding: &Binding, state: &ActionState) -> Sent {
     (x != 0 || y != 0, x, y)
 }
 
-pub(crate) fn update_actions(input: Res<Input>, mut actions: ResMut<Actions>, mut outbox: ResMut<Outbox>) {
+/// 系统集：这一帧的动作算好了。要在这之前改输入（比如过场挡住输入）的排在它前面。
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ActionsUpdated;
+
+pub(crate) fn update_actions(mut input: ResMut<Input>, mut actions: ResMut<Actions>, mut outbox: ResMut<Outbox>) {
+    if input.blocked() {
+        input.release_all();
+        actions.release_driven();
+    }
     actions.update(&input, &mut outbox);
 }
 
@@ -1353,5 +1361,35 @@ mod tests {
         assert!(matches!(&map.players[0]["aim"], Binding::Axis2d { analog, .. } if analog == &[AnalogStick::RightStick]));
         assert!(ActionMap::from_json("{").is_err());
         assert!(ActionMap::from_json(r#"{"players":[{"jump":{"kind":"lever"}}]}"#).is_err(), "不认识的种类");
+    }
+
+    /// 过场里挡住输入：按着的键、指针、摇杆、手柄、TSX 驱动的动作都当没有，放开后要重新按。
+    #[test]
+    fn blocked_input_reads_as_nothing_until_pressed_again() {
+        let mut app = app(map());
+        key(&mut app, "Space", true);
+        key(&mut app, "ArrowRight", true);
+        app.command("gamepad", &json!({ "left": [1, 0], "right": [0, 0], "l2": 0, "r2": 1 }));
+        app.command("touch", &json!({ "phase": "start", "id": 1, "x": 5, "y": 5 }));
+        app.command("action", &json!({ "action": "aim", "down": true, "x": 1, "y": 0, "source": "stick" }));
+        tick(&mut app);
+        assert!(actions(&app).down("jump") && actions(&app).value("move") == 1.0);
+        app.world_mut().resource_mut::<Input>().block(true);
+        // 挡住以后按的也不算
+        key(&mut app, "KeyJ", true);
+        app.command("touch", &json!({ "phase": "start", "id": 2, "x": 5, "y": 5 }));
+        let events = tick(&mut app);
+        let a = actions(&app);
+        assert!(!a.down("jump") && !a.pressed("jump") && a.value("move") == 0.0 && a.vec("aim") == Vec2::ZERO && a.value("gas") == 0.0, "全都当没有");
+        let input = app.world().resource::<Input>();
+        assert!(input.blocked() && input.keys_down().next().is_none() && input.pointers().next().is_none() && input.stick(Stick::Left) == Vec2::ZERO);
+        assert!(events.iter().all(|(name, e)| name != "action" || e["down"] == json!(false)), "只发松开：{events:?}");
+        app.world_mut().resource_mut::<Input>().block(false);
+        tick(&mut app);
+        assert!(!actions(&app).down("jump"), "过场里一直按着的键要重新按");
+        key(&mut app, "Space", false);
+        key(&mut app, "Space", true);
+        tick(&mut app);
+        assert!(actions(&app).pressed("jump"), "放开以后照常");
     }
 }

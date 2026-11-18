@@ -25,6 +25,8 @@ mod particles3d;
 mod nodes;
 mod physics;
 mod physics3d;
+mod prefab;
+mod preload;
 mod protocol;
 #[cfg_attr(not(feature = "physics3d"), allow(dead_code))]
 mod query3d;
@@ -35,12 +37,14 @@ mod tile_slopes;
 mod tilemap;
 #[cfg(test)]
 mod tilemap_tests;
+mod transition;
 mod world_ui;
 
 use std::collections::HashMap;
 
 use bevy_ecs::prelude::*;
 use nge_ecs::{App, Plugin, PostUpdate, PreUpdate, Update};
+use nge_assets::AssetApp;
 use nge_audio::AudioPlugin;
 use nge_particles::ParticlePlugin;
 use nge_physics2d::{PhysicsPlugin, PhysicsStepped};
@@ -65,7 +69,10 @@ pub use net::{NetNode, REMOTE_PREFIX, parse_remote};
 pub use physics::{BodyKind, BodyNode, COLLIDE, Collide, DROP_THROUGH, DROPPED, DropThrough, Dropped, PUSH, PhysicsNode, Push, ShapeName};
 pub use physics3d::{Body3dKind, ModelBody, Physics3dNode, Shape3dName};
 pub use query3d::{Hit3d, QUERY3D, QUERY3D_RESULT, Query3d, Query3dCommand, Query3dKind, Query3dResult, Shape3dQuery};
-pub use protocol::{Bounds, CameraNode, Color, SCENE, Scene, SpriteNode, TAP, Tap};
+pub use prefab::{InstanceNode, SceneFile};
+pub use preload::{Failed, PRELOAD, PRELOADED, Preload, PreloadProgress};
+pub use protocol::{Bounds, CameraNode, Color, SCENE, Scene, SpriteNode, TAP, Tap, TextureOptions};
+pub use transition::{SceneTransition, TRANSITION, TransitionEvent, TransitionKind, TransitionNode};
 pub use sync::SceneId;
 pub use tilemap::TilemapNode;
 
@@ -148,7 +155,7 @@ impl Plugin for ScenePlugin {
         #[cfg(feature = "net")]
         net::register(app);
         #[cfg(not(all(feature = "physics3d", feature = "ai", feature = "net")))]
-        app.add_systems(PreUpdate, disabled::warn_disabled.run_if(resource_changed::<Scene>));
+        app.add_systems(PreUpdate, disabled::warn_disabled.run_if(transition::scene_ready));
         if !app.is_plugin_added::<AudioPlugin>() {
             app.add_plugins(AudioPlugin::default());
         }
@@ -170,6 +177,7 @@ impl Plugin for ScenePlugin {
             effects::sync_effects,
             world_ui::sync_bars,
             world_ui::sync_bubbles,
+            sync::sync_textures,
         );
         app.insert_resource(textures)
             .init_resource::<resolve::UriAtlases>()
@@ -202,8 +210,20 @@ impl Plugin for ScenePlugin {
             // 跟随插值过的位置；屏幕气泡用这一帧的相机
             .add_systems(PostUpdate, (world_ui::place_bars, world_ui::place_bubbles).after(PhysicsStepped).after(camera::camera_rig))
             .add_message::<LevelStart>()
-            .add_systems(PreUpdate, level::switch_level.run_if(resource_changed::<Scene>).before(sync::sync_sprites))
-            .add_systems(PreUpdate, synced.run_if(resource_changed::<Scene>).after(level::switch_level).before(PointerWorld))
+            // 预制体、预加载、换关过场（见 docs/scene-flow.md）
+            .init_asset::<prefab::SceneFile>()
+            .init_resource::<preload::Preloads>()
+            .init_resource::<transition::SceneTransition>()
+            .add_command(PRELOAD)
+            .add_event(PRELOADED)
+            .add_event(TRANSITION)
+            .add_systems(PreUpdate, prefab::expand_prefabs.after(nge_assets::AssetsApplied))
+            // 过场先看场景：要按住就不换关、不同步；挡输入要在动作更新之前
+            .add_systems(PreUpdate, transition::run_transition.after(prefab::expand_prefabs).before(level::switch_level).before(nge_ecs::ActionsUpdated))
+            .add_systems(Update, preload::preload)
+            .add_systems(PostUpdate, transition::draw_cover.after(camera::camera_rig))
+            .add_systems(PreUpdate, level::switch_level.run_if(transition::scene_ready).before(sync::sync_sprites))
+            .add_systems(PreUpdate, synced.run_if(transition::scene_ready).after(level::switch_level).before(PointerWorld))
             .add_systems(PreUpdate, match2d::match_2d.after(sync_nodes::sync_camera3d).after(camera::sync_camera).before(PointerWorld))
             .add_systems(Update, (behave::spin, behave::tap, behave::burst, behave::float_text, physics::push, physics::drop_through, audio::play_sound, anim::animate))
             // 补间最后写，盖过 spin / push 这一帧的改动
@@ -232,6 +252,14 @@ pub(crate) mod testing {
     use crate::ScenePlugin;
 
     pub const BEEP: &str = "asset:/@t/beep.wav";
+    /// 32×16 的 PNG。
+    pub const PNG: &str = "asset:/@t/a.png";
+    /// 预制体文件：两个精灵。
+    pub const TREE: &str = "asset:/@t/tree.json";
+    /// 预制体文件：a 引用 b，b 引用 a。
+    pub const CYCLE_A: &str = "asset:/@t/cycle-a.json";
+    /// 引用 PNG 和 TREE 的预制体文件。
+    pub const PACK: &str = "asset:/@t/pack.json";
     pub const VIEWPORT: Viewport = Viewport { size: [100.0, 100.0], pixels: [100, 100] };
 
     /// 4×2 的图集，每格 8×8。
@@ -250,7 +278,14 @@ pub(crate) mod testing {
     fn build(extra: impl FnOnce(&mut App)) -> App {
         let mut png = Vec::new();
         image::RgbaImage::new(32, 16).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
-        let source = nge_assets::MemorySource::default().with(BEEP, nge_audio::testing::wav(1.0));
+        let json = |v: JsonValue| v.to_string().into_bytes();
+        let source = nge_assets::MemorySource::default()
+            .with(BEEP, nge_audio::testing::wav(1.0))
+            .with(PNG, png.clone())
+            .with(TREE, json(serde_json::json!({ "sprites": [{ "id": "leaf", "x": 2 }, { "id": "root" }] })))
+            .with(CYCLE_A, json(serde_json::json!({ "instances": [{ "id": "b", "prefab": "asset:/@t/cycle-b.json" }] })))
+            .with("asset:/@t/cycle-b.json", json(serde_json::json!({ "instances": [{ "id": "a", "prefab": CYCLE_A }] })))
+            .with(PACK, json(serde_json::json!({ "sprites": [{ "id": "s", "texture": PNG }], "instances": [{ "id": "t", "prefab": TREE }] })));
         let mut app = App::new();
         app.add_plugins(nge_assets::AssetPlugin::new().source(std::sync::Arc::new(source)))
             .add_plugins(nge_audio::AudioPlugin::mock())

@@ -47,6 +47,11 @@ impl Atlases {
         AtlasId(self.atlases.len() as u32 - 1)
     }
 
+    /// 图集切的那张贴图。
+    pub fn texture(&self, atlas: AtlasId) -> Option<TextureId> {
+        self.atlases.get(atlas.0 as usize).map(|a| a.texture)
+    }
+
     /// 精灵不缩放时的大小（point）：`size` 优先，否则是纹理区域的像素大小（贴图没加载完时是 1×1）。
     pub fn sprite_size(&self, images: &Assets<Image>, sprite: &Sprite) -> Vec2 {
         sprite.size.unwrap_or_else(|| self.region(images, sprite.image).size)

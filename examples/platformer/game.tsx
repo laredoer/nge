@@ -1,6 +1,6 @@
 import { batch, effect, keymap, type NativeComponentRef, platform, safeArea, signal, Text, View } from "nsh";
 import { Button } from "nsh/base";
-import { ActionButton, floatText, gameView, httpClient, inputMap, netRoom, push, saved, saveSlots, sound, touchGestures, tween, VirtualStick, type ActionEvent, type Gesture, type Scene, type SpriteNode } from "../../ts/nge";
+import { ActionButton, floatText, gameView, httpClient, inputMap, netRoom, push, saved, saveSlots, sound, touchGestures, transitions, tween, VirtualStick, type ActionEvent, type Gesture, type Scene, type SpriteNode } from "../../ts/nge";
 import { DEFAULT_CONTROLS, guestSprite, PLAYER_GROUP } from "./controls";
 import { remapPlace, RemapPanel } from "./remap";
 import { COIN_SHADER, FLASH, FLASH_MS, levelAudio, night, portalOver, POST, SHADERS, stonesNear } from "./effects";
@@ -9,6 +9,7 @@ import { NEW_SAVE, nextSlot, SAVE_MIGRATIONS, SAVE_VERSION, saveDataOf, saveSumm
 import { hpBar, outOfHearts, padPlace, stickPlace, TITLE_HOLD_MS, titleBubble, zoomBy } from "./hud";
 import { boardOf, leaderOf, nameTags, netLabel, netNode, netSetting, playerName, remotePlayers, scoresUrl, submitUrl, type Leader } from "./online";
 import { labAction, labScene, levelAfterLab } from "./lab";
+import { GROVES, levelTransition, PREFABS, TEXTURES } from "./prefabs";
 import { campfireAt, finish, flagOn, HERO, JELLY_ZONE, jellyAt, LEVELS, TILE, TOWER_TRIGGER, towerAt, towerSpot, walkerSprites, type Built, type Progress } from "./levels";
 
 /** Rust 发的事件：掉出关卡或被敌人撞到送回起点、按 R 重新开始、踩到敌人。 */
@@ -31,18 +32,11 @@ const NEXT_DELAY = 1500;
 /** 幽灵比角色慢一截，看得见 7 格，离家 14 格就回去。 */
 const GHOST_CHASE = { target: "player", speed: 110, sight: 224, leash: 448 };
 
-/** 视差背景：远山（一张能无缝接上的山丘贴图，横向重复铺满）跟着相机挪 0.2、树挪 0.5，竖直方向跟着关卡（立在地上）。z < 0，画在 3D 箱子后面。树按相机在 x = 0 时摆，所以铺得宽。 */
+/** 视差背景：远山（一张能无缝接上的山丘贴图，横向重复铺满）跟着相机挪 0.2，竖直方向跟着关卡（立在地上）。z < 0，画在 3D 箱子后面。树是预制体（`GROVES`）。 */
 const BACKDROP: SpriteNode[] = [
   // 底边对齐地面的底边
   // 模型和精灵按深度混排（camera3d.interleave），背景的 z 要比箱子（前后各 20 多）更靠后，才不会盖住箱子
   { id: "hills", texture: "asset:/@platformer/hills.ktx2", x: 0, y: 120 - TILE, w: 384, h: 240, z: -100, color: "#232c42", parallax: [0.2, 1], repeat: "x" },
-  ...Array.from({ length: 24 }, (_, i): SpriteNode[] => {
-    const x = -600 + i * 110 + (i % 4) * 17;
-    return [
-      { id: `trunk-${i}`, x, y: 40, w: 10, h: 80, z: -60, color: "#2a3550", parallax: [0.5, 1] },
-      { id: `crown-${i}`, x, y: 90 + (i % 2) * 14, w: 44, rotation: 45, z: -50, color: "#2f3d5c", parallax: [0.5, 1] },
-    ];
-  }).flat(),
 ];
 
 
@@ -128,6 +122,8 @@ export function Game(props: GameProps = {}) {
   let clearedBeforeLab = false;
   /** 换关后、新关卡建好（`levelStart`）之前：路上的事件是上一关的，不算。 */
   let switching = true;
+  /** 换关过场：过场里不能选关，状态栏显示载入进度。 */
+  const fade = transitions();
   const now = () => levels[level()].built;
   /** 联网（见 docs/networking.md）：按 N 开关，记在设备上；中继连不上时一直重试，照样单机玩。 */
   const online = netSetting();
@@ -232,6 +228,10 @@ export function Game(props: GameProps = {}) {
 
   const scene = (): Scene => ({
     level: levelId(),
+    transition: levelTransition(level(), [COIN_SOUND, WIN_SOUND]),
+    prefabs: PREFABS,
+    instances: GROVES,
+    textures: TEXTURES,
     background: levels[level()].night ? "#0b0f1e" : "#1b2233",
     shaders: SHADERS,
     ...(levels[level()].night ? night(now().goal) : {}),
@@ -326,7 +326,7 @@ export function Game(props: GameProps = {}) {
   return (
     // 让开系统栏和刘海（手机上状态栏盖在最上面；横过来时刘海在左右）
     <View class="flex-1 bg-black" style={{ paddingTop: safeArea().top, paddingLeft: safeArea().left, paddingRight: safeArea().right }}>
-      <Text class="text-white p-4">{inLab() ? t("lab") : status()}</Text>
+      <Text class="text-white p-4">{inLab() ? t("lab") : fade.busy() ? t("loading", fade.progress()) : status()}</Text>
       <GameView
         class="flex-1"
         {...pinchZoom}
@@ -347,6 +347,7 @@ export function Game(props: GameProps = {}) {
           if (e.action === "lang") return chosenLang.set(otherLocale(lang.locale()));
           if (e.action === "net") return online.toggle();
         }}
+        onTransition={fade.handle}
         onLevelStart={(e) => {
           // 连着选了两次关：前一次的 levelStart 晚到，不算
           if (e.level !== levelId()) return;
@@ -388,7 +389,7 @@ export function Game(props: GameProps = {}) {
             if (e.down && e.code === "Escape") props.onExit?.();
             return;
           }
-          if (inLab()) return;
+          if (inLab() || fade.busy()) return;
           // 换存档、语言、联网是动作（onAction）；Digit1 … Digit9：选已经解锁的关
           const n = /^Digit([1-9])$/.exec(e.code)?.[1];
           if (!e.down || e.repeat || n === undefined) return;

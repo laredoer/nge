@@ -1602,4 +1602,29 @@ mod tests {
         assert!(fading.iter().all(|&w| w < 0.6) && fading[3] > 0.0, "{fading:?}");
         assert!(full.iter().any(|&w| w > 0.8), "{full:?}");
     }
+
+    #[test]
+    fn backdrop_trees_come_from_the_bundled_prefab_file() {
+        let uris: Vec<_> = assets!().iter().map(|f| f.uri).collect();
+        assert!(uris.contains(&"asset:/@platformer/tree.json"), "{uris:?}");
+        let prefabs = include_str!("../prefabs.ts");
+        assert!(prefabs.contains("asset:/@platformer/tree.json") && prefabs.contains("\"asset:/@platformer/hero.png\": { mipmaps: false }"));
+        let game = include_str!("../game.tsx");
+        assert!(game.contains("instances: GROVES") && game.contains("transition: levelTransition(") && game.contains("onTransition={fade.handle}"));
+        let mut app = app();
+        let grove = json!({ "instances": [{ "id": "a", "prefab": "asset:/@platformer/tree.json" }, { "id": "b", "prefab": "asset:/@platformer/tree.json", "x": 127, "set": { "crown": { "y": 104 } } }] });
+        app.prop("scene", Some(&json!({ "prefabs": { "grove": grove }, "instances": [{ "id": "grove-1", "prefab": "grove", "x": -346 }] })));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        let crown = |app: &mut App| {
+            let world = app.world_mut();
+            world.query::<(&SceneId, &Transform2d)>().iter(world).find(|(id, _)| id.0 == "grove-1/b/crown").map(|(_, t)| t.translation)
+        };
+        while crown(&mut app).is_none() {
+            assert!(std::time::Instant::now() < deadline, "15 秒还没展开");
+            run(&mut app, 1);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        // 以前的第 3 棵树：x = -600 + 3 × 110 + 3 × 17，树冠高 104
+        assert_eq!(crown(&mut app).unwrap(), Vec2::new(-219.0, 104.0));
+    }
 }

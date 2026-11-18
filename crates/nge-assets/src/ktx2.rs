@@ -165,7 +165,7 @@ pub fn parse(bytes: &[u8]) -> Result<Image, String> {
             if !srgb {
                 log::warn!("KTX2 是 UNORM 的 {format:?}，按线性数据采样；颜色贴图请导出成 SRGB，不然会发白");
             }
-            Ok(Image { size, rgba: Vec::new(), compressed: Some(Compressed { format, srgb, levels }) })
+            Ok(Image { size, rgba: Vec::new(), compressed: Some(Compressed { format, srgb, levels }), mipmaps: false })
         }
     }
 }

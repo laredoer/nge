@@ -50,6 +50,17 @@ impl SceneAssets<'_> {
         }
     }
 
+    /// 名字对应的那张贴图（图集取它切的那张）；找不到返回 None。
+    pub fn image(&mut self, name: &str) -> Option<TextureId> {
+        if name.starts_with("asset:/") {
+            return Some(self.server.load(&mut self.images, name));
+        }
+        match self.named.0.get(name)? {
+            NamedTexture::Texture(t) => Some(*t),
+            NamedTexture::Atlas(a) => self.atlases.texture(*a),
+        }
+    }
+
     pub fn font(&mut self, uri: Option<&str>) -> Option<FontId> {
         uri.map(|uri| self.server.load(&mut self.fonts, uri))
     }

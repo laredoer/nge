@@ -4,6 +4,7 @@
 //! 从哪里读由平台层决定（[`set_source`]），Mac 上 `nsh run` 时回退到 `assets!()` 记下的源文件（[`AssetPlugin::files`]）。
 
 mod gpu;
+mod group;
 mod image;
 pub mod ktx2;
 mod server;
@@ -16,8 +17,9 @@ use bevy_ecs::prelude::*;
 use nge_ecs::{App, Plugin, PreUpdate};
 
 pub use gpu::GpuImages;
+pub use group::{LoadGroup, LoadProgress};
 pub use ktx2::{BlockFormat, Compressed};
-pub use image::{Image, ImageId, MAX_TEXTURE_SIDE};
+pub use image::{Image, ImageId, MAX_TEXTURE_SIDE, mip_levels};
 pub use server::{Asset, AssetEvent, AssetServer, Assets, Handle, LoadContext, LoadState};
 pub use source::{AssetSource, Chain, DirSource, MemorySource, SourceFiles, asset_path, bundle_dir, platform_source, set_source, unset_source};
 

@@ -4,6 +4,7 @@ import type { HttpReply } from "./http";
 import type { Query3dReply } from "./physics3d";
 import type { ActionEvent, ActionMap, PadEvent } from "./input";
 import type { NetEvent, NetNode } from "./net";
+import type { Prefab, PrefabInstance, PreloadEvent, TextureOptions, TransitionEvent, TransitionNode } from "./flow";
 import { heldKey } from "./touch";
 
 /** 一个精灵。坐标是世界坐标（point，y 朝上，原点在视口中心），角度用度（逆时针）。 */
@@ -674,6 +675,14 @@ export interface Scene {
   level?: string | number;
   /** 联网：写了就连中继（见 docs/networking.md 和 `netRoom()`）。 */
   net?: NetNode;
+  /** 预制体：名字 → 节点组，`instances` 里按名字用（见 docs/scene-flow.md）。 */
+  prefabs?: Record<string, Prefab>;
+  /** 预制体实例：`prefab` 写名字或 `asset:/` 的 JSON 文件。 */
+  instances?: PrefabInstance[];
+  /** 换关过场：`level` 换了值时盖上、预加载新关卡、再揭开，过场里挡住输入。 */
+  transition?: TransitionNode;
+  /** 按纹理名或 `asset:/` 路径设置贴图（比如像素风关掉 mipmap）。 */
+  textures?: Record<string, TextureOptions>;
 }
 
 /** 背景音乐和总音量。音量是线性的：0 静音，1 原音量。 */
@@ -1069,6 +1078,10 @@ interface BuiltinEvents {
   /** 3D 空间查询的结果（见 `queries3d()`）。 */
   query3d: Query3dReply;
   dropThrough: DropThroughEvent;
+  /** 预加载的进度（见 `preloader()`）。 */
+  preload: PreloadEvent;
+  /** 换关过场的阶段和加载进度（见 `transitions()`）。 */
+  transition: TransitionEvent;
 }
 
 type TouchPhase = "start" | "move" | "end" | "cancel";
@@ -1077,14 +1090,14 @@ export type GameViewProps<P, E> = NativeComponentProps<Partial<BuiltinProps> & P
 
 /**
  * 生成游戏视图组件。`props` / `events` 是游戏自己的通道名（Rust 侧 `add_prop` / `add_state` / `add_event`），
- * 类型由泛型给出；内置 prop `scene` / `actions`、事件 `tap` / `collide` / `animEnd` / `animEvent` / `tweenEnd` / `key` / `action` / `pad` / `levelStart` / `chase` / `behavior` / `typed` / `fps` / `error` / `ready` / `net` / `http` / `query3d` / `dropThrough`，触摸自动转成引擎的 `touch` command。
+ * 类型由泛型给出；内置 prop `scene` / `actions`、事件 `tap` / `collide` / `animEnd` / `animEvent` / `tweenEnd` / `key` / `action` / `pad` / `levelStart` / `chase` / `behavior` / `typed` / `fps` / `error` / `ready` / `net` / `http` / `query3d` / `dropThrough` / `preload` / `transition`，触摸自动转成引擎的 `touch` command。
  */
 export function gameView<P extends object = {}, E extends object = {}>(
   spec: { props?: readonly (keyof P & string)[]; events?: readonly (keyof E & string)[] } = {},
 ) {
   const Native = nativeComponent<BuiltinProps & P, BuiltinEvents & E>("nge.game", {
     props: [...new Set(["scene", "captureKeys", "actions", "screenOrientation", ...(spec.props ?? [])])] as (keyof (BuiltinProps & P) & string)[],
-    events: [...new Set(["tap", "collide", "animEnd", "animEvent", "tweenEnd", "key", "action", "pad", "levelStart", "chase", "behavior", "typed", "fps", "error", "ready", "net", "http", "query3d", "dropThrough", ...(spec.events ?? [])])] as (keyof (BuiltinEvents & E) & string)[],
+    events: [...new Set(["tap", "collide", "animEnd", "animEvent", "tweenEnd", "key", "action", "pad", "levelStart", "chase", "behavior", "typed", "fps", "error", "ready", "net", "http", "query3d", "dropThrough", "preload", "transition", ...(spec.events ?? [])])] as (keyof (BuiltinEvents & E) & string)[],
   });
 
   return (props: GameViewProps<P, E>) => {
@@ -1121,6 +1134,7 @@ export { i18n, missing, plural, resolveLocale, type I18n, type I18nOptions, type
 // 联网见 docs/networking.md
 export { netRoom, netSend, relayHttp, remoteId, type NetEvent, type NetNode, type NetPeer, type NetRoom, type NetStatus } from "./net";
 export { httpClient, json, type HttpClient, type HttpOptions, type HttpReply, type HttpResult } from "./http";
+export { preloader, transitions, type LoadFailure, type Loading, type Prefab, type PrefabInstance, type PreloadEvent, type Preloader, type TextureOptions, type TransitionEvent, type TransitionNode, type Transitions } from "./flow";
 export { queries3d, type Hit3d, type Queries3d, type Query3dOptions, type Query3dReply, type QueryShape3d } from "./physics3d";
 // 输入映射见 docs/input-actions.md
 export { bindingsOf, conflictsOf, inputMap, KEY_NAMES, keyAt, slotsOf, withKey, type ActionEvent, type ActionMap, type AnalogAxis, type AnalogStick, type Binding, type Bindings, type InputMap, type InputMapOptions, type InputStore, type PadEvent, type Part, type PendingBind, type Slot } from "./input";

@@ -27,7 +27,7 @@ pub(crate) fn register(app: &mut nge_ecs::App) {
     if !app.is_plugin_added::<Physics3dPlugin>() {
         app.add_plugins(Physics3dPlugin { gravity: GRAVITY, length_unit: LENGTH_UNIT });
     }
-    app.add_systems(PreUpdate, (sync_gravity, crate::joints3d::sync_joints3d).run_if(resource_changed::<Scene>).after(crate::level::switch_level).before(PointerWorld))
+    app.add_systems(PreUpdate, (sync_gravity, crate::joints3d::sync_joints3d).run_if(crate::transition::scene_ready).after(crate::level::switch_level).before(PointerWorld))
         .configure_sets(PostUpdate, nge_particles::Particles3dSimulated.after(Physics3dStepped))
         // 模型和关节都同步完了再连
         .add_systems(PostUpdate, crate::joints3d::resolve.before(Physics3dStepped))

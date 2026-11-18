@@ -50,7 +50,7 @@ mod enabled {
             app.add_plugins(HttpPlugin::new());
         }
         // 先设好目标再收：同一帧里就开始连
-        app.add_systems(PreUpdate, (connect, tag).chain().run_if(resource_changed::<Scene>).after(crate::sync::sync_sprites).before(NetSet::Receive))
+        app.add_systems(PreUpdate, (connect, tag).chain().run_if(crate::transition::scene_ready).after(crate::sync::sync_sprites).before(NetSet::Receive))
             .configure_sets(
                 PostUpdate,
                 NetSet::Apply

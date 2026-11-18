@@ -84,6 +84,29 @@ pub struct Scene {
     /// 联网（见 docs/networking.md）：写了就连中继。
     #[serde(deserialize_with = "crate::lenient::net")]
     pub net: Option<crate::net::NetNode>,
+    /// 预制体：名字 → 节点组（见 docs/scene-flow.md）。
+    #[serde(deserialize_with = "crate::lenient::prefabs")]
+    pub prefabs: std::collections::HashMap<String, serde_json::Value>,
+    /// 预制体实例，展开后接在各列表后面。
+    #[serde(deserialize_with = "crate::lenient::instances")]
+    pub instances: Vec<crate::prefab::InstanceNode>,
+    /// 换关过场。
+    #[serde(deserialize_with = "crate::lenient::transition")]
+    pub transition: Option<crate::transition::TransitionNode>,
+    /// 按纹理名或 `asset:/` 路径设置的贴图选项。
+    #[serde(deserialize_with = "crate::lenient::textures")]
+    pub textures: std::collections::HashMap<String, TextureOptions>,
+    /// 实例已经展开进各列表了。
+    #[serde(skip)]
+    pub(crate) expanded: bool,
+}
+
+/// `scene.textures` 的一项。
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TextureOptions {
+    /// 不写按图片自己的（PNG / JPEG 生成，程序生成和压缩贴图不生成）。
+    pub mipmaps: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]

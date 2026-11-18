@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet};
 
 use bevy_ecs::prelude::*;
 use glam::{Vec2, Vec4};
+use nge_assets::{GpuImages, ImageId};
 use nge_ecs::Time;
 use nge_render2d::{Parallax, Repeat, Sprite, SpriteImage, Transform2d};
 use nge_text::PerfOverlay;
@@ -149,6 +150,25 @@ pub(crate) fn sync_sprites(
 
 /// `scene.timeScale`：声明变了才写 `Time.scale`，并且这一帧就按新的缩放重算 `delta`。
 /// 一直没声明时不碰，Rust 自己设的缩放不会被第一次同步覆盖；声明去掉时回到 1。
+/// `scene.textures`：按名字设 mipmap 开关；去掉的恢复成按图片自己的。
+pub(crate) fn sync_textures(scene: Res<Scene>, mut assets: SceneAssets, mut gpu: ResMut<GpuImages>, mut set: Local<HashSet<ImageId>>) {
+    let mut now = HashSet::new();
+    for (name, options) in &scene.textures {
+        let Some(id) = assets.image(name) else {
+            crate::lenient::warn_once(format!("scene.textures 里的 {name:?} 不是注册过的纹理名，也不是 asset:/ 路径"));
+            continue;
+        };
+        gpu.set_mipmaps(id, options.mipmaps);
+        if options.mipmaps.is_some() {
+            now.insert(id);
+        }
+    }
+    for id in set.difference(&now) {
+        gpu.set_mipmaps(*id, None);
+    }
+    *set = now;
+}
+
 pub(crate) fn sync_time_scale(scene: Res<Scene>, mut time: ResMut<Time>, mut last: Local<Option<f32>>) {
     if *last == scene.time_scale {
         return;
@@ -179,7 +199,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::testing::{app, frame};
+    use crate::testing::{PNG, app, frame};
 
     fn sprites(app: &mut nge_ecs::App) -> HashMap<String, (Transform2d, Sprite)> {
         let world = app.world_mut();
@@ -386,5 +406,22 @@ mod tests {
         app.prop("scene", None);
         frame(&mut app, None);
         assert!(sprites(&mut app).is_empty());
+    }
+
+    #[test]
+    fn scene_textures_switch_mipmaps_by_name_or_path() {
+        let mut app = app();
+        frame(&mut app, Some(json!({ "textures": { "plain": { "mipmaps": false }, "grid": { "mipmaps": true }, PNG: { "mipmaps": false }, "nope": {} } })));
+        let image = |app: &mut nge_ecs::App, name: &str| {
+            let world = app.world_mut();
+            let mut state: bevy_ecs::system::SystemState<SceneAssets> = bevy_ecs::system::SystemState::new(world);
+            state.get_mut(world).unwrap().image(name).unwrap()
+        };
+        let (plain, grid, png) = (image(&mut app, "plain"), image(&mut app, "grid"), image(&mut app, PNG));
+        let gpu = app.world().resource::<GpuImages>();
+        assert_eq!((gpu.mipmaps(plain), gpu.mipmaps(grid), gpu.mipmaps(png)), (Some(false), Some(true), Some(false)));
+        frame(&mut app, Some(json!({ "textures": { "grid": { "mipmaps": true } } })));
+        let gpu = app.world().resource::<GpuImages>();
+        assert_eq!((gpu.mipmaps(plain), gpu.mipmaps(grid), gpu.mipmaps(png)), (None, Some(true), None), "去掉的恢复成按图片自己的");
     }
 }

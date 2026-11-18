@@ -12,7 +12,7 @@ use nge_core::bridge::{ACT, ACTIONS_PROP, GAMEPAD, KEY, PAD, RUMBLE, SUSPEND, TO
 use nge_core::{Ctx, FrameTiming, Game, GameFactory, Gfx, Viewport, wgpu};
 use serde_json::Value as JsonValue;
 
-use crate::actions::{ActionMap, Actions, Rumble, flush_rumble, update_actions};
+use crate::actions::{ActionMap, Actions, ActionsUpdated, Rumble, flush_rumble, update_actions};
 use crate::input::Input;
 use crate::perf::Perf;
 use crate::render::{ClearColor, Interleave, RenderFrame};
@@ -114,7 +114,7 @@ impl App {
         };
         app.add_message::<NshCommand>();
         // 动作在游戏逻辑之前算好；要震的帧末发给平台层
-        app.add_systems(PreUpdate, update_actions).add_systems(Last, flush_rumble);
+        app.add_systems(PreUpdate, update_actions.in_set(ActionsUpdated)).add_systems(Last, flush_rumble);
         app
     }
 

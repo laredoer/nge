@@ -2268,6 +2268,7 @@ dependencies = [
  "log",
  "nge-core",
  "nge-ecs",
+ "pollster 1.0.1",
  "texpresso",
  "texture2ddecoder",
 ]
