@@ -121,6 +121,21 @@ impl Fields {
     pub(crate) fn get<T: DeserializeOwned>(&mut self, key: &str) -> Option<T> {
         optional(&format!("{}.{key}", self.name), self.map.remove(key).unwrap_or(Value::Null))
     }
+
+    /// 写了但解析不了时返回错误（不 warn，让整项当没写）。
+    pub(crate) fn strict<T: DeserializeOwned>(&mut self, key: &str) -> Result<Option<T>, String> {
+        match self.map.remove(key) {
+            None | Some(Value::Null) => Ok(None),
+            Some(v) => T::deserialize(v).map(Some).map_err(|e| format!("{key} 写错了：{e}")),
+        }
+    }
+
+    /// 剩下没认出来的字段各 warn 一次（多半是拼错了）。
+    pub(crate) fn finish(self) {
+        for key in self.map.keys() {
+            warn_once(format!("场景的 {} 里没有 {key:?} 这个字段，忽略", self.name));
+        }
+    }
 }
 
 /// 着色器表：值不是字符串的那一个跳过。

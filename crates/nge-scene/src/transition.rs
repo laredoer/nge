@@ -10,7 +10,7 @@ use nge_render2d::{Camera2d, GIZMO_Z, SpriteImage, SpriteInstance, SpriteInstanc
 use serde::{Deserialize, Serialize};
 
 use crate::SceneCamera;
-use crate::preload::{Failed, Preloading, failed, uris_of};
+use crate::preload::{Failed, Preloading, cube_of, failed, uris_of};
 use crate::protocol::{Color, Scene};
 
 pub const TRANSITION: EventKey<TransitionEvent> = EventKey::new("transition");
@@ -169,9 +169,13 @@ fn on_scene(world: &mut World, t: &mut SceneTransition) {
                 log::error!("scene.textures 没设上：{e}");
             }
             let uris = uris_of(world.resource::<Scene>());
+            let cube = cube_of(world.resource::<Scene>());
             let loading = t.loading.get_or_insert_with(Preloading::default);
             for uri in uris {
                 loading.add(world, &uri);
+            }
+            if let Some(uri) = cube {
+                loading.add_cube(world, &uri);
             }
         }
         // 没写过场：和以前一样当帧换
@@ -338,6 +342,25 @@ mod tests {
         let events = frame(&mut app, None);
         assert_eq!(phases(&events), ["done"]);
         assert!(cover(&app).is_none(), "揭开以后不画");
+    }
+
+    #[test]
+    fn the_switch_waits_for_the_sky_cube_and_faces() {
+        use crate::testing::CUBE;
+        let mut app = app();
+        let t = json!({ "out": 0.1, "in": 0.1 });
+        frame(&mut app, Some(level(1, t.clone())));
+        let mut next = level(2, t.clone());
+        next["sky"] = json!({ "cube": CUBE });
+        let events = frame(&mut app, Some(next));
+        let out: Vec<&Value> = events.iter().filter(|(n, _)| n == "transition").map(|(_, v)| v).collect();
+        assert_eq!((out[0]["total"].clone(), out[0]["failed"].clone()), (json!(1), json!([])), "KTX2 立方体按立方体贴图加载：{out:?}");
+        let mut faces = level(3, t);
+        faces["sky"] = json!({ "cube": [PNG, PNG, PNG, PNG, PNG, PNG] });
+        run_until(&mut app, |app, _| has(app, "only-2"));
+        let events = frame(&mut app, Some(faces));
+        let out: Vec<&Value> = events.iter().filter(|(n, _)| n == "transition").map(|(_, v)| v).collect();
+        assert_eq!(out[0]["total"], json!(1), "6 张面图（同一张算一次）：{out:?}");
     }
 
     #[test]

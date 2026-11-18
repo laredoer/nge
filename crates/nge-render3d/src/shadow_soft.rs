@@ -51,13 +51,22 @@ pub(crate) struct Candidate {
     pub priority: i32,
     /// 离相机多远（正交相机都是 0）。
     pub distance: f32,
+    /// 灯实体的编号：上一帧挑中的灯认得出来。
+    pub id: u64,
 }
 
-/// 挑最多 `max` 盏：优先级大的先，同优先级离相机近的先，再按原来的顺序。返回（第几个候选, 阴影从第几层开始）：
-/// 聚光灯占 1 层，点光源占 6 层，按挑中的顺序排。
-pub(crate) fn pick(candidates: &[Candidate], max: usize) -> Vec<(usize, usize)> {
+/// 上一帧投影子的灯按距离 × 0.9 排：新来的要近 10% 以上才换掉它，灯在边界上来回时影子不闪。
+pub(crate) const KEEP: f32 = 0.9;
+
+/// 挑最多 `max` 盏：优先级大的先，同优先级离相机近的先（`previous` 里的上一帧挑中的按 [`KEEP`] 打折），再按原来的顺序。
+/// 返回（第几个候选, 阴影从第几层开始）：聚光灯占 1 层，点光源占 6 层，按挑中的顺序排。
+pub(crate) fn pick(candidates: &[Candidate], max: usize, previous: &[u64]) -> Vec<(usize, usize)> {
     let mut order: Vec<usize> = (0..candidates.len()).collect();
-    let distance = |i: usize| if candidates[i].distance.is_nan() { f32::INFINITY } else { candidates[i].distance };
+    let distance = |i: usize| {
+        let c = candidates[i];
+        let d = if c.distance.is_nan() { f32::INFINITY } else { c.distance };
+        if previous.contains(&c.id) { d * KEEP } else { d }
+    };
     order.sort_by(|&a, &b| candidates[b].priority.cmp(&candidates[a].priority).then(distance(a).total_cmp(&distance(b))).then(a.cmp(&b)));
     let mut layer = 0;
     order
@@ -69,6 +78,25 @@ pub(crate) fn pick(candidates: &[Candidate], max: usize) -> Vec<(usize, usize)> 
             (i, first)
         })
         .collect()
+}
+
+/// 阴影深度数组要几层：只增不减（`current` 是现在的层数）；GL 上正方形、层数是 6 的倍数的会被当成立方体纹理，
+/// 1 层的会被当成普通 2D 纹理，按数组绑定都会失败：`min` 以上、跳过 6 的倍数。
+pub(crate) fn array_layers(needed: usize, current: usize, min: usize) -> usize {
+    let n = needed.max(current).max(min).max(2);
+    if n % 6 == 0 { n + 1 } else { n }
+}
+
+/// 聚光灯、点光源阴影图的显存上限（`边长² × 层数 × 4` 字节）。
+pub(crate) const LOCAL_BUDGET: u64 = 64 << 20;
+
+/// 超过 [`LOCAL_BUDGET`] 时边长减半，最小 64。
+pub(crate) fn fit_local_size(size: u32, layers: usize) -> u32 {
+    let mut size = size;
+    while size > 64 && u64::from(size).pow(2) * layers as u64 * 4 > LOCAL_BUDGET {
+        size /= 2;
+    }
+    size
 }
 
 /// 正交阴影矩阵（世界 → 0–1 的深度）的深度范围有多少世界单位：第三行的长度是 1 / 范围。
@@ -128,26 +156,62 @@ mod tests {
     }
 
     fn spot(index: usize, priority: i32, distance: f32) -> Candidate {
-        Candidate { point: false, index, priority, distance }
+        Candidate { point: false, index, priority, distance, id: 100 + index as u64 }
     }
 
     #[test]
     fn picks_by_priority_then_distance_then_order() {
         let c = [spot(0, 0, 5.0), spot(1, 2, 50.0), spot(2, 0, 1.0), spot(3, 0, 1.0)];
-        assert_eq!(pick(&c, 2), [(1, 0), (2, 1)], "优先级大的先，再按近的");
-        assert_eq!(pick(&c, 3), [(1, 0), (2, 1), (3, 2)], "一样近按原来的顺序");
-        assert_eq!(pick(&c, 0), []);
-        assert_eq!(pick(&c, 9).len(), 4);
-        assert_eq!(pick(&[spot(0, 0, f32::NAN), spot(1, 0, 3.0)], 1), [(1, 0)], "算坏了的距离排最后");
+        assert_eq!(pick(&c, 2, &[]), [(1, 0), (2, 1)], "优先级大的先，再按近的");
+        assert_eq!(pick(&c, 3, &[]), [(1, 0), (2, 1), (3, 2)], "一样近按原来的顺序");
+        assert_eq!(pick(&c, 0, &[]), []);
+        assert_eq!(pick(&c, 9, &[]).len(), 4);
+        assert_eq!(pick(&[spot(0, 0, f32::NAN), spot(1, 0, 3.0)], 1, &[]), [(1, 0)], "算坏了的距离排最后");
     }
 
     #[test]
     fn point_lights_take_six_layers() {
-        let point = |index, priority| Candidate { point: true, index, priority, distance: 0.0 };
+        let point = |index: usize, priority| Candidate { point: true, index, priority, distance: 0.0, id: 200 + index as u64 };
         let c = [spot(0, 0, 0.0), point(0, 1), spot(1, 0, 0.0), point(1, 0)];
-        assert_eq!(pick(&c, 4), [(1, 0), (0, 6), (2, 7), (3, 8)], "层号连续：点光源 6 层、聚光灯 1 层");
-        let last = pick(&c, 4).last().copied().unwrap();
+        assert_eq!(pick(&c, 4, &[]), [(1, 0), (0, 6), (2, 7), (3, 8)], "层号连续：点光源 6 层、聚光灯 1 层");
+        let last = pick(&c, 4, &[]).last().copied().unwrap();
         assert!(last.1 + 6 <= MAX_LOCAL_LAYERS);
+    }
+
+    #[test]
+    fn the_lights_shadowed_last_frame_keep_their_shadow_until_clearly_beaten() {
+        // 上一帧挑中 0 号（离 10）：1 号近一点点（9.5）不换，近 10% 以上（8.5）才换
+        let c = [spot(0, 0, 10.0), spot(1, 0, 9.5)];
+        assert_eq!(pick(&c, 1, &[]), [(1, 0)], "没有上一帧时按距离");
+        assert_eq!(pick(&c, 1, &[100]), [(0, 0)], "近得不多：不换");
+        let c = [spot(0, 0, 10.0), spot(1, 0, 8.5)];
+        assert_eq!(pick(&c, 1, &[100]), [(1, 0)], "近 10% 以上：换");
+        // 优先级照样先比
+        let c = [spot(0, 0, 1.0), spot(1, 1, 50.0)];
+        assert_eq!(pick(&c, 1, &[100]), [(1, 0)]);
+    }
+
+    #[test]
+    fn shadow_arrays_only_grow_and_avoid_cube_shapes() {
+        assert_eq!(array_layers(1, 0, 7), 7, "最少 7 层");
+        assert_eq!(array_layers(6, 0, 1), 7, "正好 6 层会被 GL 当成立方体");
+        assert_eq!(array_layers(1, 0, 1), 2, "1 层会被 GL 当成 2D");
+        assert_eq!(array_layers(12, 7, 7), 13);
+        assert_eq!(array_layers(3, 13, 7), 13, "只增不减");
+        assert_eq!(array_layers(24, 13, 7), 25);
+        for n in 0..=MAX_LOCAL_LAYERS {
+            let l = array_layers(n, 0, 7);
+            assert!(l >= n && l % 6 != 0 && l >= 7, "{n} → {l}");
+        }
+    }
+
+    #[test]
+    fn the_local_shadow_maps_stay_within_the_budget() {
+        assert_eq!(fit_local_size(512, 25), 512, "默认 512、最多 25 层：26 MB");
+        assert_eq!(fit_local_size(2048, 7), 1024, "2048² × 7 层 × 4 = 112 MB：减半");
+        assert_eq!(fit_local_size(4096, 25), 512);
+        assert!(u64::from(fit_local_size(4096, 25)).pow(2) * 25 * 4 <= LOCAL_BUDGET);
+        assert_eq!(fit_local_size(64, 10_000), 64, "最小 64");
     }
 
     #[test]

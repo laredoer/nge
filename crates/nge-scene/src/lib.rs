@@ -267,6 +267,8 @@ pub(crate) mod testing {
     /// 字体和 glb 模型。
     pub const FONT: &str = "asset:/@t/a.ttf";
     pub const GLB: &str = "asset:/@t/crate.glb";
+    /// 2×2 的 KTX2 立方体贴图。
+    pub const CUBE: &str = "asset:/@t/sky.ktx2";
     /// 要 5 秒才读得出来的 PNG（加载线程卡在这一个上）。
     pub const SLOW: &str = "asset:/@t/slow.png";
 
@@ -308,6 +310,7 @@ pub(crate) mod testing {
             .with(PACK, json(serde_json::json!({ "sprites": [{ "id": "s", "texture": PNG }], "instances": [{ "id": "t", "prefab": TREE }] })))
             .with(FONT, include_bytes!("../../nge-text/fonts/Inter-Bold.ttf").as_slice())
             .with(GLB, include_bytes!("../../nge-render3d/tests/data/test.glb").as_slice())
+            .with(CUBE, nge_assets::ktx2::write_cube(2, &std::array::from_fn(|_| vec![255; 16])))
             .with(SLOW, png.clone());
         let mut app = App::new();
         app.add_plugins(nge_assets::AssetPlugin::new().source(std::sync::Arc::new(Slow(source))))

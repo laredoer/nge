@@ -2461,6 +2461,7 @@ dependencies = [
  "gltf",
  "image",
  "log",
+ "naga 30.0.1",
  "nge-anim",
  "nge-assets",
  "nge-core",

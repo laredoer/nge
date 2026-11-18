@@ -10,7 +10,7 @@ use nge_core::{Gfx, wgpu};
 
 use crate::camera::{Camera3d, Transform3d};
 use crate::light::Globals;
-use crate::shadow_soft::{Candidate, MAX_LOCAL_LAYERS, depth_range, pick};
+use crate::shadow_soft::{Candidate, MAX_LOCAL_LAYERS, array_layers, depth_range, fit_local_size, pick};
 use crate::shadow_views::{MAX_CASCADES, cascade_matrix, intersects, light_view, point_matrices, slice_corners, splits, spot_matrix};
 
 /// 阴影的设置。
@@ -262,12 +262,21 @@ pub(crate) struct ShadowGpu {
     pub sampler: wgpu::Sampler,
     /// 方向光：`size × size × 段数`。
     pub dir: ShadowMap,
-    /// 聚光灯和点光源：`local_size × local_size × 这一帧用到的层数`。
+    /// 聚光灯和点光源：`local_size × local_size × 层数`，层数只增不减（见 `array_layers`）。
     pub local: ShadowMap,
     passes: Vec<Pass>,
     /// 这一帧方向光每段的结果，每帧清空复用。
     cascades: Vec<(Mat4, f32, f32)>,
+    /// 上一帧和这一帧投影子的灯（挑灯的滞后）。
+    previous: Vec<u64>,
+    picked: Vec<u64>,
+    over_budget: bool,
+    /// GL 后端：方向光的阴影图也避开 1 层和 6 的倍数层。
+    gl: bool,
 }
+
+/// 聚光灯、点光源阴影图最少几层（避开正好 6 层）。
+const LOCAL_MIN_LAYERS: usize = 7;
 
 impl ShadowGpu {
     pub fn new(gfx: &Gfx, draw_layout: &wgpu::BindGroupLayout) -> Self {
@@ -341,10 +350,14 @@ impl ShadowGpu {
             stride,
             bytes: Vec::new(),
             sampler,
-            dir: ShadowMap::new(gfx, "shadow map", 1, 1),
-            local: ShadowMap::new(gfx, "local shadow map", 1, 1),
+            dir: ShadowMap::new(gfx, "shadow map", 1, array_layers(1, 0, 1) as u32),
+            local: ShadowMap::new(gfx, "local shadow map", 1, LOCAL_MIN_LAYERS as u32),
             passes: Vec::new(),
             cascades: Vec::new(),
+            previous: Vec::new(),
+            picked: Vec::new(),
+            over_budget: false,
+            gl: gfx.device.adapter_info().backend == wgpu::Backend::Gl,
         }
     }
 
@@ -370,7 +383,8 @@ impl ShadowGpu {
             globals.counts[2] = 0;
         } else {
             let size = settings.clamped_size();
-            rebuilt |= self.dir.resize(gfx, "shadow map", size, cascades.len() as u32);
+            let layers = if self.gl { array_layers(cascades.len(), 0, 1) } else { cascades.len() };
+            rebuilt |= self.dir.resize(gfx, "shadow map", size, layers as u32);
             for (i, (m, texel, end)) in cascades.iter().enumerate() {
                 globals.cascades[i] = m.to_cols_array_2d();
                 globals.splits[i] = *end;
@@ -384,10 +398,18 @@ impl ShadowGpu {
         }
         self.cascades = cascades;
 
-        let local_size = settings.clamped_local_size();
+        // 显存按最多能用到的层数算：超了边长减半
+        let wanted = settings.clamped_local_size();
+        let local_size = fit_local_size(wanted, array_layers(MAX_LOCAL_LAYERS, 0, LOCAL_MIN_LAYERS));
+        if local_size != wanted && !std::mem::replace(&mut self.over_budget, true) {
+            log::warn!("聚光灯、点光源阴影图 {wanted} 边长超过显存预算，按 {local_size}");
+        }
         let mut layers = 0;
+        self.picked.clear();
         if !casters.is_empty() {
-            for (c, first) in pick(candidates, settings.clamped_max_lights()) {
+            let picked = pick(candidates, settings.clamped_max_lights(), &self.previous);
+            self.picked.extend(picked.iter().map(|&(c, _)| candidates[c].id));
+            for (c, first) in picked {
                 let light = candidates[c];
                 if light.point {
                     let p = globals.points[light.index];
@@ -409,7 +431,9 @@ impl ShadowGpu {
                 }
             }
         }
+        std::mem::swap(&mut self.previous, &mut self.picked);
         if layers > 0 {
+            let layers = array_layers(layers, self.local.layers.len(), LOCAL_MIN_LAYERS);
             rebuilt |= self.local.resize(gfx, "local shadow map", local_size, layers as u32);
             globals.shadow[1] = 1.0 / local_size as f32;
             globals.shadow[3] = 2.0 / local_size as f32 * normal_bias;

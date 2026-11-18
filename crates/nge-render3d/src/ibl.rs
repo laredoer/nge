@@ -156,7 +156,7 @@ impl Cube {
 }
 
 /// SH9 的 9 个基函数在方向 `d` 处的值。
-fn sh_basis(d: Vec3) -> [f32; 9] {
+pub(crate) fn sh_basis(d: Vec3) -> [f32; 9] {
     let (x, y, z) = (d.x, d.y, d.z);
     [
         0.282_095,

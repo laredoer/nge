@@ -63,7 +63,7 @@ impl Plugin for Render3dPlugin {
         // 一插上状态机就有 Pose：第一帧就按状态机的姿势画（见 docs/anim-graph.md）
         app.world_mut().register_required_components::<nge_anim::AnimGraph, crate::animator::Pose>();
         // 天空、雾（见 docs/render3d-quality.md）
-        app.init_asset::<nge_assets::CubeImage>().init_resource::<Sky>().init_resource::<Fog>();
+        app.init_asset::<nge_assets::CubeImage>().init_resource::<Sky>().init_resource::<Fog>().init_resource::<crate::sky_gpu::SkyBake>();
         app.insert_resource(Assets3d::default()).init_resource::<AmbientLight>().init_resource::<Shadows>().add_renderer(MeshRenderer::default());
     }
 }
@@ -168,6 +168,10 @@ impl Renderer for MeshRenderer {
         }
         let mut rebuilt = gpu.shadow.prepare(gfx, &mut globals.0, &camera, &self.casters, &self.scratch.candidates, *world.resource::<Shadows>());
         rebuilt |= gpu.sky.prepare(gfx, world.resource::<Sky>(), world.resource::<Assets<Image>>(), world.resource::<Assets<nge_assets::CubeImage>>(), &mut globals.0);
+        let bake = gpu.sky.status();
+        if *world.resource::<crate::sky_gpu::SkyBake>() != bake {
+            world.insert_resource(bake);
+        }
         if rebuilt {
             gpu.globals_group = globals_group(&gfx.device, &gpu.globals_layout, &gpu.globals, &gpu.shadow, &gpu.sky);
         }
@@ -361,7 +365,7 @@ impl Gpu {
         });
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("meshes"),
-            source: wgpu::ShaderSource::Wgsl(shader_source().into()),
+            source: wgpu::ShaderSource::Wgsl(shader_source(gfx.device.adapter_info().backend == wgpu::Backend::Gl).into()),
         });
         let culls = [Some(wgpu::Face::Back), Some(wgpu::Face::Front), None];
         let pipelines = [false, true]
@@ -526,9 +530,16 @@ impl Gpu {
     }
 }
 
-/// 着色器源码：前面拼上雾，采样盘换成 Rust 算的。
-fn shader_source() -> String {
-    format!("{FOG_WGSL}{SHADER}").replace("POISSON_DISK", &crate::shadow_soft::disk_wgsl())
+/// 着色器源码：前面拼上雾，采样盘换成 Rust 算的。GL 后端上 PCSS 退成泊松盘：GLSL ES 里同一张深度纹理
+/// 不能既按比较采样又直接读，找挡光的那一步写不出来。
+fn shader_source(gl: bool) -> String {
+    let source = format!("{FOG_WGSL}{SHADER}").replace("POISSON_DISK", &crate::shadow_soft::disk_wgsl());
+    if !gl {
+        return source;
+    }
+    let (start, end) = (source.find("fn pcss(").expect("有 pcss"), source.find("/// 法线为").expect("有 receiver_slope"));
+    let fallback = "fn pcss(layer: u32, c: vec4f, n: vec3f, texel: f32, scale: f32) -> f32 {\n    return filtered(shadow_map, layer, c, texel);\n}\n\n";
+    format!("{}{fallback}{}", &source[..start], &source[end..])
 }
 
 /// 主 pass 的全局 bind group：uniform、两张阴影图、环境和天空立方体、BRDF LUT。阴影图、天空换了要重建。
@@ -665,5 +676,31 @@ mod tests {
         assert_eq!(ma.0, mb.0, "同一个 glTF 只展开一次");
         assert_eq!(world.resource::<Assets3d>().model(ma.0).unwrap().parts.len(), 2);
         assert!(world.get::<GltfModel>(c).is_none() && world.get::<Model3d>(c).is_none(), "加载失败的去掉组件");
+    }
+
+    /// 翻译成 GLES 3.1 的 GLSL（顶点着色器读 storage buffer，3.0 不够）；返回出错的入口。
+    fn glsl_errors(source: &str) -> Vec<String> {
+        use naga::back::glsl;
+        let module = naga::front::wgsl::parse_str(source).expect("WGSL 解析");
+        let info = naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::empty()).validate(&module).expect("校验");
+        let options = glsl::Options { version: glsl::Version::Embedded { version: 310, is_webgl: false }, ..Default::default() };
+        let mut errors = Vec::new();
+        for (stage, entry) in [(naga::ShaderStage::Vertex, "vs"), (naga::ShaderStage::Fragment, "fs"), (naga::ShaderStage::Fragment, "fs_sky")] {
+            let pipeline = glsl::PipelineOptions { shader_stage: stage, entry_point: entry.into(), multiview: None };
+            let mut out = String::new();
+            let written = glsl::Writer::new(&mut out, &module, &info, &options, &pipeline, naga::proc::BoundsCheckPolicies::default()).and_then(|mut w| w.write().map(drop));
+            if let Err(e) = written {
+                errors.push(format!("{entry}: {e}"));
+            }
+        }
+        errors
+    }
+
+    #[test]
+    fn the_gl_shader_drops_the_pcss_blocker_search() {
+        let (gl, other) = (shader_source(true), shader_source(false));
+        assert!(!gl.contains("textureLoad(shadow_map") && other.contains("textureLoad(shadow_map"), "GL 上不直接读深度图");
+        assert_eq!(glsl_errors(&gl), Vec::<String>::new(), "GL 版转得成 GLSL ES");
+        assert!(glsl_errors(&other).iter().any(|e| e.starts_with("fs:")), "别的后端用的版本在 GLSL 里转不了（所以要退）");
     }
 }

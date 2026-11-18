@@ -163,6 +163,9 @@ pub(crate) struct Globals {
     pub fog: FogRaw,
 }
 
+/// 投影优先级和灯实体的编号（挑灯时认上一帧挑中的）。
+pub(crate) type Rank = (i32, u64);
+
 impl Globals {
     /// 超出上限的灯丢弃，返回值的第二项表示有没有丢。开了阴影的聚光灯、点光源记进 `candidates`（再按优先级挑，见 `shadow_soft::pick`）。
     #[allow(clippy::too_many_arguments)]
@@ -171,8 +174,8 @@ impl Globals {
         eye: Vec4,
         ambient: AmbientLight,
         dirs: impl IntoIterator<Item = &'a DirectionalLight>,
-        points: impl IntoIterator<Item = (&'a PointLight, Vec3, i32)>,
-        spots: impl IntoIterator<Item = (&'a SpotLight, Vec3, Vec3, i32)>,
+        points: impl IntoIterator<Item = (&'a PointLight, Vec3, Rank)>,
+        spots: impl IntoIterator<Item = (&'a SpotLight, Vec3, Vec3, Rank)>,
         candidates: &mut Vec<Candidate>,
     ) -> (Self, bool) {
         let mut g = Self::zeroed();
@@ -199,7 +202,7 @@ impl Globals {
         }
         g.counts[0] = n as u32;
         n = 0;
-        for (light, position, priority) in points {
+        for (light, position, (priority, id)) in points {
             if n == MAX_POINT_LIGHTS {
                 dropped = true;
                 break;
@@ -209,13 +212,13 @@ impl Globals {
                 color: (light.color * light.intensity).extend(0.0).into(),
             };
             if light.shadows {
-                candidates.push(Candidate { point: true, index: n, priority, distance: distance(position) });
+                candidates.push(Candidate { point: true, index: n, priority, distance: distance(position), id });
             }
             n += 1;
         }
         g.counts[1] = n as u32;
         n = 0;
-        for (light, position, direction, priority) in spots {
+        for (light, position, direction, (priority, id)) in spots {
             let Some(direction) = direction.try_normalize() else { continue };
             if n == MAX_SPOT_LIGHTS {
                 dropped = true;
@@ -228,7 +231,7 @@ impl Globals {
                 color: (light.color * light.intensity).extend(inner.cos()).into(),
             };
             if light.shadows {
-                candidates.push(Candidate { point: false, index: n, priority, distance: distance(position) });
+                candidates.push(Candidate { point: false, index: n, priority, distance: distance(position), id });
             }
             n += 1;
         }
@@ -255,8 +258,8 @@ mod tests {
         spots: impl IntoIterator<Item = (&'a SpotLight, Vec3, Vec3)>,
         candidates: &mut Vec<Candidate>,
     ) -> (Globals, bool) {
-        let points = points.into_iter().map(|(l, p)| (l, p, 0));
-        let spots = spots.into_iter().map(|(l, p, d)| (l, p, d, 0));
+        let points = points.into_iter().enumerate().map(|(i, (l, p))| (l, p, (0, i as u64)));
+        let spots = spots.into_iter().enumerate().map(|(i, (l, p, d))| (l, p, d, (0, 100 + i as u64)));
         Globals::new(Mat4::IDENTITY, Vec4::W, AmbientLight::default(), dirs, points, spots, candidates)
     }
 
@@ -265,7 +268,7 @@ mod tests {
         let dir = DirectionalLight { direction: Vec3::new(0.0, -2.0, 0.0), color: Vec3::new(1.0, 0.5, 0.0), illuminance: 2.0, shadows: false };
         let point = PointLight { color: Vec3::ONE, intensity: 3.0, range: 7.0, shadows: false };
         let ambient = AmbientLight { color: Vec3::new(0.5, 0.5, 1.0), brightness: 0.2 };
-        let (g, dropped) = Globals::new(Mat4::IDENTITY, Vec4::new(1.0, 2.0, 3.0, 1.0), ambient, [&dir], [(&point, Vec3::X, 0)], [], &mut Vec::new());
+        let (g, dropped) = Globals::new(Mat4::IDENTITY, Vec4::new(1.0, 2.0, 3.0, 1.0), ambient, [&dir], [(&point, Vec3::X, (0, 0))], [], &mut Vec::new());
         assert!(!dropped);
         assert_eq!(g.counts, [1, 1, 0, 0]);
         assert_eq!(g.eye, [1.0, 2.0, 3.0, 1.0]);
@@ -363,9 +366,9 @@ mod tests {
         assert_eq!(got, [(true, 1), (true, 2), (false, 1)], "方向是 0 的聚光灯不算，下标按打包以后的");
         assert_eq!(g.counts[3], 2);
         // 透视相机按到相机的距离，正交相机都是 0
-        let p = [(&lit_point, Vec3::new(3.0, 4.0, 0.0), 5)];
+        let p = [(&lit_point, Vec3::new(3.0, 4.0, 0.0), (5, 77))];
         Globals::new(Mat4::IDENTITY, Vec4::W, AmbientLight::default(), [], p, [], &mut candidates);
-        assert_eq!((candidates[0].distance, candidates[0].priority), (5.0, 5));
+        assert_eq!((candidates[0].distance, candidates[0].priority, candidates[0].id), (5.0, 5, 77), "带着灯实体的编号");
         Globals::new(Mat4::IDENTITY, Vec4::Z, AmbientLight::default(), [], p, [], &mut candidates);
         assert_eq!(candidates[0].distance, 0.0);
         assert!(!PointLight::default().shadows);

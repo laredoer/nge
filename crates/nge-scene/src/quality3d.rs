@@ -41,8 +41,10 @@ pub struct SkyNode {
 impl<'de> Deserialize<'de> for SkyNode {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let mut f = Fields::new("sky", Value::deserialize(d)?).map_err(serde::de::Error::custom)?;
-        Ok(Self {
-            cube: f.get("cube"),
+        // cube 写错时不退成程序天空：整个 sky 当没写
+        let cube = f.strict("cube").map_err(serde::de::Error::custom)?;
+        let node = Self {
+            cube,
             top: f.get("top"),
             horizon: f.get("horizon"),
             ground: f.get("ground"),
@@ -52,7 +54,9 @@ impl<'de> Deserialize<'de> for SkyNode {
             diffuse: f.get("diffuse"),
             specular: f.get("specular"),
             background: f.get("background"),
-        })
+        };
+        f.finish();
+        Ok(node)
     }
 }
 
@@ -95,7 +99,7 @@ pub struct FogNode {
 impl<'de> Deserialize<'de> for FogNode {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let mut f = Fields::new("fog", Value::deserialize(d)?).map_err(serde::de::Error::custom)?;
-        Ok(Self {
+        let node = Self {
             mode: f.get("mode"),
             start: f.get("start"),
             end: f.get("end"),
@@ -104,7 +108,9 @@ impl<'de> Deserialize<'de> for FogNode {
             sky: f.get("sky"),
             height: f.get("height"),
             max: f.get("max"),
-        })
+        };
+        f.finish();
+        Ok(node)
     }
 }
 
@@ -134,7 +140,7 @@ pub struct ShadowsNode {
 impl<'de> Deserialize<'de> for ShadowsNode {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let mut f = Fields::new("shadows", Value::deserialize(d)?).map_err(serde::de::Error::custom)?;
-        Ok(Self {
+        let node = Self {
             filter: f.get("filter"),
             softness: f.get("softness"),
             sun_size: f.get("sunSize"),
@@ -145,7 +151,9 @@ impl<'de> Deserialize<'de> for ShadowsNode {
             debug_cascades: f.get("debugCascades"),
             size: f.get("size"),
             local_size: f.get("localSize"),
-        })
+        };
+        f.finish();
+        Ok(node)
     }
 }
 
@@ -162,12 +170,17 @@ fn sky(node: &SkyNode, sun: Option<[f32; 3]>, assets: &mut SceneAssets, cubes: &
     let (d, g) = (Sky::default(), SkyGradient::default());
     let source = match &node.cube {
         Some(CubeNode::Ktx2(uri)) => SkySource::Cube(assets.cube(cubes, uri)),
-        Some(CubeNode::Faces(names)) => SkySource::Faces(names.clone().map(|name| {
-            assets.image(&name).unwrap_or_else(|| {
-                warn_once(format!("sky.cube 引用了未注册的纹理 {name:?}，画成白色"));
-                TextureId::WHITE
-            })
-        })),
+        Some(CubeNode::Faces(names)) => {
+            let mut faces = [TextureId::WHITE; 6];
+            for (face, name) in faces.iter_mut().zip(names) {
+                let Some(id) = assets.image(name) else {
+                    warn_once(format!("sky.cube 引用了未注册的纹理 {name:?}，整个 sky 当没写"));
+                    return Sky::default();
+                };
+                *face = id;
+            }
+            SkySource::Faces(faces)
+        }
         None => SkySource::Gradient(SkyGradient {
             top: rgb(node.top, g.top),
             horizon: rgb(node.horizon, g.horizon),
@@ -241,12 +254,17 @@ pub(crate) fn sync_quality3d(
     mut last_shadows: Local<Option<Option<ShadowsNode>>>,
 ) {
     let key = (scene.sky.clone(), scene.sky.as_ref().filter(|s| s.sun.is_none() && s.cube.is_none()).and_then(|_| first_sun(&scene)));
+    // 场景从没写过时不动：留着 Rust 设的（和 shadows 一样）
     if last_sky.as_ref() != Some(&key) {
-        *sky_res = key.0.as_ref().map_or_else(Sky::default, |node| sky(node, key.1, &mut assets, &mut cubes));
+        if last_sky.is_some() || key.0.is_some() {
+            *sky_res = key.0.as_ref().map_or_else(Sky::default, |node| sky(node, key.1, &mut assets, &mut cubes));
+        }
         *last_sky = Some(key);
     }
     if last_fog.as_ref() != Some(&scene.fog) {
-        *fog_res = scene.fog.as_ref().map_or_else(Fog::default, fog);
+        if last_fog.is_some() || scene.fog.is_some() {
+            *fog_res = scene.fog.as_ref().map_or_else(Fog::default, fog);
+        }
         *last_fog = Some(scene.fog.clone());
     }
     if last_shadows.as_ref() != Some(&scene.shadows) {
@@ -333,10 +351,11 @@ mod tests {
     #[test]
     fn cube_sky_loads_faces_or_a_ktx2() {
         let mut app = app();
-        frame(&mut app, Some(json!({ "sky": { "cube": [PNG, PNG, PNG, PNG, "plain", "没有"], "background": false } })));
+        frame(&mut app, Some(json!({ "sky": { "cube": [PNG, PNG, PNG, PNG, PNG, "plain"], "background": false } })));
         let sky = app.world().resource::<Sky>().clone();
         let SkySource::Faces(faces) = sky.source else { panic!("6 张图 {sky:?}") };
-        assert_eq!((faces[0], faces[5], sky.background), (faces[1], TextureId::WHITE, false), "同一张图只读一次，找不到的是白色");
+        assert_eq!((faces[0], sky.background), (faces[1], false), "同一张图只读一次");
+        assert_ne!(faces[5], faces[0], "注册过的纹理名也行");
         frame(&mut app, Some(json!({ "sky": { "cube": "asset:/@t/sky.ktx2" } })));
         assert!(matches!(app.world().resource::<Sky>().source, SkySource::Cube(_)));
     }
@@ -350,5 +369,39 @@ mod tests {
         frame(&mut app, Some(json!({ "lights": [{ "id": "a", "kind": "spot", "shadows": true }] })));
         let world = app.world_mut();
         assert_eq!(world.query::<&ShadowPriority>().iter(world).count(), 0, "去掉了就没有");
+    }
+
+    #[test]
+    fn rust_sky_and_fog_survive_while_the_scene_never_declares_them() {
+        let mut app = app();
+        app.world_mut().insert_resource(Fog { mode: FogMode::Exp { density: 0.1 }, ..Default::default() });
+        app.world_mut().insert_resource(Sky { source: SkySource::Gradient(SkyGradient::default()), ..Default::default() });
+        frame(&mut app, Some(json!({ "sprites": [] })));
+        assert_eq!(app.world().resource::<Fog>().mode, FogMode::Exp { density: 0.1 }, "场景没写 fog，留着 Rust 设的");
+        assert!(matches!(app.world().resource::<Sky>().source, SkySource::Gradient(_)), "场景没写 sky，留着 Rust 设的");
+        // 写过再去掉：回到默认
+        frame(&mut app, Some(json!({ "fog": { "density": 0.3 }, "sky": {} })));
+        frame(&mut app, Some(json!({ "sprites": [] })));
+        assert_eq!((app.world().resource::<Fog>().mode, app.world().resource::<Sky>().source.clone()), (FogMode::None, SkySource::None));
+    }
+
+    #[test]
+    fn a_bad_cube_drops_the_whole_sky() {
+        let mut app = app();
+        frame(&mut app, Some(json!({ "sky": { "cube": ["a", "b"], "top": "#ff0000" } })));
+        assert_eq!(app.world().resource::<Sky>().source, SkySource::None, "cube 写错（2 张）不退成程序天空");
+        let s: Scene = serde_json::from_value(json!({ "sky": { "cube": 3 } })).unwrap();
+        assert_eq!(s.sky, None);
+        // 6 张里有一张找不到：整个天空当没写
+        frame(&mut app, Some(json!({ "sky": { "cube": [PNG, PNG, PNG, PNG, PNG, "没有这张"] } })));
+        assert_eq!(app.world().resource::<Sky>().source, SkySource::None);
+    }
+
+    #[test]
+    fn unknown_fields_are_warned_once() {
+        let _: Scene = serde_json::from_value(json!({ "fog": { "dennsity": 0.1 }, "shadows": { "maxLight": 2 }, "sky": { "tops": "#000000" } })).unwrap();
+        for (node, key) in [("fog", "dennsity"), ("shadows", "maxLight"), ("sky", "tops")] {
+            assert!(!crate::lenient::warn_once(format!("场景的 {node} 里没有 {key:?} 这个字段，忽略")), "{node}.{key} 已经 warn 过");
+        }
     }
 }

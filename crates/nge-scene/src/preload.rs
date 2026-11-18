@@ -66,7 +66,8 @@ pub(crate) fn kind_of(uri: &str) -> Option<Kind> {
     })
 }
 
-/// 场景（或预制体）引用的 `asset:/` 资源：贴图、法线图、字体、模型、背景音乐、预制体文件、`transition.preload`、`textures` 的键。
+/// 场景（或预制体）引用的 `asset:/` 资源：贴图、法线图、字体、模型、背景音乐、预制体文件、`transition.preload`、`textures` 的键、
+/// `sky.cube` 的 6 张图（一张 KTX2 立方体贴图见 [`cube_of`]）。
 pub(crate) fn uris_of(scene: &Scene) -> Vec<String> {
     let mut uris: Vec<String> = Vec::new();
     collect(scene, &mut uris, 0);
@@ -94,6 +95,9 @@ fn collect(scene: &Scene, out: &mut Vec<String>, depth: usize) {
         out.extend(t.preload.iter().cloned());
     }
     out.extend(scene.textures.keys().cloned());
+    if let Some(crate::quality3d::SkyNode { cube: Some(crate::quality3d::CubeNode::Faces(faces)), .. }) = &scene.sky {
+        out.extend(faces.iter().cloned());
+    }
     // 写在场景里的预制体：里面的节点还没展开
     if depth < 4 {
         for def in scene.prefabs.values() {
@@ -101,6 +105,14 @@ fn collect(scene: &Scene, out: &mut Vec<String>, depth: usize) {
                 collect(&inner, out, depth + 1);
             }
         }
+    }
+}
+
+/// 场景的 `sky.cube` 写的一张 KTX2 立方体贴图（按 `CubeImage` 加载，不按贴图）。
+pub(crate) fn cube_of(scene: &Scene) -> Option<String> {
+    match &scene.sky {
+        Some(crate::quality3d::SkyNode { cube: Some(crate::quality3d::CubeNode::Ktx2(uri)), .. }) if uri.starts_with("asset:/") => Some(uri.clone()),
+        _ => None,
     }
 }
 
@@ -129,6 +141,13 @@ impl Preloading {
                 }
             }
             None => self.group.fail(uri, "认不出资源类型（按扩展名：png、jpg、ktx2、wav、ogg、mp3、flac、gltf、glb、ttf、otf、json）"),
+        }
+    }
+
+    /// 立方体贴图（KTX2）。
+    pub fn add_cube(&mut self, world: &mut World, uri: &str) {
+        if self.uris.insert(format!("cube:{uri}")) {
+            let _ = start::<nge_assets::CubeImage>(world, &mut self.group, uri);
         }
     }
 

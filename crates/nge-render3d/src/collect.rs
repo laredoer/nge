@@ -74,8 +74,8 @@ type Item = (MeshId, MaterialId, Mat4, Option<(u32, u32)>, [f32; MAX_MORPH_TARGE
 #[derive(Default)]
 pub(crate) struct Scratch {
     dirs: Vec<DirectionalLight>,
-    points: Vec<(PointLight, Vec3, i32)>,
-    spots: Vec<(SpotLight, Vec3, Vec3, i32)>,
+    points: Vec<(PointLight, Vec3, crate::light::Rank)>,
+    spots: Vec<(SpotLight, Vec3, Vec3, crate::light::Rank)>,
     items: Vec<Item>,
     /// 这一帧开了阴影的聚光灯、点光源（按优先级挑之前）。
     pub candidates: Vec<Candidate>,
@@ -97,10 +97,10 @@ pub(crate) fn globals(world: &mut World, size: Vec2, scratch: &mut Scratch) -> (
     dirs.clear();
     dirs.extend(world.query::<&DirectionalLight>().iter(world).copied());
     points.clear();
-    points.extend(world.query::<(&PointLight, &Transform3d, Option<&ShadowPriority>)>().iter(world).map(|(l, t, p)| (*l, t.translation, priority(p))));
+    points.extend(world.query::<(Entity, &PointLight, &Transform3d, Option<&ShadowPriority>)>().iter(world).map(|(e, l, t, p)| (*l, t.translation, (priority(p), e.to_bits()))));
     spots.clear();
     spots.extend(
-        world.query::<(&SpotLight, &Transform3d, Option<&ShadowPriority>)>().iter(world).map(|(l, t, p)| (*l, t.translation, t.rotation * Vec3::NEG_Z, priority(p))),
+        world.query::<(Entity, &SpotLight, &Transform3d, Option<&ShadowPriority>)>().iter(world).map(|(e, l, t, p)| (*l, t.translation, t.rotation * Vec3::NEG_Z, (priority(p), e.to_bits()))),
     );
     let view = View { rotation: eye.rotation, eye: camera.eye(&eye) };
     let globals = Globals::new(

@@ -587,7 +587,7 @@ export interface LightNode {
   innerAngle?: number;
   /** 投影子，见 docs/3d-more.md、docs/render3d-more.md；聚光灯、点光源最多 `shadows.maxLights` 盏投（见 docs/render3d-quality.md）。 */
   shadows?: boolean;
-  /** 投影子的聚光灯、点光源超过上限时先挑大的，一样大挑离相机近的；没挑上的照常照明。 */
+  /** 投影子的聚光灯、点光源超过上限时先挑大的，一样大挑离相机近的；没挑上的照常照明。要是整数，写小数 warn 后当没写。 */
   shadowPriority?: number;
 }
 
@@ -639,15 +639,15 @@ export interface ShadowsNode {
   bias?: number;
   /** 法线偏移（阴影图像素），默认 1.5。 */
   normalBias?: number;
-  /** 聚光灯、点光源最多几盏投影子，默认 2，最多 4。 */
+  /** 聚光灯、点光源最多几盏投影子，默认 2，最多 4。要是整数，写小数 warn 后当没写。 */
   maxLights?: number;
   /** 级联交界的过渡带占一段的多少（0–0.5），默认 0.1。 */
   blend?: number;
   /** 按级联染色：红、绿、蓝、黄。 */
   debugCascades?: boolean;
-  /** 方向光阴影图的边长，默认 2048。 */
+  /** 方向光阴影图的边长，默认 2048。要是整数，写小数 warn 后当没写。 */
   size?: number;
-  /** 聚光灯、点光源阴影图的边长，默认 512。 */
+  /** 聚光灯、点光源阴影图的边长，默认 512；显存超过 64 MB 时自动减半。要是整数，写小数 warn 后当没写。 */
   localSize?: number;
 }
 

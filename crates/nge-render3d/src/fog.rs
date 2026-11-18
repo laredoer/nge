@@ -86,17 +86,28 @@ impl Fog {
 }
 
 /// 高度雾沿视线的光学厚度：∫ density × e^(-falloff (y - base))，y 从 `from_y` 线性走到 `to_y`。
+/// 设 `a = -f(from - base)`、`b = -f(to - base)`，结果是 `density·d·(e^a - e^b) / (a - b)`；
+/// 提出较大的那项 `e^m`（指数限制在 80 以内），剩下两项都不超过 1，不会出现下溢的 0 乘上溢的 inf、
+/// 也不会两项都被截住后减成 0。最后不小于 0。`fog.wgsl` 的 `fog_amount` 一样。
 fn height_depth(h: HeightFog, distance: f32, from_y: f32, to_y: f32) -> f32 {
     if h.density <= 0.0 {
         return 0.0;
     }
     let falloff = h.falloff.max(0.0);
-    let start = h.density * (-falloff * (from_y - h.base)).exp();
-    let x = falloff * (to_y - from_y);
-    // (1 - e^(-x)) / x，x 很小时取极限 1
-    let average = if x.abs() < 1e-4 { 1.0 - x * 0.5 } else { (1.0 - (-x).exp()) / x };
-    start * average * distance
+    let (a, b) = (-falloff * (from_y - h.base), -falloff * (to_y - h.base));
+    let x = a - b;
+    let depth = if x.abs() < 1e-4 {
+        // 视线水平：取极限
+        h.density * a.min(HEIGHT_EXP).exp() * (1.0 - x * 0.5) * distance
+    } else {
+        let m = a.max(b);
+        h.density * distance * m.min(HEIGHT_EXP).exp() * ((a - m).exp() - (b - m).exp()) / x
+    };
+    depth.max(0.0)
 }
+
+/// 高度雾的指数最大 80：e^80 还在 f32 里。
+const HEIGHT_EXP: f32 = 80.0;
 
 /// 和 `fog.wgsl` 里的 `Fog` 一一对应。
 #[repr(C)]
@@ -186,5 +197,27 @@ mod tests {
         assert_eq!(r.camera, [0.0, 5.0, 0.0, 1.0]);
         assert_eq!(f.raw(Vec3::ZERO, false, Vec3::NEG_Z, false).color[3], 0.0, "没有天空不混");
         assert_eq!(size_of::<FogRaw>(), 80);
+    }
+
+    #[test]
+    fn height_fog_from_a_high_camera_stays_finite() {
+        // 相机高 200、看地面（base 0）：falloff × 高度 > 88 时以前是 0 × inf = NaN
+        let f = Fog { height: Some(HeightFog { base: 0.0, falloff: 1.0, density: 0.05 }), ..Default::default() };
+        let a = f.amount(250.0, 200.0, 0.0);
+        // 解析值：密度 × 距离 × (e^(-200) - e^0) / (0 - 200) ≈ 0.05 × 250 / 200
+        assert!((a - (1.0 - (-0.05f32 * 250.0 / 200.0).exp())).abs() < 1e-4, "{a}");
+        let b = Fog { height: Some(HeightFog { base: 0.0, falloff: 0.5, density: 0.05 }), ..Default::default() }.amount(300.0, 190.0, 0.0);
+        assert!(b.is_finite() && b > 0.0 && b < 0.2, "{b}");
+        // 往上看、两头都很高：几乎没有雾，也不是 NaN
+        let up = f.amount(300.0, 200.0, 400.0);
+        assert!(up.is_finite() && up < 1e-6, "{up}");
+        // 两头都在很低的地方（指数被限制住）：满雾
+        let low = f.amount(10.0, -500.0, -500.0);
+        assert_eq!(low, 1.0);
+        // 两头都低、高度不同：两项指数都超过限制时以前减成 0（没有雾），不限制是 inf - inf = NaN
+        for (from, to) in [(-500.0, -100.0), (-100.0, -500.0)] {
+            let deep = f.amount(400.0, from, to);
+            assert_eq!(deep, 1.0, "{from} → {to}");
+        }
     }
 }

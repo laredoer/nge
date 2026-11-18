@@ -166,8 +166,11 @@ fn shade(n: vec3f, v: vec3f, l: vec3f, radiance: vec3f, albedo: vec3f, metallic:
 var<private> DISK: array<vec2f, 16> = POISSON_DISK;
 
 /// 交错梯度噪声：每个像素一个 0–1 的数，转采样盘用。
-fn noise(p: vec2f) -> f32 {
-    return fract(52.9829189 * fract(dot(p, vec2f(0.06711056, 0.00583715))));
+/// 采样盘按阴影图像素转的角度（4 × 4 Bayer，0–2π）：跟着阴影图的像素格走，镜头动时纹样不游动，静止时也没有斜纹。
+fn rotation(uv: vec2f, size: vec2f) -> f32 {
+    let p = vec2u(floor(uv * size)) % 4u;
+    var bayer = array<f32, 16>(0.0, 8.0, 2.0, 10.0, 12.0, 4.0, 14.0, 6.0, 3.0, 11.0, 1.0, 9.0, 15.0, 7.0, 13.0, 5.0);
+    return (bayer[p.y * 4u + p.x] + 0.5) / 16.0 * 6.2831853;
 }
 
 /// 裁剪坐标 → 阴影图的 (u, v, 深度)；图外面、灯背后 w < 0（算照到）。
@@ -204,7 +207,7 @@ fn disk_pcf(map: texture_depth_2d_array, layer: u32, s: vec4f, radius: f32, angl
 }
 
 /// 第 `layer` 层在裁剪坐标 `c` 处被照到多少（0 全挡、1 全照到）：PCF 或采样盘。
-fn filtered(map: texture_depth_2d_array, layer: u32, c: vec4f, texel: f32, frag: vec2f) -> f32 {
+fn filtered(map: texture_depth_2d_array, layer: u32, c: vec4f, texel: f32) -> f32 {
     let s = shadow_uv(c);
     if s.w < 0.0 {
         return 1.0;
@@ -212,25 +215,29 @@ fn filtered(map: texture_depth_2d_array, layer: u32, c: vec4f, texel: f32, frag:
     if g.casters.x == 0u {
         return pcf3(map, layer, s, texel);
     }
-    return disk_pcf(map, layer, s, g.soft.x * texel, noise(frag) * 6.2831853);
+    return disk_pcf(map, layer, s, g.soft.x * texel, rotation(s.xy, vec2f(textureDimensions(map))));
 }
 
-/// PCSS（方向光）：先在最大半影里找挡光的，平均遮挡深度和片元深度差 × `scale` 就是半影宽（像素）。
-fn pcss(layer: u32, c: vec4f, texel: f32, scale: f32, frag: vec2f) -> f32 {
+/// PCSS（方向光）：先在最大半影里找挡光的，平均遮挡深度和片元深度差 × `scale` 是半影宽（直径，像素），按一半做采样盘的半径。
+/// 找挡光的时候按片元所在平面（法线 `n`）在光空间里的斜率补偿每个采样点的深度，斜面不会把自己算成挡光的。
+/// 每个像素：找挡光的 16 次 `textureLoad`，加上采样盘 16 次比较采样。
+fn pcss(layer: u32, c: vec4f, n: vec3f, texel: f32, scale: f32) -> f32 {
     let s = shadow_uv(c);
     if s.w < 0.0 {
         return 1.0;
     }
-    let angle = noise(frag) * 6.2831853;
-    let r = mat2x2f(cos(angle), sin(angle), -sin(angle), cos(angle));
     let size = vec2f(textureDimensions(shadow_map));
+    let angle = rotation(s.xy, size);
+    let r = mat2x2f(cos(angle), sin(angle), -sin(angle), cos(angle));
+    let slope = receiver_slope(g.cascades[layer], n);
     var sum = 0.0;
     var blockers = 0.0;
     for (var i = 0u; i < 16u; i++) {
-        let uv = s.xy + r * DISK[i] * g.soft.w * texel;
+        let offset = r * DISK[i] * g.soft.w * texel;
+        let uv = s.xy + offset;
         let at = clamp(vec2i(uv * size), vec2i(0), vec2i(size) - 1);
         let d = textureLoad(shadow_map, at, layer, 0);
-        if d < s.z {
+        if d < s.z + dot(slope, offset) {
             sum += d;
             blockers += 1.0;
         }
@@ -238,16 +245,35 @@ fn pcss(layer: u32, c: vec4f, texel: f32, scale: f32, frag: vec2f) -> f32 {
     if blockers == 0.0 {
         return 1.0;
     }
-    let penumbra = clamp((s.z - sum / blockers) * scale, 1.0, g.soft.w);
+    let penumbra = clamp(0.5 * (s.z - sum / blockers) * scale, 1.0, g.soft.w);
     return disk_pcf(shadow_map, layer, s, penumbra * texel, angle);
 }
 
-fn cascade_lit(c: u32, world: vec3f, n: vec3f, frag: vec2f) -> f32 {
+/// 法线为 `n` 的平面在阴影图上的深度斜率（深度 / uv）：取平面上两个方向，看它们在光空间里怎么变。几乎侧对着光时是 0。
+fn receiver_slope(m: mat4x4f, n: vec3f) -> vec2f {
+    var t = cross(n, vec3f(0.0, 1.0, 0.0));
+    if dot(t, t) < 1e-4 {
+        t = cross(n, vec3f(1.0, 0.0, 0.0));
+    }
+    let a = (m * vec4f(normalize(t), 0.0)).xyz;
+    let b = (m * vec4f(normalize(cross(n, t)), 0.0)).xyz;
+    let au = a.x * 0.5;
+    let av = -a.y * 0.5;
+    let bu = b.x * 0.5;
+    let bv = -b.y * 0.5;
+    let det = au * bv - bu * av;
+    if abs(det) < 1e-8 {
+        return vec2f(0.0);
+    }
+    return vec2f(a.z * bv - b.z * av, au * b.z - bu * a.z) / det;
+}
+
+fn cascade_lit(c: u32, world: vec3f, n: vec3f) -> f32 {
     let clip = g.cascades[c] * vec4f(world + n * g.cascade_offset[c], 1.0);
     if g.casters.x == 2u {
-        return pcss(c, clip, g.shadow.x, g.pcss[c], frag);
+        return pcss(c, clip, n, g.shadow.x, g.pcss[c]);
     }
-    return filtered(shadow_map, c, clip, g.shadow.x, frag);
+    return filtered(shadow_map, c, clip, g.shadow.x);
 }
 
 /// 片元在相机前方 `depth` 处用第几段（x，-1 是最后一段以外）、往下一段混多少（y）；和 shadow_soft.rs 的 `cascade_blend` 一样。
@@ -270,17 +296,17 @@ fn cascade_of(depth: f32) -> vec2f {
 }
 
 /// 方向光：按片元在相机前方的距离挑段，交界前混下一段，最后一段末尾淡出到照到。
-fn lit_directional(world: vec3f, n: vec3f, frag: vec2f) -> f32 {
+fn lit_directional(world: vec3f, n: vec3f) -> f32 {
     let at = cascade_of(dot(world, g.view_forward.xyz) + g.view_forward.w);
     if at.x < 0.0 {
         return 1.0;
     }
     let c = u32(at.x);
-    var lit = cascade_lit(c, world, n, frag);
+    var lit = cascade_lit(c, world, n);
     if at.y > 0.0 {
         var next = 1.0;
         if c + 1u < g.casters.z {
-            next = cascade_lit(c + 1u, world, n, frag);
+            next = cascade_lit(c + 1u, world, n);
         }
         lit = mix(lit, next, at.y);
     }
@@ -303,13 +329,13 @@ fn cascade_tint(world: vec3f) -> vec3f {
 }
 
 /// 聚光灯：一个像素在世界里多大按沿视线到灯的距离放大。
-fn lit_local(layer: u32, world: vec3f, n: vec3f, depth: f32, per_unit: f32, frag: vec2f) -> f32 {
-    return filtered(local_map, layer, g.locals[layer] * vec4f(world + n * depth * per_unit, 1.0), g.shadow.y, frag);
+fn lit_local(layer: u32, world: vec3f, n: vec3f, depth: f32, per_unit: f32) -> f32 {
+    return filtered(local_map, layer, g.locals[layer] * vec4f(world + n * depth * per_unit, 1.0), g.shadow.y);
 }
 
 /// 点光源（六面从 `first` 层开始）：推出去的量按片元到灯最远的那一轴算；挑面用推出去之后的点（绝对值最大的轴），
 /// 和实际采样的点一致，不然面和面交界的对角线附近推出去的点落到挑中的面外面，算成照亮。
-fn lit_point(first: u32, world: vec3f, n: vec3f, light: vec3f, frag: vec2f) -> f32 {
+fn lit_point(first: u32, world: vec3f, n: vec3f, light: vec3f) -> f32 {
     let a0 = abs(world - light);
     let p = world + n * max(a0.x, max(a0.y, a0.z)) * g.shadow.w;
     let v = p - light;
@@ -320,7 +346,7 @@ fn lit_point(first: u32, world: vec3f, n: vec3f, light: vec3f, frag: vec2f) -> f
     } else if a.y >= a.z {
         face = 2u + select(0u, 1u, v.y < 0.0);
     }
-    return filtered(local_map, first + face, g.locals[first + face] * vec4f(p, 1.0), g.shadow.y, frag);
+    return filtered(local_map, first + face, g.locals[first + face] * vec4f(p, 1.0), g.shadow.y);
 }
 
 /// 距离衰减：按距离平方，到 range 平滑降到 0。
@@ -331,8 +357,6 @@ fn attenuation(dist2: f32, range: f32) -> f32 {
 
 @fragment
 fn fs(i: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4f {
-    // 片元着色器里 clip 是像素坐标
-    let frag = i.clip;
     let base = textureSample(base_tex, base_sampler, i.uv) * d.base_color;
     if d.params.z >= 0.0 && base.a < d.params.z {
         discard;
@@ -355,7 +379,7 @@ fn fs(i: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4f {
         let light = g.dirs[k];
         var radiance = light.color.rgb;
         if g.counts.z == k + 1u {
-            radiance *= lit_directional(i.world, n, frag.xy);
+            radiance *= lit_directional(i.world, n);
         }
         color += shade(n, v, light.to_light.xyz, radiance, base.rgb, metallic, roughness);
     }
@@ -366,7 +390,7 @@ fn fs(i: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4f {
         var radiance = light.color.rgb * attenuation(dist2, light.position_range.w);
         let layer = g.point_layers[k / 4u][k % 4u];
         if layer > 0u {
-            radiance *= lit_point(layer - 1u, i.world, n, light.position_range.xyz, frag.xy);
+            radiance *= lit_point(layer - 1u, i.world, n, light.position_range.xyz);
         }
         color += shade(n, v, to * inverseSqrt(dist2), radiance, base.rgb, metallic, roughness);
     }
@@ -380,7 +404,7 @@ fn fs(i: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4f {
         var radiance = light.color.rgb * attenuation(dist2, light.position_range.w) * t * t * (3.0 - 2.0 * t);
         let layer = g.spot_layers[k];
         if layer > 0u {
-            radiance *= lit_local(layer - 1u, i.world, n, dot(-to, light.direction.xyz), g.spot_offset[k], frag.xy);
+            radiance *= lit_local(layer - 1u, i.world, n, dot(-to, light.direction.xyz), g.spot_offset[k]);
         }
         color += shade(n, v, l, radiance, base.rgb, metallic, roughness);
     }
@@ -396,7 +420,7 @@ fn environment(n: vec3f, v: vec3f, albedo: vec3f, metallic: f32, roughness: f32)
     let n_v = max(dot(n, v), 1e-4);
     let f0 = mix(vec3f(0.04), albedo, metallic);
     let fr = f0 + (max(vec3f(1.0 - roughness), f0) - f0) * pow(1.0 - n_v, 5.0);
-    let diffuse = sh_irradiance(g.sh, n) * albedo / PI * (1.0 - fr) * (1.0 - metallic) * g.env.x;
+    let diffuse = max(sh_irradiance(g.sh, n), vec3f(0.0)) * albedo / PI * (1.0 - fr) * (1.0 - metallic) * g.env.x;
     let prefiltered = textureSampleLevel(env_cube, env_sampler, reflect(-v, n), roughness * g.env.z).rgb;
     let ab = textureSampleLevel(brdf_lut, env_sampler, vec2f(n_v, roughness), 0.0).rg;
     return diffuse + prefiltered * (f0 * ab.x + ab.y) * g.env.y;

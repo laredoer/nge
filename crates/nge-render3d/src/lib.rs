@@ -42,6 +42,7 @@ pub use nge_assets::CubeImage;
 pub use shadow::{ShadowFilter, Shadows};
 pub use shadow_soft::ShadowPriority;
 pub use sky::{Sky, SkyGradient, SkySource};
+pub use sky_gpu::SkyBake;
 
 pub mod prelude {
     pub use crate::{

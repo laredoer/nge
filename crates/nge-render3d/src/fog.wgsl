@@ -49,12 +49,18 @@ fn fog_amount(f: Fog, world: vec3f) -> f32 {
     }
     var depth = 0.0;
     if f.height.z > 0.0 {
+        // 两项指数相减：提出较大的那项（指数最大 80），剩下的都不超过 1，相机很高、很低时都不是 NaN
         let falloff = max(f.height.y, 0.0);
-        let start = f.height.z * exp(-falloff * (f.camera.y - f.height.x));
-        let x = falloff * (world.y - f.camera.y);
-        // (1 - e^(-x)) / x，x 很小时取极限
-        let average = select((1.0 - exp(-x)) / x, 1.0 - x * 0.5, abs(x) < 1e-4);
-        depth = start * average * d;
+        let a = -falloff * (f.camera.y - f.height.x);
+        let b = -falloff * (world.y - f.height.x);
+        let x = a - b;
+        if abs(x) < 1e-4 {
+            depth = f.height.z * exp(min(a, 80.0)) * (1.0 - x * 0.5) * d;
+        } else {
+            let m = max(a, b);
+            depth = f.height.z * d * exp(min(m, 80.0)) * (exp(a - m) - exp(b - m)) / x;
+        }
+        depth = max(depth, 0.0);
     }
     return clamp((1.0 - (1.0 - by) * exp(-depth)) * f.height.w, 0.0, 1.0);
 }
