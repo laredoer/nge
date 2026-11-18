@@ -58,8 +58,8 @@ impl SpriteSheet {
             SheetMode::Lifetime => (age / lifetime.max(f32::EPSILON)).clamp(0.0, 1.0) * n as f32,
             SheetMode::Fps(fps) => age.max(0.0) * if fps.is_finite() { fps.max(0.0) } else { 0.0 },
         };
-        // 按寿命播、从头开始时停在最后一帧，不绕回第一帧
-        let once = self.mode == SheetMode::Lifetime && start == 0.0;
+        // 按寿命播、不随机起始时停在最后一帧，不绕回第一帧
+        let once = self.mode == SheetMode::Lifetime && !self.random_start;
         let f = if once { progress.min(n as f32 - 1.0) } else { (start + progress).rem_euclid(n as f32) };
         let f = if f.is_finite() { f } else { 0.0 };
         let frame = (f.floor() as u32).min(n - 1);
@@ -100,8 +100,10 @@ mod tests {
         assert_eq!(s.pick(2.0, 2.0, 0.0), (7, 7, 0.0), "最后停在最后一帧，不绕回第一帧");
         assert_eq!(s.pick(1.99, 2.0, 0.0).1, 7, "最后一帧不往第一帧混");
         assert_eq!(sheet(SheetMode::Lifetime, false).pick(1.125, 2.0, 0.0), (4, 5, 0.0), "不混时比例是 0");
-        // 随机起始：从第 6 帧开始，过一半寿命绕回来
-        assert_eq!(s.pick(1.0, 2.0, 6.0), (2, 3, 0.0));
+        // 随机起始：从第 6 帧开始，过一半寿命绕回来；抽到第 0 帧时也照样绕，最后一帧往第一帧混
+        let random = SpriteSheet { random_start: true, ..s };
+        assert_eq!(random.pick(1.0, 2.0, 6.0), (2, 3, 0.0));
+        assert_eq!(random.pick(1.99, 2.0, 0.0).1, 0);
     }
 
     #[test]

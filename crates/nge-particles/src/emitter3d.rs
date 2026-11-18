@@ -163,6 +163,8 @@ pub struct Particle3d {
     pub lifetime: f32,
     /// 序列帧的起始帧。
     pub frame: f32,
+    /// 上一帧碰到了表面：贴着表面时不再发碰撞事件。
+    pub touching: bool,
 }
 
 /// 所有 3D 粒子共用的上限（资源，`Particles3dPlugin` 加上）。
@@ -210,7 +212,7 @@ impl Particles3d {
         self.pool.particles.iter()
     }
 
-    fn advance(&mut self, emitter: &ParticleEmitter3d, transform: &Transform3d, dt: f32, time: f32, budget: &mut Budget, world: Option<&dyn Raycast>, surfaces: &MeshSurfaces) {
+    fn advance(&mut self, emitter: &ParticleEmitter3d, transform: &Transform3d, dt: f32, time: f64, budget: &mut Budget, world: Option<&dyn Raycast>, surfaces: &MeshSurfaces) {
         let mut frame = Frame { dt, time, rng: &mut self.rng, budget, world, surfaces };
         self.pool.step(emitter, Source::Root { origin: transform.translation, rotation: transform.rotation }, &mut frame, 0);
     }
@@ -219,6 +221,8 @@ impl Particles3d {
         self.pool.burst_done && emitter.rate <= 0.0 && self.pool.total() == 0
     }
 }
+
+static WARNED_NO_PHYSICS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 pub(crate) fn simulate3d(
     mut commands: Commands,
@@ -230,14 +234,17 @@ pub(crate) fn simulate3d(
     mut billboards: ResMut<Billboards>,
     mut emitters: Query<(Entity, &ParticleEmitter3d, &mut Particles3d, Option<&Transform3d>)>,
 ) {
-    // 软上限按这一帧开头的存活数算
-    let alive: usize = emitters.iter().map(|(_, _, p, _)| p.len()).sum();
-    let mut budget = Budget { remaining: limits.limit.saturating_sub(alive), dropped: 0, queries: limits.max_queries, queried: 0 };
+    // 软上限按这一帧开头的存活数算，场景查询按这一帧开头要查的粒子数分
+    let (alive, load) = emitters.iter().fold((0, 0), |(a, l), (_, e, p, _)| (a + p.len(), l + p.pool.scene_load(e, 0)));
+    let mut budget = Budget { remaining: limits.limit.saturating_sub(alive), dropped: 0, queries: limits.max_queries, load, queried: 0 };
     let world = physics.as_deref().map(|p| p as &dyn Raycast);
+    if world.is_none() && load > 0 && !WARNED_NO_PHYSICS.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        log::warn!("3D 粒子开了 collision.scene，但没有 3D 物理（Physics3dPlugin），只碰地面");
+    }
     let mut total = 0;
     for (entity, emitter, mut particles, transform) in &mut emitters {
         let transform = transform.copied().unwrap_or_default();
-        particles.advance(emitter, &transform, time.delta, time.elapsed as f32, &mut budget, world, &surfaces);
+        particles.advance(emitter, &transform, time.delta, time.elapsed, &mut budget, world, &surfaces);
         if emitter.despawn_when_done && particles.finished(emitter) {
             commands.entity(entity).despawn();
             continue;
@@ -245,7 +252,7 @@ pub(crate) fn simulate3d(
         total += particles.len();
         particles.pool.billboards(emitter, &mut |texture, blend, b| billboards.push(texture, blend, b));
     }
-    *stats = ParticleStats { alive: total as u32, dropped: budget.dropped as u32, queries: budget.queried };
+    *stats = ParticleStats { alive: total as u32, dropped: budget.dropped.min(u32::MAX as usize) as u32, queries: budget.queried };
 }
 
 #[cfg(test)]
@@ -301,7 +308,7 @@ mod tests {
 
     /// 不限量地推进 `dt` 秒。
     fn step(particles: &mut Particles3d, emitter: &ParticleEmitter3d, origin: Vec3, rotation: Quat, dt: f32) {
-        let mut budget = Budget { remaining: usize::MAX, dropped: 0, queries: 0, queried: 0 };
+        let mut budget = Budget { remaining: usize::MAX, dropped: 0, queries: 0, load: 0, queried: 0 };
         particles.advance(emitter, &Transform3d { translation: origin, rotation, ..Default::default() }, dt, 0.0, &mut budget, None, &MeshSurfaces::default());
     }
 
@@ -419,6 +426,62 @@ mod tests {
         assert_eq!(particles.len(), 50);
         // 平面边长 2、挪到 x = 5、再放大 2 倍：x 在 8 … 12，z 在 -2 … 2
         assert!(particles.iter().all(|p| (8.0 - 1e-4..=12.0 + 1e-4).contains(&p.position.x) && p.position.z.abs() <= 2.0 + 1e-4 && p.position.y.abs() < 1e-4), "{:?}", particles.iter().next());
+    }
+
+    #[test]
+    fn mesh_bursts_wait_for_the_model_and_the_cache_follows_the_emitters() {
+        use nge_render3d::{Assets3d, MaterialId, Mesh, Model, Part};
+        let mut app = app();
+        // 还没加进来的模型（编号 0）：一直等，不删、不缓存成失败
+        let model = Assets3d::default().add_model(Model::default()).unwrap();
+        let shape = EmitShape::Mesh(crate::MeshSource::Model { model, scale: Vec3::ONE });
+        let id = app.world_mut().spawn(ParticleEmitter3d { shape, speed: (0.0, 0.0), lifetime: (10.0, 10.0), ..ParticleEmitter3d::burst(20) }).id();
+        for _ in 0..3 {
+            app.tick(VIEWPORT, 0.1);
+        }
+        assert!(app.world().get_entity(id).is_ok(), "网格没好时不算放完");
+        assert_eq!(app.world().resource::<MeshSurfaces>().len(), 0);
+        {
+            let mut assets = app.world_mut().resource_mut::<Assets3d>();
+            let mesh = assets.add_mesh(Mesh::plane(2.0)).unwrap();
+            assets.add_model(Model { parts: vec![Part::new(mesh, MaterialId::DEFAULT, glam::Mat4::IDENTITY)], ..Default::default() }).unwrap();
+        }
+        app.tick(VIEWPORT, 0.1);
+        assert_eq!(app.world().get::<Particles3d>(id).unwrap().len(), 20, "模型加进来以后发出去");
+        assert_eq!(app.world().resource::<MeshSurfaces>().len(), 1);
+        // 没有三角形的模型：放弃，一次性的照样删
+        let empty = app.world_mut().resource_mut::<Assets3d>().add_model(Model::default()).unwrap();
+        let shape = EmitShape::Mesh(crate::MeshSource::Model { model: empty, scale: Vec3::ONE });
+        let gone = app.world_mut().spawn(ParticleEmitter3d { shape, ..ParticleEmitter3d::burst(20) }).id();
+        app.tick(VIEWPORT, 0.1);
+        app.tick(VIEWPORT, 0.1);
+        assert!(app.world().get_entity(gone).is_err(), "没有三角形的不等");
+        // 发射器都没了：缓存清掉
+        app.world_mut().despawn(id);
+        app.tick(VIEWPORT, 0.1);
+        assert_eq!(app.world().resource::<MeshSurfaces>().len(), 0);
+    }
+
+    #[test]
+    fn scene_collisions_skip_their_group_and_colliders_they_start_in() {
+        use nge_physics3d::{Collider, Physics3dPlugin, RigidBody};
+        let mut app = app();
+        app.add_plugins(Physics3dPlugin::default());
+        // 顶面在 y = 0 的地板（分组 3），和一个包住 (20, 10) 处出生点的盒子
+        app.world_mut().spawn((RigidBody::Fixed, Collider { group: 3, ..Collider::cuboid(Vec3::new(100.0, 1.0, 100.0)) }, Transform3d::from_xyz(0.0, -0.5, 0.0)));
+        app.world_mut().spawn((RigidBody::Fixed, Collider::cuboid(Vec3::splat(4.0)), Transform3d::from_xyz(20.0, 10.0, 0.0)));
+        let falling = |group: u8, x: f32, y: f32| {
+            let collision = ParticleCollision { scene: true, bounce: 0.0, group, ..Default::default() };
+            (ParticleEmitter3d { speed: (5.0, 5.0), direction: Vec3::NEG_Y, spread: 0.0, lifetime: (10.0, 10.0), collision: Some(collision), ..ParticleEmitter3d::burst(1) }, Transform3d::from_xyz(x, y, 0.0))
+        };
+        let (hits, skips, inside) = (app.world_mut().spawn(falling(0, 0.0, 1.0)).id(), app.world_mut().spawn(falling(3, 0.0, 1.0)).id(), app.world_mut().spawn(falling(0, 20.0, 10.0)).id());
+        for _ in 0..180 {
+            app.tick(VIEWPORT, 1.0 / 60.0);
+        }
+        let y = |app: &App, id| app.world().get::<Particles3d>(id).unwrap().iter().next().unwrap().position.y;
+        assert!((0.0..0.05).contains(&y(&app, hits)), "落在地板上");
+        assert!(y(&app, skips) < -1.0, "同一组的穿过去");
+        assert!((0.0..0.05).contains(&y(&app, inside)), "出生在盒子里的不被盒子挡，穿出去落到地板上：{}", y(&app, inside));
     }
 
     #[test]

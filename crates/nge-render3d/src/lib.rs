@@ -7,6 +7,7 @@ mod billboard_gpu;
 mod billboards;
 mod camera;
 mod collect;
+mod depth_target;
 mod fog;
 mod gizmos;
 mod gltf_load;

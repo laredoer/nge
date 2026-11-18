@@ -1,4 +1,4 @@
-//! 湍流：三个值噪声做势场，有限差分求 curl（无散度，粒子不会往一处聚）。
+//! 湍流：三个值噪声做势场，解析求 curl（无散度，粒子不会往一处聚）。
 
 use glam::Vec3;
 
@@ -19,49 +19,60 @@ impl Default for Noise3d {
     }
 }
 
-fn hash(x: i32, y: i32, z: i32, seed: u32) -> f32 {
-    let mut h = (x as u32).wrapping_mul(0x8DA6_B343) ^ (y as u32).wrapping_mul(0xD816_3841) ^ (z as u32).wrapping_mul(0xCB1A_B31F) ^ seed.wrapping_mul(0x9E37_79B9);
+/// 格点每 `PERIOD` 格重复一次：滚动的偏移可以先取模，跑得再久也不丢精度。
+pub(crate) const PERIOD: i32 = 256;
+
+/// 一个格点上三个势场的值，各在 [-1, 1]（一次哈希出三个）。
+fn corner(x: i32, y: i32, z: i32) -> Vec3 {
+    let (x, y, z) = (x.rem_euclid(PERIOD) as u32, y.rem_euclid(PERIOD) as u32, z.rem_euclid(PERIOD) as u32);
+    let mut h = x.wrapping_mul(0x8DA6_B343) ^ y.wrapping_mul(0xD816_3841) ^ z.wrapping_mul(0xCB1A_B31F);
     h ^= h >> 13;
     h = h.wrapping_mul(0x5BD1_E995);
     h ^= h >> 15;
-    (h >> 8) as f32 / (1u32 << 23) as f32 - 1.0
+    let mut g = h.wrapping_mul(0x9E37_79B9);
+    g ^= g >> 16;
+    let unit = |bits: u32| (bits & 0x3FF) as f32 / 511.5 - 1.0;
+    Vec3::new(unit(g), unit(g >> 10), unit(g >> 20))
 }
 
-/// 五次的平滑插值：导数在格子边上连续。
-fn fade(t: f32) -> f32 {
-    t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
+/// 五次的平滑插值和它的导数：导数在格子边上连续。
+fn fade(t: f32) -> (f32, f32) {
+    (t * t * t * (t * (t * 6.0 - 15.0) + 10.0), 30.0 * t * t * (t - 1.0) * (t - 1.0))
 }
 
-/// 值噪声，[-1, 1]。
-fn value(p: Vec3, seed: u32) -> f32 {
+/// 三个值噪声势场在 `p` 处的值和对 x、y、z 的偏导（解析求，八个格点各哈希一次）。
+fn field(p: Vec3) -> (Vec3, [Vec3; 3]) {
     let base = p.floor();
     let f = p - base;
     let (x, y, z) = (base.x as i32, base.y as i32, base.z as i32);
-    let (u, v, w) = (fade(f.x), fade(f.y), fade(f.z));
-    let lerp = |a: f32, b: f32, t: f32| a + (b - a) * t;
-    let corner = |dx: i32, dy: i32, dz: i32| hash(x + dx, y + dy, z + dz, seed);
-    let x0 = lerp(lerp(corner(0, 0, 0), corner(1, 0, 0), u), lerp(corner(0, 1, 0), corner(1, 1, 0), u), v);
-    let x1 = lerp(lerp(corner(0, 0, 1), corner(1, 0, 1), u), lerp(corner(0, 1, 1), corner(1, 1, 1), u), v);
-    lerp(x0, x1, w)
+    let ((u, du), (v, dv), (w, dw)) = (fade(f.x), fade(f.y), fade(f.z));
+    let c = |dx: i32, dy: i32, dz: i32| corner(x + dx, y + dy, z + dz);
+    let (c000, c100, c010, c110, c001, c101, c011, c111) = (c(0, 0, 0), c(1, 0, 0), c(0, 1, 0), c(1, 1, 0), c(0, 0, 1), c(1, 0, 1), c(0, 1, 1), c(1, 1, 1));
+    // 三线性插值展开成 u、v、w 的多项式
+    let (k1, k2, k3) = (c100 - c000, c010 - c000, c001 - c000);
+    let (k4, k5, k6) = (c000 - c100 - c010 + c110, c000 - c010 - c001 + c011, c000 - c100 - c001 + c101);
+    let k7 = c100 + c010 + c001 + c111 - c000 - c110 - c101 - c011;
+    let value = c000 + k1 * u + k2 * v + k3 * w + k4 * (u * v) + k5 * (v * w) + k6 * (w * u) + k7 * (u * v * w);
+    let dx = (k1 + k4 * v + k6 * w + k7 * (v * w)) * du;
+    let dy = (k2 + k4 * u + k5 * w + k7 * (u * w)) * dv;
+    let dz = (k3 + k5 * v + k6 * u + k7 * (u * v)) * dw;
+    (value, [dx, dy, dz])
 }
 
-const H: f32 = 1e-3;
-
-/// 三个势场在 `p` 处的偏导：`d[i][j]` 是第 `i` 个场对第 `j` 个坐标。
-fn jacobian(p: Vec3) -> [[f32; 3]; 3] {
-    let mut d = [[0.0; 3]; 3];
-    for (i, row) in d.iter_mut().enumerate() {
-        for (j, axis) in [Vec3::X, Vec3::Y, Vec3::Z].into_iter().enumerate() {
-            row[j] = (value(p + axis * H, i as u32) - value(p - axis * H, i as u32)) / (2.0 * H);
-        }
-    }
-    d
+#[cfg(test)]
+fn potential(p: Vec3) -> Vec3 {
+    field(p).0
 }
 
-/// 势场的 curl，长度大致在 0 … 几。
+/// 势场在 `p` 处的 curl，长度大致在 0 … 几。
 pub(crate) fn curl(p: Vec3) -> Vec3 {
-    let d = jacobian(p);
-    Vec3::new(d[2][1] - d[1][2], d[0][2] - d[2][0], d[1][0] - d[0][1])
+    let (_, [dx, dy, dz]) = field(p);
+    Vec3::new(dy.z - dz.y, dz.x - dx.z, dx.y - dy.x)
+}
+
+/// 噪声场在时刻 `time` 沿 y 滚过的格数，按周期取模（用 f64 算，跑得再久也准）。
+pub(crate) fn scroll(time: f64, speed: f32) -> f32 {
+    (time * speed as f64).rem_euclid(PERIOD as f64) as f32
 }
 
 #[cfg(test)]
@@ -88,5 +99,27 @@ mod tests {
         assert!(d < g * 0.05, "散度 {d} 对比变化 {g}");
         // 相邻的点差不多（连续）
         assert!((curl(Vec3::splat(0.5)) - curl(Vec3::splat(0.5001))).length() < 0.01);
+    }
+
+    #[test]
+    fn the_curl_matches_finite_differences_of_the_potentials() {
+        let h = 1e-3;
+        for i in 0..200 {
+            let p = Vec3::new(i as f32 * 0.173 - 7.0, (i * 7 % 29) as f32 * 0.27, (i * 11 % 19) as f32 * -0.31);
+            let d = |axis: Vec3| (potential(p + axis * h) - potential(p - axis * h)) / (2.0 * h);
+            let (dx, dy, dz) = (d(Vec3::X), d(Vec3::Y), d(Vec3::Z));
+            let expected = Vec3::new(dy.z - dz.y, dz.x - dx.z, dx.y - dy.x);
+            assert!((curl(p) - expected).length() < 0.02 * (1.0 + expected.length()), "{p}: {} 对比 {expected}", curl(p));
+        }
+    }
+
+    #[test]
+    fn the_field_repeats_and_scrolling_stays_precise() {
+        let p = Vec3::new(1.3, 2.7, -0.4);
+        assert!((curl(p) - curl(p + Vec3::Y * PERIOD as f32)).length() < 1e-3, "沿 y 每 {PERIOD} 格重复");
+        // 跑了很久：f32 的时间早就丢了小数，取模以后还是准的
+        let late = scroll(1.0e9 + 0.25, 2.0);
+        assert!((late - 0.5).abs() < 1e-4, "{late}");
+        assert!((0.0..PERIOD as f32).contains(&scroll(-3.0, 1.0)));
     }
 }

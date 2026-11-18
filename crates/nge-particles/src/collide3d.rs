@@ -17,11 +17,15 @@ pub struct ParticleCollision {
     pub kill: bool,
     /// 粒子半径：停在表面外这么远。
     pub radius: f32,
+    /// 场景查询像碰撞分组 `group` 的碰撞体一样：跳过同一组的（1 … 31；0 不跳过）。
+    pub group: u8,
+    /// 只碰这些分组：第 g 位是分组 g，第 0 位是不分组的。
+    pub only: u32,
 }
 
 impl Default for ParticleCollision {
     fn default() -> Self {
-        Self { ground: None, scene: false, bounce: 0.5, friction: 0.0, kill: false, radius: 0.0 }
+        Self { ground: None, scene: false, bounce: 0.5, friction: 0.0, kill: false, radius: 0.0, group: 0, only: u32::MAX }
     }
 }
 
@@ -58,22 +62,24 @@ pub(crate) fn ground_hit(from: Vec3, to: Vec3, height: f32, radius: f32) -> Opti
 
 /// 场景的射线查询（`nge_physics3d::Physics3d`；测试里换成别的）。
 pub(crate) trait Raycast {
-    /// 从 `origin` 沿单位向量 `dir` 最远 `max`：碰到的点、面的法线。
-    fn raycast(&self, origin: Vec3, dir: Vec3, max: f32) -> Option<(Vec3, Vec3)>;
+    /// 从 `origin` 沿单位向量 `dir` 最远 `max`，按 `c` 的分组过滤：碰到的点、面的法线。起点在碰撞体里面的不算碰到。
+    fn raycast(&self, origin: Vec3, dir: Vec3, max: f32, c: &ParticleCollision) -> Option<(Vec3, Vec3)>;
 }
 
 impl Raycast for nge_physics3d::Physics3d {
-    fn raycast(&self, origin: Vec3, dir: Vec3, max: f32) -> Option<(Vec3, Vec3)> {
-        nge_physics3d::Physics3d::raycast(self, origin, dir, max, Default::default()).map(|h| (h.point, h.normal))
+    fn raycast(&self, origin: Vec3, dir: Vec3, max: f32, c: &ParticleCollision) -> Option<(Vec3, Vec3)> {
+        let filter = nge_physics3d::QueryFilter::default().group(c.group).only(c.only);
+        // 出生在碰撞体里（碰到的距离是 0）：跳过，不弹，让它自己穿出去
+        nge_physics3d::Physics3d::raycast(self, origin, dir, max, filter).filter(|h| h.distance > 0.0).map(|h| (h.point, h.normal))
     }
 }
 
-/// 场景里从 `from` 走到 `to` 碰到的地方（半径 `radius`）。
-pub(crate) fn scene_hit(world: &dyn Raycast, from: Vec3, to: Vec3, radius: f32) -> Option<Hit> {
+/// 场景里从 `from` 走到 `to` 碰到的地方（半径 `c.radius`）。
+pub(crate) fn scene_hit(world: &dyn Raycast, from: Vec3, to: Vec3, c: &ParticleCollision) -> Option<Hit> {
     let delta = to - from;
     let dir = delta.try_normalize()?;
-    let radius = radius.max(0.0);
-    let (point, normal) = world.raycast(from, dir, delta.length() + radius)?;
+    let radius = c.radius.max(0.0);
+    let (point, normal) = world.raycast(from, dir, delta.length() + radius, c)?;
     // 停在表面外半径那么远，至少比碰到的点往回退一点，免得下一帧从里面出发
     Some(Hit { point: point + normal * radius.max(1e-4 * delta.length().max(1.0)), normal })
 }

@@ -445,9 +445,9 @@ export interface Emitter3dNode {
   colorGradient?: [number, string][];
   /** 速度阻尼：每秒乘 e^-drag。 */
   drag?: number;
-  /** 湍流（curl noise）：strength 是加速度，frequency 每单位几格（默认 1），scroll 每秒沿 y 移几格。 */
+  /** 湍流（curl noise）：strength 是加速度（默认 1），frequency 每单位几格（默认 1），scroll 每秒沿 y 移几格（默认 0）。 */
   noise?: { strength?: number; frequency?: number; scroll?: number };
-  /** 朝向：朝相机（默认）、沿速度拉长、水平躺着，或固定朝向的欧拉角 [x, y, z]（度）。 */
+  /** 朝向：朝相机（默认）、沿速度拉长、水平躺着，或固定朝向的欧拉角 [x, y, z]（度，和模型的 rotation 一样先绕 x、再绕 y、最后绕 z）。 */
   facing?: "camera" | "velocity" | "horizontal" | [number, number, number];
   /** `facing: "velocity"` 时的拉长系数：长 = 边长 + 速度 × stretch，默认 0.1。 */
   stretch?: number;
@@ -457,9 +457,13 @@ export interface Emitter3dNode {
   soft?: number;
   /** 受环境光和方向光影响。 */
   lit?: boolean;
-  /** 碰撞：地面高度 ground、场景碰撞体 scene；bounce 反弹（默认 0.5）、friction 摩擦、kill 碰到就死、radius 粒子半径。 */
-  collision?: { ground?: number; scene?: boolean; bounce?: number; friction?: number; kill?: boolean; radius?: number };
-  /** 子发射器：父粒子出生、死亡、碰撞时在它的位置 burst count 个；最多套 3 层。 */
+  /**
+   * 碰撞：地面高度 ground、场景碰撞体 scene；bounce 反弹（默认 0.5）、friction 摩擦、kill 碰到就死、radius 粒子半径。
+   * group 跳过这个碰撞分组的碰撞体（同 ModelBody.group），only 只碰这些分组（0 是不分组的）；出生在碰撞体里的粒子不被它挡。
+   * 贴着表面（停着、滑着）时只在刚碰上那一帧算一次碰撞。
+   */
+  collision?: { ground?: number; scene?: boolean; bounce?: number; friction?: number; kill?: boolean; radius?: number; group?: number; only?: number[] };
+  /** 子发射器：父粒子出生、死亡、碰撞时在它的位置 burst count 个（最多 10000）；最多套 3 层。按下标对应，调换顺序会换掉已经发出去的子粒子。 */
   subEmitters?: SubEmitterNode[];
 }
 

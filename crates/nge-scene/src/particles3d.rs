@@ -284,16 +284,28 @@ pub struct CollisionNode {
     pub friction: Option<f32>,
     pub kill: Option<bool>,
     pub radius: Option<f32>,
+    pub group: Option<u8>,
+    /// `only` 的分组列表换成的位掩码。
+    pub only: Option<u32>,
 }
 
 impl<'de> Deserialize<'de> for CollisionNode {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let mut f = Fields::new("emitters3d.collision", Value::deserialize(d)?).map_err(serde::de::Error::custom)?;
-        let node = Self { ground: f.get("ground"), scene: f.get("scene"), bounce: f.get("bounce"), friction: f.get("friction"), kill: f.get("kill"), radius: f.get("radius") };
+        let only = f.get::<Vec<u8>>("only").map(|groups| {
+            if groups.iter().any(|g| *g > 31) {
+                log::warn!("emitters3d.collision.only 的分组在 0 … 31，多的不算");
+            }
+            groups.iter().filter(|g| **g <= 31).fold(0u32, |mask, g| mask | 1 << g)
+        });
+        let node = Self { ground: f.get("ground"), scene: f.get("scene"), bounce: f.get("bounce"), friction: f.get("friction"), kill: f.get("kill"), radius: f.get("radius"), group: f.get("group"), only };
         f.finish();
         Ok(node)
     }
 }
+
+/// 子发射器一次 burst 最多几个。
+pub const MAX_SUB_COUNT: u32 = 10_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -319,7 +331,11 @@ impl<'de> Deserialize<'de> for SubEmitterNode {
             v.and_then(|v| v.ok_or(format!("要写 {key}")))
         }
         let on = required(f.strict("on"), "on").map_err(serde::de::Error::custom)?;
-        let count = required(f.strict("count"), "count").map_err(serde::de::Error::custom)?;
+        let count: u32 = required(f.strict("count"), "count").map_err(serde::de::Error::custom)?;
+        if count > MAX_SUB_COUNT {
+            log::warn!("emitters3d.subEmitters 的 count {count} 太大，按 {MAX_SUB_COUNT} 算");
+        }
+        let count = count.min(MAX_SUB_COUNT);
         let emitter = f.strict("emitter").map_err(serde::de::Error::custom)?.unwrap_or_default();
         let node = Self { on, count, inherit: f.get("inherit"), emitter: Box::new(emitter) };
         f.finish();
@@ -402,7 +418,8 @@ pub(crate) fn emitter3d(node: &Emitter3dNode, assets: &mut SceneAssets) -> Parti
         None | Some(FacingNode::Mode(FacingMode::Camera)) => ParticleFacing::Camera,
         Some(FacingNode::Mode(FacingMode::Velocity)) => ParticleFacing::Velocity { stretch: node.stretch.unwrap_or(0.1) },
         Some(FacingNode::Mode(FacingMode::Horizontal)) => ParticleFacing::Horizontal,
-        Some(FacingNode::Fixed([x, y, z])) => ParticleFacing::Fixed(Quat::from_euler(EulerRot::XYZ, x.to_radians(), y.to_radians(), z.to_radians())),
+        // 和模型的 rotation 一样：先绕 x、再绕 y、最后绕 z（YXZ）
+        Some(FacingNode::Fixed([x, y, z])) => ParticleFacing::Fixed(Quat::from_euler(EulerRot::YXZ, y.to_radians(), x.to_radians(), z.to_radians())),
     };
     let sheet = node.sheet.map(|s| SpriteSheet {
         columns: s.grid[0],
@@ -421,6 +438,8 @@ pub(crate) fn emitter3d(node: &Emitter3dNode, assets: &mut SceneAssets) -> Parti
             friction: c.friction.unwrap_or(d.friction),
             kill: c.kill.unwrap_or(d.kill),
             radius: c.radius.unwrap_or(d.radius),
+            group: c.group.unwrap_or(d.group),
+            only: c.only.unwrap_or(d.only),
         }
     });
     let sub_emitters = node
@@ -590,8 +609,8 @@ mod tests {
             "facing": "velocity", "stretch": 0.3,
             "sheet": { "grid": [4, 2], "frames": 6, "fps": 12, "randomStart": true, "blend": true },
             "soft": 8, "lit": true, "angle": [0, 90],
-            "collision": { "ground": -5, "bounce": 0.2, "friction": 0.1, "kill": true, "radius": 1 },
-            "subEmitters": [{ "on": "collision", "count": 4, "inherit": 0.5, "emitter": { "lifetime": [0.5, 0.5], "facing": "horizontal" } }],
+            "collision": { "ground": -5, "bounce": 0.2, "friction": 0.1, "kill": true, "radius": 1, "group": 3, "only": [0, 2] },
+            "subEmitters": [{ "on": "collision", "count": 4, "inherit": 0.5, "emitter": { "lifetime": [0.5, 0.5], "facing": "horizontal" } }, { "on": "death", "count": 1000000, "emitter": {} }],
         });
         frame(&mut app, Some(json!({ "emitters3d": [node] })));
         let all = entity(&mut app, "all").unwrap();
@@ -604,16 +623,17 @@ mod tests {
         assert_eq!(e.facing, ParticleFacing::Velocity { stretch: 0.3 });
         assert_eq!(e.sheet, Some(SpriteSheet { columns: 4, rows: 2, frames: 6, mode: SheetMode::Fps(12.0), random_start: true, blend: true }));
         assert_eq!((e.soft, e.lit, e.angle), (8.0, true, Some((0.0, std::f32::consts::FRAC_PI_2))));
-        assert_eq!(e.collision, Some(ParticleCollision { ground: Some(-5.0), scene: false, bounce: 0.2, friction: 0.1, kill: true, radius: 1.0 }));
+        assert_eq!(e.collision, Some(ParticleCollision { ground: Some(-5.0), scene: false, bounce: 0.2, friction: 0.1, kill: true, radius: 1.0, group: 3, only: 0b101 }));
         let sub = &e.sub_emitters[0];
         assert_eq!((sub.on, sub.count, sub.inherit, sub.emitter.lifetime, sub.emitter.facing), (SubTrigger::Collision, 4, 0.5, (0.5, 0.5), ParticleFacing::Horizontal));
+        assert_eq!(e.sub_emitters[1].count, MAX_SUB_COUNT, "一次 burst 的个数有上限");
         // 固定朝向是欧拉角度；网格形状认 glTF
-        let fixed: Emitter3dNode = serde_json::from_value(json!({ "facing": [90, 0, 0], "shape": { "kind": "mesh", "model": "asset:/@g/a.glb", "scale": 2 } })).unwrap();
+        let fixed: Emitter3dNode = serde_json::from_value(json!({ "facing": [90, 90, 0], "shape": { "kind": "mesh", "model": "asset:/@g/a.glb", "scale": 2 } })).unwrap();
         let mut assets_state: bevy_ecs::system::SystemState<SceneAssets> = bevy_ecs::system::SystemState::new(app.world_mut());
         let mut assets = assets_state.get_mut(app.world_mut()).unwrap();
         let fixed = emitter3d(&fixed, &mut assets);
         let ParticleFacing::Fixed(q) = fixed.facing else { panic!("{:?}", fixed.facing) };
-        assert!((q * Vec3::Z - Vec3::NEG_Y).length() < 1e-5, "绕 x 转 90°：+Z 转到 -Y");
+        assert!((q * Vec3::Y - Vec3::X).length() < 1e-5, "和模型的 rotation 一样先绕 x 再绕 y：+Y 先到 +Z 再到 +X，{}", q * Vec3::Y);
         assert!(matches!(fixed.shape, EmitShape::Mesh(nge_particles::MeshSource::Gltf { scale, .. }) if scale == Vec3::splat(2.0)));
     }
 

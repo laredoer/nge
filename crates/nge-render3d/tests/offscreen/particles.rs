@@ -23,11 +23,21 @@ fn white(_: &mut World) -> ImageId {
 
 /// 一张朝相机的蓝色平面（z = 0），前面 0.25 处一张红色方片。
 fn soft_over_plane(soft: f32) -> Option<Pixels> {
+    soft_over_plane_with(soft, |_| {})
+}
+
+fn soft_over_plane_with(soft: f32, extra: fn(&mut App)) -> Option<Pixels> {
     let red = Billboard { position: Vec3::new(0.0, 0.0, 0.25), size: 1.0, color: Vec4::new(1.0, 0.0, 0.0, 1.0), soft, ..Default::default() };
-    one(red, Blend::Alpha, white, |app| {
+    one(red, Blend::Alpha, white, move |app| {
         unlit(app);
         app.add_systems(Startup, |world: &mut World| solid(world, Vec4::new(0.0, 0.0, 1.0, 1.0), Mesh::plane(4.0), facing_camera()));
+        extra(app);
     })
+}
+
+/// 离平面 0.25、软化 1：剩 0.25 的红，线性 0.25 / 0.75 写进 sRGB 是 137 / 225。
+fn quarter_red(c: [u8; 4]) -> bool {
+    c[0].abs_diff(137) <= 6 && c[2].abs_diff(225) <= 6 && c[1] == 0
 }
 
 #[test]
@@ -37,9 +47,30 @@ fn soft_particles_fade_near_opaque_surfaces() {
     };
     assert!(close(hard.center(), [255, 0, 0, 255]), "不软化 {:?}", hard.center());
     let c = soft_over_plane(1.0).unwrap().center();
-    // 离平面 0.25、软化 1：剩 0.25 的红，线性 0.25 / 0.75 写进 sRGB 是 137 / 225
-    assert!(c[0].abs_diff(137) <= 6 && c[2].abs_diff(225) <= 6 && c[1] == 0, "{c:?}");
+    assert!(quarter_red(c), "{c:?}");
     assert!(close(soft_over_plane(0.1).unwrap().center(), [255, 0, 0, 255]), "离得比软化距离远就不淡");
+}
+
+#[test]
+fn soft_particles_work_with_orthographic_cameras_and_interleaved_sprites() {
+    let ortho = |app: &mut App| {
+        app.add_systems(Startup, |world: &mut World| {
+            world.spawn((Camera3d { ortho: Some(4.0), ..Default::default() }, Transform3d::from_xyz(0.0, 0.0, 5.0)));
+        });
+    };
+    let Some(img) = soft_over_plane_with(1.0, ortho) else {
+        return eprintln!("没有 GPU，跳过");
+    };
+    assert!(quarter_red(img.center()), "正交相机 {:?}", img.center());
+    let mixed = |app: &mut App| {
+        use nge_render2d::{Render2dPlugin, Sprite, Transform2d};
+        app.add_plugins(Render2dPlugin).insert_resource(nge_ecs::Interleave(true));
+        app.add_systems(Startup, |world: &mut World| {
+            world.spawn((Sprite::color(Vec2::splat(0.5), Vec4::new(0.0, 1.0, 0.0, 1.0)), Transform2d::from_xy(1.5, 1.5).with_z(1.0)));
+        });
+    };
+    let img = soft_over_plane_with(1.0, mixed).unwrap();
+    assert!(quarter_red(img.center()), "混排时照样软化 {:?}", img.center());
 }
 
 #[test]

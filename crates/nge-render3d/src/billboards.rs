@@ -191,12 +191,19 @@ pub(crate) fn build(billboards: &Billboards, view: View, scratch: &mut Scratch, 
         let center = points.iter().map(|p| p.position).sum::<Vec3>() / points.len() as f32;
         items.push((*t, *b, view.depth(center), Item::Ribbon(i)));
     }
-    // 透明在前、从远往近；叠加在后、按贴图（稳定排序，同一张贴图里保持原来的顺序）
-    items.sort_by(|a, b| match (a.1, b.1) {
-        (Blend::Alpha, Blend::Alpha) => b.2.total_cmp(&a.2),
-        (Blend::Alpha, Blend::Add) => std::cmp::Ordering::Less,
-        (Blend::Add, Blend::Alpha) => std::cmp::Ordering::Greater,
-        (Blend::Add, Blend::Add) => a.0.cmp(&b.0),
+    // 透明在前、从远往近；叠加在后、按贴图；一样的按放进来的顺序（方片在前、带子在后）
+    let order = |item: Item| match item {
+        Item::Quad(i) => i,
+        Item::Ribbon(i) => billboards.quads.len() + i,
+    };
+    items.sort_unstable_by(|a, b| {
+        match (a.1, b.1) {
+            (Blend::Alpha, Blend::Alpha) => b.2.total_cmp(&a.2),
+            (Blend::Alpha, Blend::Add) => std::cmp::Ordering::Less,
+            (Blend::Add, Blend::Alpha) => std::cmp::Ordering::Greater,
+            (Blend::Add, Blend::Add) => a.0.cmp(&b.0),
+        }
+        .then(order(a.3).cmp(&order(b.3)))
     });
     let mut soft = false;
     for &(texture, blend, _, item) in items.iter() {
@@ -469,6 +476,20 @@ mod tests {
         let ortho = View { rotation: Quat::IDENTITY, eye: Vec4::new(0.0, 0.0, 1.0, 0.0) };
         let (v, batches) = built(&b, ortho);
         assert_eq!(v[batches[0].vertices.start as usize].position[2], -5.0);
+    }
+
+    #[test]
+    fn ties_keep_the_order_they_were_pushed_in() {
+        let mut b = Billboards::default();
+        // 一样远的透明方片、同一张贴图的叠加方片：按放进来的顺序画（x 从左到右）
+        for i in 0..200 {
+            let blend = if i % 2 == 0 { Blend::Alpha } else { Blend::Add };
+            b.push(ImageId::WHITE, blend, Billboard { position: Vec3::new(i as f32 * 3.0, 0.0, 0.0), ..quad_at(0.0) });
+        }
+        let (v, _) = built(&b, view());
+        let xs: Vec<f32> = v.chunks(6).map(|q| q[0].position[0]).collect();
+        let (alpha, add) = xs.split_at(100);
+        assert!(alpha.windows(2).all(|w| w[0] < w[1]) && add.windows(2).all(|w| w[0] < w[1]), "{xs:?}");
     }
 
     #[test]

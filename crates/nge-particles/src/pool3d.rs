@@ -9,7 +9,7 @@ use nge_render3d::{Billboard, Blend, FULL_UV, Facing};
 
 use crate::collide3d::{self, Raycast};
 use crate::emitter3d::{Particle3d, ParticleEmitter3d, ParticleFacing, SubEmitter3d, SubTrigger};
-use crate::noise::curl;
+use crate::noise::{curl, scroll};
 use crate::rng::Rng;
 use crate::shape3d::{self, EmitShape, MeshSurfaces};
 
@@ -31,10 +31,12 @@ pub(crate) struct Event {
 pub(crate) struct Budget {
     /// 还能发多少个粒子。
     pub remaining: usize,
-    /// 因为上限没发的。
+    /// 因为总数上限没发的（单个发射器到了 `max` 的不算）。
     pub dropped: usize,
-    /// 还能查几次场景。
+    /// 这一帧最多查几次场景。
     pub queries: u32,
+    /// 这一帧开头要查场景的粒子数（所有池子加起来），查询次数按它分。
+    pub load: usize,
     /// 查了几次。
     pub queried: u32,
 }
@@ -42,7 +44,7 @@ pub(crate) struct Budget {
 pub(crate) struct Frame<'a> {
     pub dt: f32,
     /// 噪声滚动用的时间（秒）。
-    pub time: f32,
+    pub time: f64,
     pub rng: &'a mut Rng,
     pub budget: &'a mut Budget,
     pub world: Option<&'a dyn Raycast>,
@@ -61,6 +63,7 @@ pub(crate) enum Source<'a> {
 pub(crate) struct Pool {
     pub particles: Vec<Particle3d>,
     pending: f32,
+    /// 发过 burst 了：网格还没加载时不算，一次性的发射器也就不会被当成放完删掉。
     pub burst_done: bool,
     warned: bool,
     /// 这一帧的事件，交给子池子；数组留着复用。
@@ -77,6 +80,13 @@ impl Pool {
     /// 包括子池子的粒子数。
     pub fn total(&self) -> usize {
         self.particles.len() + self.children.iter().map(Pool::total).sum::<usize>()
+    }
+
+    /// 自己和子池子里要查场景碰撞体的粒子数。
+    pub fn scene_load(&self, e: &ParticleEmitter3d, depth: usize) -> usize {
+        let own = if e.collision.is_some_and(|c| c.scene) { self.particles.len() } else { 0 };
+        let subs = if depth < MAX_SUB_DEPTH { e.sub_emitters.as_slice() } else { &[] };
+        own + self.children.iter().zip(subs).map(|(c, s)| c.scene_load(&s.emitter, depth + 1)).sum::<usize>()
     }
 
     pub fn step(&mut self, e: &ParticleEmitter3d, source: Source, f: &mut Frame, depth: usize) {
@@ -105,7 +115,9 @@ impl Pool {
         let n = self.particles.len();
         // 场景查询：这一帧轮到从 cursor 开始的 quota 个
         let scene = e.collision.is_some_and(|c| c.scene) && f.world.is_some();
-        let quota = if scene { (f.budget.queries as usize).min(n) } else { 0 };
+        // 按粒子数占的比例分，每个池子至少一次（池子多时可能超出上限几次）
+        let share = |q: usize| if q == 0 || n == 0 { 0 } else { (q * n / f.budget.load.max(n)).max(1) };
+        let quota = if scene { share(f.budget.queries as usize).min(n) } else { 0 };
         let start = if n == 0 { 0 } else { self.cursor % n };
         let (mut index, mut used) = (0, 0);
         let events = &mut self.events;
@@ -119,7 +131,7 @@ impl Pool {
             }
             p.velocity += e.gravity * dt;
             if let Some(noise) = &e.noise {
-                let at = p.position * noise.frequency + Vec3::Y * noise.scroll * f.time;
+                let at = p.position * noise.frequency + Vec3::Y * scroll(f.time, noise.scroll);
                 p.velocity += curl(at) * noise.strength * dt;
             }
             p.velocity *= drag;
@@ -132,18 +144,26 @@ impl Pool {
                 return true;
             };
             let mut hit = c.ground.and_then(|h| collide3d::ground_hit(p.position, next, h, c.radius));
-            if (i + n - start) % n.max(1) < quota {
+            let queried = (i + n - start) % n.max(1) < quota;
+            if queried {
                 used += 1;
                 let world = f.world.expect("scene 时才有配额");
                 // 只要更近的
                 let end = hit.map_or(next, |h| h.point);
-                hit = collide3d::scene_hit(world, p.position, end, c.radius).or(hit);
+                hit = collide3d::scene_hit(world, p.position, end, c).or(hit);
             }
             let Some(hit) = hit else {
+                // 这一帧没查场景时不知道还贴不贴着，留着上一帧的
+                if queried || !scene {
+                    p.touching = false;
+                }
                 p.position = next;
                 return true;
             };
-            events.push(Event { on: SubTrigger::Collision, position: hit.point, velocity: p.velocity, normal: hit.normal });
+            // 上一帧就贴着表面（停着、滑着）：只修正位置和速度，不再发碰撞
+            if !std::mem::replace(&mut p.touching, true) {
+                events.push(Event { on: SubTrigger::Collision, position: hit.point, velocity: p.velocity, normal: hit.normal });
+            }
             if c.kill {
                 events.push(Event { on: SubTrigger::Death, position: hit.point, velocity: p.velocity, normal: Vec3::ZERO });
                 return false;
@@ -153,12 +173,21 @@ impl Pool {
             true
         });
         self.cursor = if n == 0 { 0 } else { start + used };
-        f.budget.queries -= used as u32;
         f.budget.queried += used as u32;
     }
 
     /// 发新粒子：发射器自己的 burst、rate，或者父池子的事件。
     fn emit(&mut self, e: &ParticleEmitter3d, source: Source, f: &mut Frame) {
+        // 网格还没加载：这一帧不发，burst 和 rate 都留着；加载失败的当没有形状，一个也不发
+        let surface = match &e.shape {
+            EmitShape::Mesh(mesh) => match f.surfaces.get(mesh) {
+                Some(s) => Some(s),
+                None if f.surfaces.failed(mesh) => None,
+                None => return,
+            },
+            _ => None,
+        };
+        let surface = surface.as_deref();
         let wanted = match &source {
             Source::Root { .. } => {
                 let mut count = 0;
@@ -171,7 +200,7 @@ impl Pool {
                 self.pending -= whole;
                 count + whole as usize
             }
-            Source::Sub { events, sub } => events.iter().filter(|ev| ev.on == sub.on).count() * sub.count as usize,
+            Source::Sub { events, sub } => events.iter().filter(|ev| ev.on == sub.on).count().saturating_mul(sub.count as usize),
         };
         let room = e.max.saturating_sub(self.particles.len());
         if wanted > room && !std::mem::replace(&mut self.warned, true) {
@@ -181,38 +210,32 @@ impl Pool {
         if allowed < wanted.min(room) && !WARNED_BUDGET.swap(true, Ordering::Relaxed) {
             log::warn!("3D 粒子总数到了软上限，多出的不再发射（ParticleBudget3d::limit）");
         }
-        f.budget.dropped += wanted - allowed;
-        let surface = match &e.shape {
-            EmitShape::Mesh(source) => match f.surfaces.get(source) {
-                Some(s) => Some(s),
-                // 网格还没加载：这一帧不发
-                None => return,
-            },
-            _ => None,
-        };
-        let surface = surface.as_deref();
-        let mut born = 0;
-        let mut spawn = |pool: &mut Self, origin: Vec3, rotation: Quat, inherit: Vec3, f: &mut Frame| {
-            if born >= allowed {
-                return;
-            }
-            let Some(p) = spawn_one(e, origin, rotation, inherit, surface, f.rng) else { return };
-            born += 1;
+        f.budget.dropped += wanted.min(room) - allowed;
+        if (matches!(e.shape, EmitShape::Mesh(_)) && surface.is_none()) || allowed == 0 {
+            return;
+        }
+        let spawn = |pool: &mut Self, origin: Vec3, rotation: Quat, inherit: Vec3, rng: &mut Rng| {
+            let Some(p) = spawn_one(e, origin, rotation, inherit, surface, rng) else { return 0 };
             pool.events.push(Event { on: SubTrigger::Birth, position: p.position, velocity: p.velocity, normal: Vec3::ZERO });
             pool.particles.push(p);
+            1
         };
+        let mut born = 0;
         match source {
             Source::Root { origin, rotation } => {
                 for _ in 0..allowed {
-                    spawn(self, origin, rotation, Vec3::ZERO, f);
+                    born += spawn(self, origin, rotation, Vec3::ZERO, f.rng);
                 }
             }
             Source::Sub { events, sub } => {
                 for ev in events.iter().filter(|ev| ev.on == sub.on) {
+                    if born >= allowed {
+                        break;
+                    }
                     // 碰撞：本地 +Y 对着碰到的面的法线
                     let rotation = if ev.on == SubTrigger::Collision { Quat::from_rotation_arc(Vec3::Y, ev.normal) } else { Quat::IDENTITY };
-                    for _ in 0..sub.count {
-                        spawn(self, ev.position, rotation, ev.velocity * sub.inherit, f);
+                    for _ in 0..(sub.count as usize).min(allowed - born) {
+                        born += spawn(self, ev.position, rotation, ev.velocity * sub.inherit, f.rng);
                     }
                 }
             }
@@ -245,7 +268,7 @@ fn spawn_one(e: &ParticleEmitter3d, origin: Vec3, rotation: Quat, inherit: Vec3,
         Some(s) if s.random_start => (rng.next_f32() * s.count() as f32).floor(),
         _ => 0.0,
     };
-    Some(Particle3d { position: origin + rotation * local, velocity: direction * speed + inherit, rotation: angle, spin, age: 0.0, lifetime, frame })
+    Some(Particle3d { position: origin + rotation * local, velocity: direction * speed + inherit, rotation: angle, spin, age: 0.0, lifetime, frame, touching: false })
 }
 
 fn billboard(e: &ParticleEmitter3d, p: &Particle3d) -> Billboard {
@@ -286,10 +309,16 @@ mod tests {
     use crate::shape3d::MeshSurfaces;
 
     fn budget() -> Budget {
-        Budget { remaining: usize::MAX, dropped: 0, queries: u32::MAX, queried: 0 }
+        Budget { remaining: usize::MAX, dropped: 0, queries: u32::MAX, load: 0, queried: 0 }
     }
 
+    /// 一个发射器单独一帧：要查场景的粒子数就是它自己的。
     fn run(pool: &mut Pool, e: &ParticleEmitter3d, budget: &mut Budget, world: Option<&dyn Raycast>, dt: f32) {
+        budget.load = pool.scene_load(e, 0);
+        step(pool, e, budget, world, dt);
+    }
+
+    fn step(pool: &mut Pool, e: &ParticleEmitter3d, budget: &mut Budget, world: Option<&dyn Raycast>, dt: f32) {
         let surfaces = MeshSurfaces::default();
         let mut rng = Rng::new(9);
         let mut f = Frame { dt, time: 0.0, rng: &mut rng, budget, world, surfaces: &surfaces };
@@ -373,7 +402,7 @@ mod tests {
     struct Walls(RefCell<Vec<Vec3>>);
 
     impl Raycast for Walls {
-        fn raycast(&self, origin: Vec3, _: Vec3, _: f32) -> Option<(Vec3, Vec3)> {
+        fn raycast(&self, origin: Vec3, _: Vec3, _: f32, _: &ParticleCollision) -> Option<(Vec3, Vec3)> {
             self.0.borrow_mut().push(origin);
             None
         }
@@ -383,7 +412,7 @@ mod tests {
     struct Wall;
 
     impl Raycast for Wall {
-        fn raycast(&self, origin: Vec3, dir: Vec3, max: f32) -> Option<(Vec3, Vec3)> {
+        fn raycast(&self, origin: Vec3, dir: Vec3, max: f32, _: &ParticleCollision) -> Option<(Vec3, Vec3)> {
             let t = (1.0 - origin.x) / dir.x;
             (dir.x > 0.0 && t <= max).then(|| (origin + dir * t, Vec3::NEG_X))
         }
@@ -417,7 +446,7 @@ mod tests {
             let mut b = Budget { queries: 20, ..budget() };
             walls.0.borrow_mut().clear();
             run(&mut pool, &e, &mut b, Some(&walls), 0.01);
-            assert_eq!((walls.0.borrow().len(), b.queries, b.queried), (20, 0, 20), "每帧最多 20 次");
+            assert_eq!((walls.0.borrow().len(), b.queried), (20, 20), "每帧最多 20 次");
             seen.extend(walls.0.borrow().iter().map(|p| p.x as i32));
         }
         assert_eq!(seen.len(), 50, "轮流查，三帧下来每个粒子都查到过");
@@ -530,5 +559,106 @@ mod tests {
             run(&mut pool, &e, &mut budget(), None, 0.01);
         }
         assert_eq!(caps(&pool), first, "稳定以后容量不再增长");
+    }
+
+    #[test]
+    fn huge_sub_counts_stop_at_the_budget() {
+        let mut e = still(1, 10.0);
+        e.sub_emitters = vec![sub(SubTrigger::Birth, u32::MAX, still(0, 10.0))];
+        let mut pool = Pool::default();
+        let mut b = Budget { remaining: 11, ..budget() };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(200);
+        run(&mut pool, &e, &mut b, None, 0.0);
+        assert!(std::time::Instant::now() < deadline, "预算满了就停，不空转 count 次");
+        // 子发射器自己的上限 10000 挡掉的不算，总数上限挡掉的才算
+        assert_eq!((pool.total(), b.dropped), (11, 10_000 - 10));
+    }
+
+    #[test]
+    fn scene_queries_are_shared_by_every_pool() {
+        let col = Some(ParticleCollision { scene: true, ..Default::default() });
+        let big = ParticleEmitter3d { speed: (1.0, 1.0), collision: col, ..still(300, 100.0) };
+        let mut small = ParticleEmitter3d { speed: (1.0, 1.0), collision: col, ..still(5, 100.0) };
+        small.sub_emitters = vec![sub(SubTrigger::Birth, 2, ParticleEmitter3d { speed: (1.0, 1.0), collision: col, ..still(0, 100.0) })];
+        let (mut a, mut b) = (Pool::default(), Pool::default());
+        run(&mut a, &big, &mut budget(), None, 0.0);
+        run(&mut b, &small, &mut budget(), None, 0.0);
+        assert_eq!((a.scene_load(&big, 0), b.scene_load(&small, 0)), (300, 15), "子池子也算");
+        let (wa, wb) = (Walls(RefCell::new(Vec::new())), Walls(RefCell::new(Vec::new())));
+        for _ in 0..10 {
+            // 32 × 5 / 315 不到 1：靠保底
+            let mut budget = Budget { queries: 32, load: 315, ..budget() };
+            step(&mut a, &big, &mut budget, Some(&wa), 1.0 / 60.0);
+            step(&mut b, &small, &mut budget, Some(&wb), 1.0 / 60.0);
+            assert!(budget.queried <= 32 + 3, "按粒子数分，每个池子保底一次：{}", budget.queried);
+        }
+        assert!(wa.0.borrow().len() >= 250, "大的照样查得多：{}", wa.0.borrow().len());
+        assert!(wb.0.borrow().len() >= 20, "排在后面的、子池子也查得到：{}", wb.0.borrow().len());
+    }
+
+    /// y = 0 处朝上的地面。
+    struct Floor;
+
+    impl Raycast for Floor {
+        fn raycast(&self, origin: Vec3, dir: Vec3, max: f32, _: &ParticleCollision) -> Option<(Vec3, Vec3)> {
+            let t = origin.y / -dir.y;
+            (dir.y < 0.0 && origin.y >= 0.0 && t <= max).then(|| (origin + dir * t, Vec3::Y))
+        }
+    }
+
+    #[test]
+    fn resting_particles_splash_once() {
+        for scene in [false, true] {
+            for (bounce, splashes) in [(0.0, 1), (0.8, 2)] {
+                let c = ParticleCollision { ground: (!scene).then_some(0.0), scene, bounce, ..Default::default() };
+                let mut e = ParticleEmitter3d { gravity: Vec3::new(0.0, -10.0, 0.0), collision: Some(c), ..still(1, 100.0) };
+                e.sub_emitters = vec![sub(SubTrigger::Collision, 1, still(0, 100.0))];
+                let mut pool = Pool::default();
+                run(&mut pool, &e, &mut budget(), Some(&Floor), 0.0);
+                pool.particles[0].position.y = 0.5;
+                for _ in 0..300 {
+                    run(&mut pool, &e, &mut budget(), Some(&Floor), 1.0 / 60.0);
+                }
+                let n = pool.children[0].particles.len();
+                assert!(pool.particles[0].position.y.abs() < 0.05, "停在地上");
+                if bounce == 0.0 {
+                    assert_eq!(n, splashes, "贴着地面不再发碰撞（scene = {scene}）");
+                } else {
+                    assert!(n >= splashes && n < 60, "每弹一次发一次（scene = {scene}）：{n}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn particles_pressed_on_a_wall_splash_once_even_when_queries_take_turns() {
+        // 两个粒子被推向墙，每帧只查一次场景：没轮到的那帧不知道还贴不贴着，不能当成离开了
+        let c = ParticleCollision { scene: true, bounce: 0.0, ..Default::default() };
+        let mut e = ParticleEmitter3d { gravity: Vec3::new(10.0, 0.0, 0.0), collision: Some(c), ..still(2, 100.0) };
+        e.sub_emitters = vec![sub(SubTrigger::Collision, 1, still(0, 100.0))];
+        let mut pool = Pool::default();
+        run(&mut pool, &e, &mut budget(), Some(&Wall), 0.0);
+        for _ in 0..120 {
+            run(&mut pool, &e, &mut Budget { queries: 1, ..budget() }, Some(&Wall), 1.0 / 60.0);
+        }
+        assert_eq!(pool.children[0].particles.len(), 2);
+    }
+
+    #[test]
+    fn bursts_wait_for_the_mesh() {
+        use std::sync::Arc;
+
+        use crate::shape3d::{MeshSource, MeshSurface};
+        let missing = nge_render3d::Assets3d::default().add_model(nge_render3d::Model::default()).unwrap();
+        let mut e = ParticleEmitter3d { rate: 10.0, shape: EmitShape::Mesh(MeshSource::Model { model: missing, scale: Vec3::ONE }), ..still(50, 10.0) };
+        let mut pool = Pool::default();
+        for _ in 0..5 {
+            run(&mut pool, &e, &mut budget(), None, 1.0);
+        }
+        assert_eq!((pool.particles.len(), pool.burst_done), (0, false), "网格还没好：burst 和 rate 都留着");
+        let tri = [(Vec3::ZERO, Vec3::Y), (Vec3::X, Vec3::Y), (Vec3::Z, Vec3::Y)];
+        e.shape = EmitShape::Mesh(MeshSource::Surface(Arc::new(MeshSurface::new([tri]))));
+        run(&mut pool, &e, &mut budget(), None, 0.5);
+        assert_eq!(pool.particles.len(), 50 + 5, "好了以后照常发，等的那几秒的 rate 不补");
     }
 }

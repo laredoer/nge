@@ -15,6 +15,7 @@ use crate::billboards::{Batch, BillboardVertex, Billboards, Scratch as Billboard
 use crate::gizmos::Gizmos3d;
 use crate::line_gpu::LineGpu;
 use crate::assets::{Assets3d, MaterialId, MeshId, ModelId};
+use crate::depth_target::DepthTarget;
 use crate::collect::{Draw, DrawRaw, Scratch, blend_depth, collect, globals, sort_draws};
 use crate::gltf_load::{Gltf, GltfModels, resolve_gltf_models};
 use crate::light::{AmbientLight, Globals};
@@ -104,7 +105,7 @@ struct Gpu {
     textures: Vec<Option<wgpu::BindGroup>>,
     generation: u64,
     meshes: Vec<GpuMesh>,
-    depth: Option<(wgpu::TextureView, wgpu::Extent3d)>,
+    depth: DepthTarget,
     billboards: BillboardGpu,
     lines: LineGpu,
 }
@@ -199,12 +200,15 @@ impl Renderer for MeshRenderer {
         let lines = world.resource::<Gizmos3d>();
         let segments = (lines.depth_tested().len() + lines.top().len()) as u32;
         world.resource_mut::<RenderFrame>().count(gpu.lines.draws(), segments);
-        let depth = gpu.depth_view(gfx, target.texture().size()).clone();
+        // 有软粒子时方片另开一个 pass，深度只读、同时绑成纹理（GL 上不行，退成硬边）
+        let split = self.billboard_soft && !gpu.billboards.gl;
+        if let Some(depth_only) = gpu.depth.prepare(&gfx.device, target.texture().size(), split) {
+            gpu.billboards.set_depth(&gfx.device, &depth_only);
+        }
+        let depth = gpu.depth.view().clone();
         let depth = &depth;
         // 混排时深度留给后面的精灵
         let interleave = world.resource::<Interleave>().0;
-        // 有软粒子时方片另开一个 pass，深度只读、同时绑成纹理（GL 上不行，退成硬边）
-        let split = self.billboard_soft && !gpu.billboards.gl;
         if interleave {
             let view_proj = bytemuck::cast(globals.0.view_proj);
             world.resource_mut::<RenderFrame>().set_depth(SceneDepth { view: depth.clone(), view_proj });
@@ -451,7 +455,7 @@ impl Gpu {
             textures: Vec::new(),
             generation: 0,
             meshes: Vec::new(),
-            depth: None,
+            depth: DepthTarget::default(),
             billboards,
             lines,
         }
@@ -541,28 +545,6 @@ impl Gpu {
             chunk[..size_of::<DrawRaw>()].copy_from_slice(bytemuck::bytes_of(&draw.raw));
         }
         gfx.queue.write_buffer(&self.draws, 0, bytes);
-    }
-
-    /// 深度缓冲跟着渲染目标的大小走。
-    fn depth_view(&mut self, gfx: &Gfx, size: wgpu::Extent3d) -> &wgpu::TextureView {
-        let size = wgpu::Extent3d { depth_or_array_layers: 1, ..size };
-        if self.depth.as_ref().is_none_or(|(_, s)| *s != size) {
-            let texture = gfx.device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("mesh depth"),
-                size,
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: DEPTH_FORMAT,
-                // 软粒子读深度
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-                view_formats: &[],
-            });
-            let depth_only = texture.create_view(&wgpu::TextureViewDescriptor { aspect: wgpu::TextureAspect::DepthOnly, ..Default::default() });
-            self.billboards.set_depth(&gfx.device, &depth_only);
-            self.depth = Some((texture.create_view(&Default::default()), size));
-        }
-        &self.depth.as_ref().expect("刚创建").0
     }
 }
 

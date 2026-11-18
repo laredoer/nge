@@ -83,7 +83,8 @@ impl MeshSurface {
             let normal_matrix = part.local.inverse().transpose();
             let vertex = move |i: u32| {
                 let v = mesh.vertices[i as usize];
-                let n = normal_matrix.transform_vector3(Vec3::from(v.normal) / scale).normalize_or_zero();
+                // 位置是先 local 再缩放，法线就是先乘 local 的逆转置再除以缩放
+                let n = (normal_matrix.transform_vector3(Vec3::from(v.normal)) / scale).normalize_or_zero();
                 (part.local.transform_point3(Vec3::from(v.position)) * scale, n)
             };
             mesh.indices.chunks_exact(3).map(move |t| [vertex(t[0]), vertex(t[1]), vertex(t[2])])
@@ -216,7 +217,7 @@ pub(crate) fn direction(mode: EmitDirection, rng: &mut Rng, axis: Vec3, spread: 
 pub struct MeshSurfaces(std::collections::HashMap<MeshKey, Option<Arc<MeshSurface>>>);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum MeshKey {
+pub(crate) enum MeshKey {
     Model(ModelId, [u32; 3]),
     Gltf(Handle<Gltf>, [u32; 3]),
 }
@@ -238,42 +239,64 @@ impl MeshSurfaces {
             _ => self.0.get(&key(source)?)?.clone(),
         }
     }
+
+    /// 加载完了但没有三角形（或加载失败）：不用再等。
+    pub fn failed(&self, source: &MeshSource) -> bool {
+        key(source).is_some_and(|k| matches!(self.0.get(&k), Some(None)))
+    }
+
+    /// 缓存了几个来源（包括失败的）。
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
 }
 
-/// 发射器（包括子发射器）里用到的模型、glTF 表面还没缓存的，能取就取（`PostUpdate`，模拟之前）。
-pub(crate) fn resolve_surfaces(world: &mut bevy_ecs::prelude::World) {
-    fn collect(e: &crate::ParticleEmitter3d, out: &mut Vec<MeshSource>) {
-        if let EmitShape::Mesh(source @ (MeshSource::Model { .. } | MeshSource::Gltf { .. })) = &e.shape {
-            out.push(source.clone());
+/// 发射器（包括子发射器）里用到的模型、glTF 表面还没缓存的，能取就取（`PostUpdate`，模拟之前）；没人用的从缓存里清掉。
+/// 模型编号还不存在时不缓存，下一帧再试。
+pub(crate) fn resolve_surfaces(world: &mut bevy_ecs::prelude::World, mut used: bevy_ecs::prelude::Local<Vec<MeshKey>>, mut emitters: bevy_ecs::prelude::Local<Option<bevy_ecs::query::QueryState<&crate::ParticleEmitter3d>>>) {
+    fn collect(e: &crate::ParticleEmitter3d, out: &mut Vec<MeshKey>) {
+        if let EmitShape::Mesh(source) = &e.shape
+            && let Some(k) = key(source)
+            && !out.contains(&k)
+        {
+            out.push(k);
         }
         for sub in &e.sub_emitters {
             collect(&sub.emitter, out);
         }
     }
-    let mut wanted = Vec::new();
-    for e in world.query::<&crate::ParticleEmitter3d>().iter(world) {
-        collect(e, &mut wanted);
+    used.clear();
+    let emitters = emitters.get_or_insert_with(|| world.query());
+    for e in emitters.iter(world) {
+        collect(e, &mut used);
     }
-    for source in wanted {
-        let Some(k) = key(&source) else { continue };
+    if used.is_empty() && world.resource::<MeshSurfaces>().is_empty() {
+        return;
+    }
+    world.resource_mut::<MeshSurfaces>().0.retain(|k, _| used.contains(k));
+    for &k in used.iter() {
         if world.resource::<MeshSurfaces>().0.contains_key(&k) {
             continue;
         }
-        let model = match source {
-            MeshSource::Model { model, .. } => Some(model),
-            MeshSource::Gltf { gltf, .. } => match nge_render3d::gltf_model(world, gltf) {
+        let (model, scale) = match k {
+            MeshKey::Model(model, scale) => (Some(model), scale),
+            MeshKey::Gltf(gltf, scale) => match nge_render3d::gltf_model(world, gltf) {
                 None => continue,
-                Some(model) => model,
+                Some(model) => (model, scale),
             },
-            MeshSource::Surface(_) => continue,
         };
-        let scale = match source {
-            MeshSource::Model { scale, .. } | MeshSource::Gltf { scale, .. } => scale,
-            MeshSource::Surface(_) => Vec3::ONE,
-        };
+        let scale = Vec3::new(f32::from_bits(scale[0]), f32::from_bits(scale[1]), f32::from_bits(scale[2]));
+        // 模型编号还没有：可能是之后才加进来的，不当失败
+        if model.is_some_and(|m| world.resource::<Assets3d>().model(m).is_none()) {
+            continue;
+        }
         let surface = model.map(|m| MeshSurface::from_model(world.resource::<Assets3d>(), m, scale)).filter(|s| !s.is_empty());
         if surface.is_none() {
-            log::warn!("3D 粒子的网格发射形状 {source:?} 没有三角形，不发射");
+            log::warn!("3D 粒子的网格发射形状 {k:?} 没有三角形，不发射");
         }
         world.resource_mut::<MeshSurfaces>().0.insert(k, surface.map(Arc::new));
     }
@@ -383,6 +406,23 @@ mod tests {
         let shape = EmitShape::Mesh(MeshSource::Surface(Default::default()));
         assert!(sample(&shape, &mut rng, Some(&MeshSurface::default())).is_none(), "没有三角形不发射");
         assert!(sample(&shape, &mut rng, None).is_none(), "还没加载不发射");
+    }
+
+    #[test]
+    fn mesh_normals_survive_rotation_and_uneven_scale() {
+        use nge_render3d::{MaterialId, Mesh, Model, Part};
+        let mut assets = Assets3d::default();
+        let mesh = assets.add_mesh(Mesh::plane(2.0)).unwrap();
+        let local = glam::Mat4::from_rotation_z(std::f32::consts::FRAC_PI_4);
+        let model = assets.add_model(Model { parts: vec![Part::new(mesh, MaterialId::DEFAULT, local)], ..Default::default() }).unwrap();
+        let surface = MeshSurface::from_model(&assets, model, Vec3::new(1.0, 4.0, 1.0));
+        // 平面先转 45° 再沿 y 拉长 4 倍：沿着平面的方向是 (1, 4, 0) 和 z，法线垂直于它们
+        let expected = Vec3::new(-4.0, 1.0, 0.0).normalize();
+        let mut rng = Rng::new(5);
+        for _ in 0..50 {
+            let (_, n) = surface.sample(&mut rng).unwrap();
+            assert!((n - expected).length() < 1e-4, "{n}");
+        }
     }
 
     #[test]
