@@ -1,7 +1,9 @@
 // 编辑器的操作（store.ts）：撤销重做、复制、微移、属性、关卡设置、文件、试玩。
 import { expect, test } from "nsh/test";
 import { parseLevel } from "../../ts/level";
+import { TILESET } from "../platformer/catalog";
 import { memoryStore } from "./files";
+import { paletteOf } from "./tiles";
 import { blankLevel, createStore, EDIT_MAX_COLS, EDIT_MAX_ROWS, type Ask } from "./store";
 
 const setup = (answers: (string | null)[] = [], files: Record<string, string> = {}) => {
@@ -171,6 +173,35 @@ test("打开：坏文件不崩，状态栏说原因，当前关卡不变", async
   expect([store.level().name, store.file(), store.dirty()]).toEqual(["好的", "good.json", false]);
   await store.refreshFiles();
   expect(store.files()).toEqual(["bad.json", "good.json"]);
+});
+
+test("打开旧关卡（瓦片图只有 3 帧、没有单向板和斜坡的规则）：按现在的瓦片图升级，画上斜坡能存、能读回来", async () => {
+  const fresh = blankLevel();
+  const { oneWay, slopes, animated, ...rest } = fresh.tiles[0];
+  const old = { ...fresh, name: "旧的", tiles: [{ ...rest, grid: [3, 1] }] };
+  expect([oneWay, slopes, animated].every((r) => r !== undefined)).toBe(true);
+  const { store, disk } = setup([], { "old.json": JSON.stringify(old) });
+  await store.open("old.json");
+  const t = store.level().tiles[0];
+  expect(t.grid).toEqual(TILESET.grid);
+  expect([t.oneWay, t.slopes, t.animated]).toEqual([TILESET.oneWay, TILESET.slopes, TILESET.animated]);
+  expect(store.status()).toContain("升级");
+  // 调色板只列瓦片图里有的帧
+  expect(paletteOf(t).map((f) => f.frame)).toEqual(TILESET.frames.map((f) => f.frame));
+  expect(paletteOf({ ...t, grid: [3, 1] }).map((f) => f.frame)).toEqual([0, 1, 2]);
+  store.tool.set("brush");
+  store.frame.set(4);
+  store.view.set({ x: 0, y: 448, zoom: 1 });
+  store.pointer("down", [416, 316]);
+  store.pointer("up", [416, 316]);
+  expect(await store.save()).toBe(true);
+  const r = parseLevel(JSON.parse(disk.files["old.json"]));
+  expect(r.ok && [r.level.tiles[0].data[0][0], r.level.tiles[0].slopes?.length]).toEqual([4, TILESET.slopes.length]);
+  // 不是这张瓦片图的层不动
+  const other = { ...old, tiles: [{ ...old.tiles[0], texture: "asset:/other.png" }] };
+  const { store: s2 } = setup([], { "other.json": JSON.stringify(other) });
+  await s2.open("other.json");
+  expect([s2.level().tiles[0].grid, s2.level().tiles[0].slopes]).toEqual([[3, 1], undefined]);
 });
 
 test("不能试玩的关卡不进试玩，状态栏说原因", () => {

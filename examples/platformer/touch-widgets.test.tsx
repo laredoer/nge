@@ -18,6 +18,21 @@ test("摇杆：按住推过去发按下（来源、玩家、方向），父组�
   expect(log(app)).toBe(`${held} | move up p1 pad`);
 });
 
+test("摇杆：往下推过一半同时按着「下」，回来或抬起松开", async () => {
+  const app = await fixture();
+  await app.dragAndHold("id:stick-move", { x: 0, y: 80 });
+  const held = log(app);
+  expect(held).toContain("crouch down p1 pad:down");
+  expect(held.split(" | ").filter((s) => s.startsWith("crouch")).length).toBe(1);
+  await app.drop();
+  expect(log(app).endsWith("crouch up p1 pad:down | move up p1 pad")).toBe(true);
+  // 横着推不按「下」
+  const app2 = await fixture();
+  await app2.dragAndHold("id:stick-move", { x: 80 });
+  expect(log(app2)).not.toContain("crouch");
+  await app2.drop();
+});
+
 test("摇杆：按着时卸载发松开", async () => {
   const app = await fixture();
   await app.dragAndHold("id:stick-move", { x: 80 });

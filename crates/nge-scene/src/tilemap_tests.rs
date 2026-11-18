@@ -169,6 +169,12 @@ fn animated_tiles_change_frames_without_rebuilding_the_map() {
     let world = app.world_mut();
     let after: Vec<Entity> = world.query_filtered::<Entity, With<Sprite>>().iter(world).collect();
     assert_eq!(before, after, "没重建");
+    frame(&mut app, None);
+    // 改了地图的规则（整张重建）：动画接着原来的相位，不从头播（到这里 2.5 秒，第 10 格，循环下来是第 2 格）
+    let scene = json!({ "tilemaps": [{ "id": "w", "texture": "grid", "tile": 10, "cols": 3, "data": [3, 0, 3],
+        "animated": [{ "frame": 3, "frames": [3, 4, 5], "fps": 4 }], "materials": [{ "frame": 0, "friction": 0.1 }] }] });
+    frame(&mut app, Some(scene));
+    assert_eq!(frames(&mut app), [(5, 4), (15, 0), (25, 4)], "接着原来的相位");
 }
 
 #[test]
@@ -232,4 +238,62 @@ fn slopes_block_flyers_but_one_way_tiles_do_not() {
     let world = app.world_mut();
     let nav = world.query::<&nge_ai::NavGrid>().iter(world).next().unwrap().clone();
     assert!(nav.grid.open((1, 0)) && !nav.grid.open((3, 1)) && !nav.grid.open((0, 2)), "单向平台能飞过去，斜坡和实心挡住");
+}
+
+#[test]
+fn the_drop_through_command_drops_characters_off_one_way_platforms() {
+    let mut app = app();
+    let scene = json!({
+        "physics": { "gravity": [0, -1000] },
+        "sprites": [
+            { "id": "ground", "x": 0, "y": -10, "w": 400, "h": 20, "body": { "kind": "fixed" } },
+            { "id": "plank", "x": 0, "y": 59, "w": 100, "h": 10, "body": { "kind": "fixed", "oneWay": true } },
+            { "id": "hero", "x": 0, "y": 80, "w": 20, "h": 20, "body": { "kind": "character" } },
+        ],
+    });
+    frame(&mut app, Some(scene));
+    for _ in 0..4 {
+        frame(&mut app, None);
+    }
+    assert!((sprite_pos(&mut app, "hero").y - 74.0).abs() < 1.0, "站在板上 {}", sprite_pos(&mut app, "hero"));
+    app.command("dropThrough", &json!({ "id": "hero" }));
+    app.command("dropThrough", &json!({ "id": "nobody" }));
+    let events = frame(&mut app, None);
+    let replies: Vec<&Value> = events.iter().filter(|(k, _)| k == "dropThrough").map(|(_, v)| v).collect();
+    assert_eq!(replies, [&json!({ "id": "hero", "ok": true }), &json!({ "id": "nobody", "ok": false })]);
+    for _ in 0..10 {
+        frame(&mut app, None);
+    }
+    assert!((sprite_pos(&mut app, "hero").y - 10.0).abs() < 1.0, "穿下去落到地上 {}", sprite_pos(&mut app, "hero"));
+}
+
+#[test]
+fn tapping_sorts_tilemaps_and_background_sprites_by_z_and_skips_empty_cells() {
+    let mut app = app();
+    // 视口 100×100：屏幕 (80, 40) 是世界 (30, 10)，落在第 3 列第 2 行
+    let mut data = vec![0; 15];
+    data[2 * 5 + 4] = -1;
+    let scene = |map_z: f32| json!({
+        "tilemaps": [{ "id": "m", "texture": "grid", "tile": 10, "cols": 5, "x": 0, "y": 30, "z": map_z, "data": data, "tap": true }],
+        "sprites": [{ "id": "back", "x": 30, "y": 10, "w": 40, "h": 40, "z": -3, "tap": true }],
+    });
+    let tap = |app: &mut nge_ecs::App, id: u32, x: f32| {
+        app.command("touch", &json!({ "phase": "start", "id": id, "x": x, "y": 40 }));
+        let events = frame(app, None);
+        events.iter().find(|(n, _)| n == "tap").map(|(_, v)| v["id"].as_str().unwrap_or_default().to_owned())
+    };
+    frame(&mut app, Some(scene(-5.0)));
+    assert_eq!(tap(&mut app, 1, 80.0).as_deref(), Some("back"), "背景精灵比地图高，先点到它");
+    frame(&mut app, Some(scene(-1.0)));
+    assert_eq!(tap(&mut app, 2, 80.0).as_deref(), Some("m"), "地图比背景精灵高");
+    // 第 4 列第 2 行是空格：点到后面的精灵
+    assert_eq!(tap(&mut app, 3, 95.0).as_deref(), Some("back"), "空格不算点中");
+}
+
+#[test]
+fn slope_frames_also_listed_as_one_way_are_flagged() {
+    let node: crate::tilemap::TilemapNode = serde_json::from_value(map(json!({ "oneWay": [1, 2], "slopes": [{ "frame": 2, "left": 0, "right": 1 }] }))).unwrap();
+    assert_eq!(node.slopes_also_one_way(), [2]);
+    let node: crate::tilemap::TilemapNode = serde_json::from_value(map(json!({ "oneWay": [1], "slopes": [{ "frame": 2, "left": 0, "right": 1 }] }))).unwrap();
+    assert!(node.slopes_also_one_way().is_empty());
 }

@@ -161,8 +161,8 @@ const ENEMY_Y = 12;
 export const WALKER = { speed: 110, jump: 720, sight: 8 * TILE };
 
 /**
- * 走地面的敌人的行为树：看见角色（没墙挡着）就追，第一次看见时发 `spotted`（3 秒最多一次）；
- * 看不见了回到出生点，在出生点和右边 `patrol` 格之间来回走，两头各停一下。
+ * 走地面的敌人的行为树：看见角色（没墙挡着）就追，一次看见只发一次 `spotted`（黑板上记着，3 秒最多一次）；
+ * 看不见了清掉记号，回到出生点，在出生点和右边 `patrol` 格之间来回走，两头各停一下。
  */
 export function walkerBehavior(x: number, y: number, patrol: number): BehaviorNode {
   return {
@@ -170,12 +170,28 @@ export function walkerBehavior(x: number, y: number, patrol: number): BehaviorNo
     jump: WALKER.jump,
     tree: bt.selector(
       [
-        bt.sequence([bt.see("player", WALKER.sight), bt.invert(bt.cooldown(3, bt.invert(bt.emit("spotted")))), bt.chase("player")], true),
-        bt.repeat(bt.sequence([bt.goto(x, y), bt.wait(0.6), bt.goto(x + patrol * TILE, y), bt.wait(0.6)])),
+        bt.sequence([bt.see("player", WALKER.sight), bt.selector([bt.check(SPOTTED), bt.sequence([bt.set(SPOTTED, true), bt.invert(bt.cooldown(3, bt.invert(bt.emit("spotted"))))])]), bt.chase("player")], true),
+        bt.sequence([bt.set(SPOTTED, null), bt.repeat(bt.sequence([bt.goto(x, y), bt.wait(0.6), bt.goto(x + patrol * TILE, y), bt.wait(0.6)]))]),
       ],
       true,
     ),
   };
+}
+
+/** 黑板上记「这次看见已经喊过了」的键。 */
+const SPOTTED = "spotted";
+
+/**
+ * 走地面的敌人的精灵。id 带着第几轮（`round`，按 R 重开加一）：换了 id 引擎就重建，回到出生点、行为树从头跑。
+ * `stomped` 里有的（踩到的，完整 id）变透明。
+ */
+export function walkerSprites(walkers: Built["walkers"], round: number, stomped: string[]): SpriteNode[] {
+  return walkers.map(({ id, x, y, patrol }): SpriteNode => {
+    const full = `${id}@${round}`;
+    return stomped.includes(full)
+      ? { id: full, x, y, w: 24, h: 24, z: 4, color: "#00000000" }
+      : { id: full, x, y, w: 24, h: 24, z: 4, color: "#d35f5f", body: { kind: "character", friction: 0 }, behavior: walkerBehavior(x, y, patrol) };
+  });
 }
 
 /** 厚 16 的斜坡，顶面从 `a` 到 `b`。 */

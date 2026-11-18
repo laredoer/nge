@@ -26,8 +26,8 @@ test("键名显示得短一点", () => {
 });
 
 test("角色控制要的动作都有，联网还是 N", () => {
-  for (const action of ["move", "jump", "restart", "slot", "lang", "net", "remap"]) expect(action in DEFAULT_CONTROLS[0]).toBe(true);
-  expect(Object.keys(DEFAULT_CONTROLS[1]).sort()).toEqual(["jump", "move"]);
+  for (const action of ["move", "jump", "down", "restart", "slot", "lang", "net", "remap"]) expect(action in DEFAULT_CONTROLS[0]).toBe(true);
+  expect(Object.keys(DEFAULT_CONTROLS[1]).sort()).toEqual(["down", "jump", "move"]);
   expect(DEFAULT_CONTROLS[0].net).toEqual({ kind: "button", keys: [NET_KEY] });
 });
 

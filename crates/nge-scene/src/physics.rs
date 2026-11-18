@@ -18,6 +18,8 @@ use crate::tilemap::{TileSolid, TilemapNode};
 
 pub const COLLIDE: EventKey<Collide> = EventKey::new("collide");
 pub const PUSH: CommandKey<Push> = CommandKey::new("push");
+pub const DROP_THROUGH: CommandKey<DropThrough> = CommandKey::new("dropThrough");
+pub const DROPPED: EventKey<Dropped> = EventKey::new("dropThrough");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -114,6 +116,20 @@ pub struct Push {
     pub y: f32,
     #[serde(default)]
     pub z: f32,
+}
+
+/// 让精灵 `id` 从脚下的单向平台穿下去（见 docs/gameplay2d.md）。
+#[derive(Message, Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DropThrough {
+    pub id: String,
+}
+
+/// `dropThrough` 的结果：穿没穿。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Dropped {
+    pub id: String,
+    pub ok: bool,
 }
 
 /// 按精灵节点的 `body` 挂上或拿掉物理组件。`size` 是精灵声明的大小（没乘缩放）。
@@ -247,6 +263,19 @@ pub(crate) fn push(mut reader: MessageReader<Push>, mut bodies: Query<(&Declared
             Some(_) => log::warn!("push：{:?} 不是 dynamic 刚体，推不动", p.id),
             None => log::warn!("push：没有 id 为 {:?} 的刚体", p.id),
         }
+    }
+}
+
+pub(crate) fn drop_through(mut reader: MessageReader<DropThrough>, mut physics: ResMut<Physics>, mut outbox: ResMut<Outbox>, sprites: Query<(Entity, &Declared<SpriteNode>)>) {
+    for c in reader.read() {
+        let ok = match sprites.iter().find(|(_, d)| d.0.id == c.id) {
+            Some((e, _)) => physics.drop_through(e),
+            None => {
+                log::warn!("dropThrough：没有 id 为 {:?} 的精灵", c.id);
+                false
+            }
+        };
+        outbox.send(DROPPED, &Dropped { id: c.id.clone(), ok });
     }
 }
 

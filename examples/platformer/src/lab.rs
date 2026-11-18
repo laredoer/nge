@@ -108,6 +108,8 @@ pub(crate) fn probe(debug: Res<Physics3dDebug>, physics: Res<Physics3d>, lab: Re
 
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, Instant};
+
     use nge_core::Viewport;
     use nge_ecs::App;
     use nge_physics3d::Collider;
@@ -151,6 +153,15 @@ mod tests {
         t.translation = to;
     }
 
+    /// 等异步加载（模型在后台线程读）最多多久：按墙钟算，机器忙时多跑几帧也等得到。
+    const LOAD_TIMEOUT: Duration = Duration::from_secs(15);
+
+    /// 跑一帧，让一下后台加载的线程。
+    fn frame(app: &mut App) {
+        run(app, 1);
+        std::thread::sleep(Duration::from_millis(1));
+    }
+
     /// 进试验场，等模型加载完、碰撞体都生成、角色站稳。地面是盒子，第一帧就有；网格碰撞体没生成完时角色停在起点：
     /// 整个过程中角色一直没往下掉（不会掉出去再回到起点）。
     fn lab() -> App {
@@ -158,8 +169,9 @@ mod tests {
         app.prop("scene", Some(&scene()));
         let mut lowest = f32::INFINITY;
         let mut waited = false;
-        for _ in 0..600 {
-            run(&mut app, 1);
+        let deadline = Instant::now() + LOAD_TIMEOUT;
+        while Instant::now() < deadline {
+            frame(&mut app);
             if let Some(t) = find::<Transform3d>(&mut app, LAB_HERO) {
                 lowest = lowest.min(t.translation.y);
             }
@@ -181,8 +193,9 @@ mod tests {
         app.prop("scene", Some(&scene()));
         key(&mut app, "KeyW", true);
         let mut frozen = 0;
-        for _ in 0..600 {
-            run(&mut app, 1);
+        let deadline = Instant::now() + LOAD_TIMEOUT;
+        while Instant::now() < deadline {
+            frame(&mut app);
             if app.world().resource::<Physics3d>().pending_meshes() == 0 && frozen > 0 {
                 break;
             }

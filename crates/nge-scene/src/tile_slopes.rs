@@ -44,7 +44,7 @@ fn next(kinds: &[TileKind], cols: usize, c: usize, r: usize) -> Option<(usize, u
 }
 
 /// 斜坡格并成的块，和被并进去的实心格（这些格子不再单独合并成矩形）。
-/// 一条直线上连着的斜坡格并成一块，底边一直到最低那一格的底；中间盖住的格子都得是实心的，不然每格单独一块。
+/// 一条直线上连着的斜坡格并成一块，底边一直到最低那一格的底；中间盖住的格子都得是实心的，不是的地方断开成几段。
 pub(crate) fn slope_pieces(kinds: &[TileKind], cols: usize) -> (Vec<SlopePiece>, Vec<bool>) {
     let rows = kinds.len().checked_div(cols).unwrap_or(0);
     let mut covered = vec![false; kinds.len()];
@@ -64,11 +64,7 @@ pub(crate) fn slope_pieces(kinds: &[TileKind], cols: usize) -> (Vec<SlopePiece>,
                 }
                 chain.push(n);
             }
-            let bottom = chain.iter().map(|&(_, r)| r).max().expect("至少一格");
-            // 坡下面到底边之间的格子都是实心的才并
-            let filled = chain.iter().all(|&(c, r)| (r + 1..=bottom).all(|rr| kinds[rr * cols + c] == TileKind::Solid));
-            let parts: Vec<Vec<(usize, usize)>> = if filled { vec![chain] } else { chain.into_iter().map(|t| vec![t]).collect() };
-            for part in parts {
+            for part in filled_parts(kinds, cols, chain) {
                 for &(c, r) in &part {
                     seen[r * cols + c] = true;
                 }
@@ -77,6 +73,23 @@ pub(crate) fn slope_pieces(kinds: &[TileKind], cols: usize) -> (Vec<SlopePiece>,
         }
     }
     (pieces, covered)
+}
+
+/// 把一条坡从左往右拆成尽量长的几段：每段里坡下面到这段底边之间的格子都是实心的（悬空的坡不把空格填上）。
+fn filled_parts(kinds: &[TileKind], cols: usize, chain: Vec<(usize, usize)>) -> Vec<Vec<(usize, usize)>> {
+    let filled = |part: &[(usize, usize)]| {
+        let bottom = part.iter().map(|&(_, r)| r).max().unwrap_or(0);
+        part.iter().all(|&(c, r)| (r + 1..=bottom).all(|rr| kinds[rr * cols + c] == TileKind::Solid))
+    };
+    let mut parts: Vec<Vec<(usize, usize)>> = Vec::new();
+    for tile in chain {
+        let joined = parts.last().is_some_and(|part| filled(&[part.as_slice(), &[tile]].concat()));
+        match parts.last_mut() {
+            Some(part) if joined => part.push(tile),
+            _ => parts.push(vec![tile]),
+        }
+    }
+    parts
 }
 
 fn piece(kinds: &[TileKind], cols: usize, part: &[(usize, usize)], covered: &mut [bool]) -> SlopePiece {
@@ -135,6 +148,15 @@ mod tests {
         let (pieces, covered) = slope_pieces(&[E, UP, UP, E], 2);
         assert_eq!(pieces.len(), 2);
         assert!(covered.iter().all(|c| !c));
+        // 只有一部分下面填满：填满的那几格并成一段，悬空的单独
+        // / . . .      第 0 列最低那格悬空（下面第 1 列空着），
+        // . / S S      右边三格下面都是实心的
+        let kinds = [E, E, E, UP, E, E, UP, S, E, UP, S, S, UP, E, S, S];
+        let (pieces, covered) = slope_pieces(&kinds, 4);
+        assert_eq!(pieces.len(), 2, "{pieces:?}");
+        assert_eq!((pieces[0].col, pieces[0].w), (0, 1));
+        assert_eq!((pieces[1].col, pieces[1].w, pieces[1].bottom), (1, 3, 2));
+        assert!(!covered[13], "悬空的坡下面的空格不填");
         // 坡度不一样的不并
         let (pieces, _) = slope_pieces(&[UP, TileKind::Slope(0.0, 0.5)], 2);
         assert_eq!(pieces.len(), 2);

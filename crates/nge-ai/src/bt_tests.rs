@@ -258,3 +258,44 @@ fn trees_drive_a_state_machine_and_read_it_back() {
     run(&mut tree, &mut fsm, close);
     assert_eq!(fsm.state(), Anim::Walk, "离远了不攻击");
 }
+
+#[test]
+fn halted_leaves_get_a_callback() {
+    // 反应式选择：前面的条件成了，打断后面在跑的 walk；整棵树打断时在跑的也收到
+    let mut tree = Tree::new(Node::selector(vec![Node::leaf(Leaf::Has("seen")), Node::leaf(Leaf::Do("walk"))]).reactive());
+    let mut w = World::new();
+    w.set("walk", Status::Running);
+    let mut halted = Vec::new();
+    let mut step = |tree: &mut Tree<Leaf>, halted: &mut Vec<Leaf>| {
+        tree.tick_halting(0.1, &mut |leaf: &Leaf, bb: &mut Blackboard| match leaf {
+            Leaf::Do(_) => Status::Running,
+            Leaf::Has(key) => Status::from(bb.get(key).is_some()),
+            Leaf::Set(..) => Status::Success,
+        }, &mut |leaf: &Leaf, _: &mut Blackboard| halted.push(leaf.clone()))
+    };
+    assert_eq!(step(&mut tree, &mut halted), Status::Running);
+    assert!(halted.is_empty());
+    tree.blackboard.set("seen", Value::Bool(true));
+    assert_eq!(step(&mut tree, &mut halted), Status::Success);
+    assert_eq!(halted, [Leaf::Do("walk")], "被打断的叶子收到一次");
+    tree.blackboard.remove("seen");
+    step(&mut tree, &mut halted);
+    tree.halt_with(&mut |leaf: &Leaf, _: &mut Blackboard| halted.push(leaf.clone()));
+    assert_eq!(halted, [Leaf::Do("walk"), Leaf::Do("walk")]);
+    // 没在跑的不收
+    tree.halt_with(&mut |leaf: &Leaf, _: &mut Blackboard| halted.push(leaf.clone()));
+    assert_eq!(halted.len(), 2);
+    let _ = w;
+}
+
+#[test]
+fn the_clock_keeps_precision_after_running_for_days() {
+    // 跑了好几天（f32 的秒数只剩厘秒级精度）：等 0.05 秒还是 3 帧
+    let mut tree = Tree::new(Node::sequence(vec![Node::wait(0.05), Node::leaf(Leaf::Do("done"))]));
+    let mut w = World::new();
+    for _ in 0..(3 * 24 * 3600 / 60) {
+        tree.time += 60.0;
+    }
+    let frames = (1..10).find(|_| tick(&mut tree, &mut w, 1.0 / 60.0) == Status::Success).unwrap();
+    assert_eq!(frames, 3);
+}

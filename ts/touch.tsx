@@ -1,7 +1,7 @@
 // 触屏控制（docs/touch-input.md、docs/touch-controls.md）：按动作发的屏幕按钮（连发、冷却、按下反馈）和虚拟摇杆。
 import { cleanup, computed, effect, lifecycle, signal, Text, untracked, View, type GestureResponderEvent, type NativeComponentRef, type ViewProps } from "nsh";
 import { gestureHandlers, type Gesture, type GestureOptions, type GestureTimers } from "./gestures";
-import { knobOffset, STICK_DEFAULTS, STICK_REACH, stickCommand, stickKeep, stickOutput, stickStep, type Directions, type StickState, type Vec } from "./stick";
+import { knobOffset, STICK_DEFAULTS, STICK_REACH, stickCommand, stickDown, stickKeep, stickOutput, stickStep, type Directions, type StickState, type Vec } from "./stick";
 
 /**
  * 直接让一个动作按下 / 松开（触屏按钮、虚拟摇杆，见 docs/input-actions.md）：不经过键和绑定表，改键管不到它，也不参与冲突检查。
@@ -190,6 +190,8 @@ export function VirtualStick(props: {
   center?: Vec;
   reach?: number;
   source?: string;
+  /** 往下推过一半时同时按着的按钮动作（比如平台跳跃的「下」：按着下再跳从单向平台穿下去）。 */
+  down?: string;
   class?: string;
   style?: ViewProps["style"];
   testID?: string;
@@ -198,13 +200,19 @@ export function VirtualStick(props: {
   const size = signal<Vec>([0, 0]);
   const finger = signal<StickState>(null);
   let sent: Vec = [0, 0];
+  let held = false;
   /** 没按着时底座在哪；固定模式的中心。 */
   const rest = (): Vec => props.center ?? [shape.radius + 16, size()[1] - shape.radius - 16];
   const send = (next: Vec) => {
+    const player = props.player === undefined ? {} : { player: props.player };
+    const down = props.down === undefined ? null : stickDown(held, next);
+    if (down !== null) {
+      held = down;
+      act(props.game(), props.down!, down, { ...player, source: `${props.source ?? "stick"}:down` });
+    }
     const c = stickCommand(sent, next);
     if (c === null) return;
     sent = c.down ? [c.x!, c.y!] : [0, 0];
-    const player = props.player === undefined ? {} : { player: props.player };
     act(props.game(), props.action, c.down, { ...player, source: props.source ?? "stick", ...(c.down ? { x: c.x, y: c.y } : {}) });
   };
   const on = (phase: "start" | "move" | "end" | "cancel") => (e: GestureResponderEvent) => {

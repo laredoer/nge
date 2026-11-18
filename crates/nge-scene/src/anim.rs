@@ -217,6 +217,14 @@ impl FrameAnimation {
         (!frames.is_empty() && fps.is_finite() && fps > 0.0).then_some(Self { frames, fps, looped, time: 0.0, done: false })
     }
 
+    /// 从第 `time` 秒开始播（循环的按长度取余）：重建以后接着原来的相位。
+    pub fn starting_at(mut self, time: f64) -> Self {
+        let length = f64::from(self.frames.len() as f32 / self.fps);
+        let t = if self.looped { time.rem_euclid(length) } else { time.clamp(0.0, length) };
+        self.time = if t.is_finite() { t as f32 } else { 0.0 };
+        self
+    }
+
     pub fn frames(&self) -> &[u32] {
         &self.frames
     }

@@ -3,7 +3,7 @@ import { expect, test } from "nsh/test";
 import { checkTypes, formatLevel, parseLevel, type Entity, type LevelFile } from "../../ts/level";
 import { TILESET, TYPES } from "./catalog";
 import stairs from "../editor/levels/stairs.json";
-import { build, fileLevel, fromFile, LEVELS, MEADOW, TILE, toFile, WALKER, walkerBehavior, type Built } from "./levels";
+import { build, fileLevel, fromFile, LEVELS, MEADOW, TILE, toFile, WALKER, walkerBehavior, walkerSprites, type Built } from "./levels";
 
 const near = (a: number, b: number) => Math.abs(a - b) < 0.01;
 const round = (v: number) => Math.round(v * 100) / 100;
@@ -81,9 +81,10 @@ const minimal = (entities: Entity[]): LevelFile => ({
   entities: [{ id: "c", type: "crate", x: 100, y: 20 }, { id: "g", type: "goal", x: 280, y: 40 }, ...entities],
 });
 
-test("走地怪的行为树：看见角色就追、3 秒最多喊一次，看不见了在出生点和右边几格之间巡逻", () => {
+test("走地怪的行为树：看见角色就追、一次看见只喊一次（3 秒最多一次），看不见了在出生点和右边几格之间巡逻", () => {
   const b = walkerBehavior(1200, 12, 3);
   expect([b.speed, b.jump]).toEqual([WALKER.speed, WALKER.jump]);
+  const shout = { type: "invert", child: { type: "cooldown", seconds: 3, child: { type: "invert", child: { type: "emit", name: "spotted" } } } };
   expect(b.tree).toEqual({
     type: "selector",
     reactive: true,
@@ -93,13 +94,21 @@ test("走地怪的行为树：看见角色就追、3 秒最多喊一次，看不
         reactive: true,
         children: [
           { type: "see", target: "player", range: WALKER.sight },
-          { type: "invert", child: { type: "cooldown", seconds: 3, child: { type: "invert", child: { type: "emit", name: "spotted" } } } },
+          // 黑板上记着喊过了就不再喊，跟丢了（走到巡逻那边）才清掉
+          { type: "selector", reactive: false, children: [{ type: "check", key: "spotted" }, { type: "sequence", reactive: false, children: [{ type: "set", key: "spotted", value: true }, shout] }] },
           { type: "chase", target: "player" },
         ],
       },
       {
-        type: "repeat",
-        child: { type: "sequence", reactive: false, children: [{ type: "goto", x: 1200, y: 12 }, { type: "wait", seconds: 0.6 }, { type: "goto", x: 1296, y: 12 }, { type: "wait", seconds: 0.6 }] },
+        type: "sequence",
+        reactive: false,
+        children: [
+          { type: "set", key: "spotted", value: null },
+          {
+            type: "repeat",
+            child: { type: "sequence", reactive: false, children: [{ type: "goto", x: 1200, y: 12 }, { type: "wait", seconds: 0.6 }, { type: "goto", x: 1296, y: 12 }, { type: "wait", seconds: 0.6 }] },
+          },
+        ],
       },
     ],
   });
@@ -173,4 +182,18 @@ test("游戏读坏了的关卡文件不崩：换成一段平地加终点，报�
   const ok = fileLevel(formatLevel(minimal([])), "备用", (m) => errors.push(m));
   expect(ok.name).toBe("小");
   expect(errors.length).toBe(1);
+});
+
+test("走地怪的 id 带着第几轮：按 R 重开换了 id，引擎重建，回到出生点、树从头跑；踩到的变透明", () => {
+  const walkers = [{ id: "enemy-walker-0", x: 1200, y: 12, patrol: 3 }];
+  const [a] = walkerSprites(walkers, 1, []);
+  expect(a).toMatchObject({ id: "enemy-walker-0@1", x: 1200, y: 12, body: { kind: "character" }, behavior: walkerBehavior(1200, 12, 3) });
+  // 还是敌人（踩它按 id 的前缀认）
+  expect(a.id.startsWith("enemy-")).toBe(true);
+  expect(walkerSprites(walkers, 2, [])[0].id).toBe("enemy-walker-0@2");
+  const [gone] = walkerSprites(walkers, 1, ["enemy-walker-0@1"]);
+  expect(gone.body).toBeUndefined();
+  expect(gone.behavior).toBeUndefined();
+  // 上一轮踩到的不算这一轮的
+  expect(walkerSprites(walkers, 2, ["enemy-walker-0@1"])[0].behavior).toBeDefined();
 });

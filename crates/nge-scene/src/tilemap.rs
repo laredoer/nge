@@ -103,6 +103,13 @@ impl TilemapNode {
         }
     }
 
+    /// 既是斜坡又写在单向平台里的帧号（按斜坡算，单向平台那条不起作用）。
+    pub(crate) fn slopes_also_one_way(&self) -> Vec<i32> {
+        let mut frames: Vec<i32> = self.slopes.iter().map(|s| s.frame).filter(|f| self.one_way.contains(f)).collect();
+        frames.dedup();
+        frames
+    }
+
     /// 这种瓦片的（摩擦，弹性）。
     fn material(&self, frame: i32) -> (f32, f32) {
         let m = self.materials.iter().find(|m| m.frame == frame);
@@ -123,7 +130,7 @@ pub(crate) struct TileTap {
 }
 
 impl TileTap {
-    /// 画面上的世界坐标 `p` 落在哪一格（列，行）和那一格的帧号；地图外是 `None`。
+    /// 画面上的世界坐标 `p` 落在哪一格（列，行）和那一格的帧号；地图外、空格是 `None`。
     pub fn at(&self, p: Vec2, camera: &nge_render2d::Camera2d) -> Option<([i32; 2], i32)> {
         let origin = nge_render2d::drawn(&Transform2d::from_xy(self.origin.x, self.origin.y), None, self.parallax.as_ref(), camera).translation;
         let local = Vec2::new(p.x - origin.x, origin.y - p.y) / self.tile;
@@ -133,7 +140,8 @@ impl TileTap {
             return None;
         }
         let (c, r) = (c as usize, r as usize);
-        Some(([c as i32, r as i32], self.data[r * self.cols + c]))
+        let frame = self.data[r * self.cols + c];
+        (frame >= 0).then_some(([c as i32, r as i32], frame))
     }
 }
 
@@ -195,7 +203,9 @@ pub(crate) fn merge(solid: &[bool], cols: usize) -> Vec<Run> {
     runs
 }
 
-pub(crate) fn sync_tilemaps(mut commands: Commands, scene: Res<Scene>, mut assets: SceneAssets, nodes: Query<(Entity, &Declared<TilemapNode>)>) {
+pub(crate) fn sync_tilemaps(mut commands: Commands, scene: Res<Scene>, time: Res<nge_ecs::Time>, mut assets: SceneAssets, nodes: Query<(Entity, &Declared<TilemapNode>)>) {
+    // 动画瓦片的相位跟着场景的时钟走：改了地图的规则、整张重建也不从头播（这一帧的动画系统还会加上这一帧的时间）
+    let phase = time.elapsed - f64::from(time.delta);
     sync_list(&mut commands, &scene.tilemaps, &nodes, |commands, map, _, node| {
         commands.entity(map).despawn_related::<Children>().remove::<(nge_ai::NavGrid, nge_ai::GroundMap, TileTap)>();
         if node.cols == 0 || !(node.tile > 0.0 && node.tile.is_finite()) {
@@ -220,7 +230,7 @@ pub(crate) fn sync_tilemaps(mut commands: Commands, scene: Res<Scene>, mut asset
             .animated
             .iter()
             .filter_map(|a| match crate::anim::FrameAnimation::new(a.frames.clone(), a.fps, true) {
-                Some(anim) => Some((a.frame, anim)),
+                Some(anim) => Some((a.frame, anim.starting_at(phase))),
                 None => {
                     crate::lenient::warn_once(format!("瓦片地图 {:?} 的动画瓦片 {} 要有帧、fps 要是正数，不动", node.id, a.frame));
                     None
@@ -243,6 +253,9 @@ pub(crate) fn sync_tilemaps(mut commands: Commands, scene: Res<Scene>, mut asset
             if let Some(anim) = animations.get(&value) {
                 tile.insert(anim.clone());
             }
+        }
+        for frame in node.slopes_also_one_way() {
+            crate::lenient::warn_once(format!("瓦片地图 {:?} 的帧 {frame} 既是斜坡又写在 oneWay 里，按斜坡算（斜坡不能单向）", node.id));
         }
         let mut kinds: Vec<TileKind> = data.iter().map(|&v| node.kind(v)).collect();
         for (k, v) in kinds.iter_mut().zip(data) {

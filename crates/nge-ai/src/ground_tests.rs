@@ -175,3 +175,96 @@ fn spots_below_a_point() {
     assert_eq!(below(1.2, -0.5), Some((1, 1)));
     assert_eq!(below(5.5, -1.0), None, "地图外面");
 }
+
+#[test]
+fn dropping_through_stacked_one_way_rows_lands_below_all_of_them() {
+    // 两行单向平台叠着：物理那边一起穿过，寻路也落到下面的地上
+    let t = terrain(&["....", "....", "====", "====", "....", "####"]);
+    let g = GroundGraph::build(&t, REACH);
+    assert_eq!(link(&g, (1, 1), (1, 4)), Some(Move::Drop));
+    assert_eq!(g.spot((1, 2)), None, "下面那行单向平台上面贴着上面那行，不是站的地方");
+}
+
+#[test]
+fn building_a_big_map_stays_fast() {
+    // 400 × 60 的地图：每 4 行一层平台，长 6 空 3
+    let (cols, rows) = (400usize, 60usize);
+    let mut tiles = vec![Ground::Empty; cols * rows];
+    for r in (3..rows).step_by(4) {
+        for c in 0..cols {
+            if c % 9 < 6 || r == rows - 1 {
+                tiles[r * cols + c] = if r % 8 == 3 { Ground::OneWay } else { Ground::Solid };
+            }
+        }
+    }
+    let t = Terrain::new(cols, tiles);
+    let reach = Reach { height: 3.8, distance: 2.4 };
+    // 取三次里最快的：别的测试一起跑时机器忙，偶尔慢一次不算
+    let took = (0..3)
+        .map(|_| {
+            let start = std::time::Instant::now();
+            let g = GroundGraph::build(&t, reach);
+            assert!(g.spots.len() > 4000, "{}", g.spots.len());
+            start.elapsed()
+        })
+        .min()
+        .unwrap();
+    assert!(took.as_millis() < 20, "建图 {took:?}");
+}
+
+#[test]
+fn jumps_check_the_walker_size() {
+    // 坑两边的地面，头顶三格高的天花板：矮的跳得过去，高 2.5 格的碰头
+    let t = terrain(&["######", "......", "......", "......", "##..##"]);
+    let short = GroundGraph::build(&t, REACH);
+    assert_eq!(link(&short, (1, 3), (4, 3)), Some(Move::Jump));
+    let tall = GroundGraph::build_for(&t, Walker { height: 2.5, ..Walker::new(REACH) });
+    assert_eq!(link(&tall, (1, 3), (4, 3)), None, "高的碰头");
+}
+
+#[test]
+fn slopes_steeper_than_the_walker_can_climb_are_not_walkable() {
+    let t = terrain(&["......", "../###", "######"]);
+    let g = GroundGraph::build(&t, REACH);
+    assert_eq!(link(&g, (1, 1), (2, 1)), Some(Move::Walk), "默认能走 45°");
+    let g = GroundGraph::build_for(&t, Walker { max_slope: 30f32.to_radians(), ..Walker::new(REACH) });
+    assert_eq!(g.spot((2, 1)), None, "最陡 30° 的站不上 45° 的坡");
+    assert_eq!(link(&g, (1, 1), (2, 1)), None);
+}
+
+#[test]
+fn heading_for_a_point_over_a_pit_stops_at_the_nearest_edge() {
+    // 坑上方没有能站的地方：走到离它最近的、走得到的地方
+    let t = terrain(&["..........", "..........", "####...###"]);
+    let g = GroundGraph::build(&t, Reach { height: 1.0, distance: 1.0 });
+    let from = g.spot((0, 1)).unwrap();
+    let over = Vec2::new(5.5, -1.5);
+    assert_eq!(g.spot_below(over, 64), None);
+    let hops = g.find_near(from, over, &|_, _| false).unwrap();
+    assert_eq!(g.spots[hops.last().unwrap().to].cell, (3, 1), "停在坑边");
+    assert!(hops.iter().all(|h| h.kind == Move::Walk));
+    // 已经在最近的地方：不用走
+    assert_eq!(g.find_near(g.spot((3, 1)).unwrap(), over, &|_, _| false), Some(vec![]));
+}
+
+#[test]
+fn avoided_links_are_not_used() {
+    let t = terrain(&["....", "..##", "####"]);
+    let g = GroundGraph::build(&t, REACH);
+    let (a, b) = (g.spot((1, 1)).unwrap(), g.spot((2, 0)).unwrap());
+    assert!(g.find(a, b).is_some());
+    let hops = g.find_avoiding(a, b, &|x, y| x == (1, 1) && y == (2, 0)).unwrap();
+    assert!(hops.iter().all(|h| g.spots[h.from].cell != (1, 1) || g.spots[h.to].cell != (2, 0)), "换一条跳 {hops:?}");
+    assert_eq!(g.find_avoiding(a, b, &|_, y| y == (2, 0)), None, "跳上去的全不走就到不了");
+}
+
+#[test]
+fn ground_maps_see_over_slopes_and_through_one_way_rows() {
+    let t = terrain(&["......", "..=...", "../###", "######"]);
+    let m = GroundMap { terrain: t, origin: Vec2::new(0.0, 0.0), tile: 1.0 };
+    // 站在坡上的点（坡格里、顶边以上）看得见右边高台上的
+    assert!(m.sees(Vec2::new(2.7, -2.1), Vec2::new(4.5, -1.5)));
+    assert!(m.sees(Vec2::new(0.5, -2.5), Vec2::new(2.5, -0.5)), "单向平台不挡");
+    assert!(!m.sees(Vec2::new(0.5, -2.5), Vec2::new(4.5, -2.5)), "实心的挡");
+    assert!(m.covers(Vec2::new(1.0, -1.0)) && !m.covers(Vec2::new(1.0, -5.0)) && !m.covers(Vec2::new(1.0, 2.0)));
+}

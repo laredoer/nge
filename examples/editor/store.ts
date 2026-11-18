@@ -10,6 +10,7 @@ import { addEntities, moveTo, removeEntities, reorder, resizeLayer, setLevel, up
 import { fieldPatch, nameError, parseSize } from "./fields";
 export { EDIT_MAX_COLS, EDIT_MAX_ROWS } from "./fields";
 import { fileName, openFrom, saveTo, type LevelStore } from "./files";
+import { upgradeTiles } from "./tiles";
 import { execute, isDirty, markSavedAt, newEditor, redo, savePoint, undo, type Command } from "./history";
 import type { SceneInput } from "./scene";
 import { prune, toggle } from "./select";
@@ -188,9 +189,11 @@ export function createStore(deps: Deps) {
     if (!(await guard())) return;
     const r = await openFrom(await deps.files(), name);
     if (!r.ok) return status.set(`打不开 ${name}：${r.errors.slice(0, 3).join("；")}`);
-    reset(r.level, name);
-    const problems = checkTypes(r.level, TYPES);
-    status.set(problems.length === 0 ? `打开了 ${name}` : `打开了 ${name}（${problems[0]}）`);
+    const { level: opened, upgraded } = upgradeTiles(r.level);
+    reset(opened, name);
+    const problems = checkTypes(opened, TYPES);
+    const notes = [...(upgraded ? ["瓦片按现在的瓦片图升级了，保存后生效"] : []), ...problems.slice(0, 1)];
+    status.set(notes.length === 0 ? `打开了 ${name}` : `打开了 ${name}（${notes.join("；")}）`);
   };
   const write = async (name: string): Promise<boolean> => {
     // 记下开始保存时的关卡和位置：写盘时又改了的，写完还是脏的

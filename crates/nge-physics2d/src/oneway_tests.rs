@@ -162,3 +162,74 @@ fn one_way_platforms_still_block_from_above_when_moving_kinematically() {
     let y = pos(&app, h).y;
     assert!((y - (45.0 + 59.0 + 15.0)).abs() < 2.0, "被托上去 {y}");
 }
+
+#[test]
+fn standing_on_the_seam_of_a_solid_block_and_a_plank_does_not_drop() {
+    // 实心块 x ∈ [-100, 0]，单向板 x ∈ [0, 200]，顶面都在 y = 100；角色一半踩着实心块
+    let mut app = app();
+    app.world_mut().spawn((RigidBody::Fixed, Collider::rect(Vec2::new(100.0, 10.0)), at(-50.0, 95.0)));
+    let plank = app.world_mut().spawn((Collider { one_way: true, ..Collider::rect(Vec2::new(200.0, 10.0)) }, at(100.0, 95.0))).id();
+    app.world_mut().spawn((RigidBody::Fixed, Collider::rect(Vec2::new(2000.0, 20.0)), at(0.0, -10.0)));
+    let h = hero(&mut app, -2.0, 112.0);
+    steps(&mut app, 10);
+    assert!(!app.world_mut().resource_mut::<Physics>().drop_through(h), "脚下有实心的，不穿");
+    assert!(app.world().resource::<Physics>().dropping.is_empty(), "也不记着往下穿");
+    // 往右走到单向板上：一直站着
+    let mut lowest = f32::MAX;
+    for _ in 0..60 {
+        let vy = app.world().get::<Velocity>(h).unwrap().linear.y;
+        set_velocity(&mut app, h, Vec2::new(100.0, vy));
+        steps(&mut app, 1);
+        lowest = lowest.min(pos(&app, h).y);
+    }
+    assert!(lowest > 109.0, "走到板上没掉下去 {lowest}");
+    assert!(standing_on(&app, h, plank));
+}
+
+#[test]
+fn landing_on_something_else_forgets_the_drop() {
+    // 平台底下 20 处就是地面：穿下去落地时头还贴着平台的底
+    let mut app = app();
+    app.world_mut().spawn((Collider { one_way: true, ..Collider::rect(Vec2::new(200.0, 10.0)) }, at(0.0, 95.0)));
+    app.world_mut().spawn((RigidBody::Fixed, Collider::rect(Vec2::new(2000.0, 20.0)), at(0.0, 60.0)));
+    let h = hero(&mut app, 0.0, 115.0);
+    steps(&mut app, 10);
+    assert!(app.world_mut().resource_mut::<Physics>().drop_through(h));
+    steps(&mut app, 30);
+    assert!((pos(&app, h).y - 80.0).abs() < 1.0, "落到地面 {}", pos(&app, h));
+    assert!(app.world().resource::<Physics>().dropping.is_empty(), "站到别的东西上就不算在穿了");
+}
+
+#[test]
+fn dropping_through_stacked_planks_passes_the_ones_right_below() {
+    // 两块单向板上下挨着（像两行单向瓦片）：穿下去两块都穿过，落到地面
+    let mut app = app();
+    let (ground, _) = level(&mut app);
+    app.world_mut().spawn((Collider { one_way: true, ..Collider::rect(Vec2::new(200.0, 10.0)) }, at(0.0, 85.0)));
+    let h = hero(&mut app, 0.0, 115.0);
+    steps(&mut app, 10);
+    assert!((pos(&app, h).y - 110.0).abs() < 1.0);
+    assert!(app.world_mut().resource_mut::<Physics>().drop_through(h));
+    assert_eq!(app.world().resource::<Physics>().dropping.len(), 2, "两块都记着");
+    steps(&mut app, 60);
+    assert!((pos(&app, h).y - 10.0).abs() < 1.0, "两块都穿过 {}", pos(&app, h));
+    assert!(standing_on(&app, h, ground));
+}
+
+#[test]
+fn boxes_barely_clearing_a_platform_land_on_it() {
+    // 从平台下面往上抛，刚好够越过平台顶面：落回来停在平台上，不掉回去
+    for vy in [410.0f32, 420.0, 430.0] {
+        let mut app = app();
+        let (_, plank) = level(&mut app);
+        let b = app.world_mut().spawn((RigidBody::Dynamic, Collider::rect(Vec2::splat(20.0)), at(0.0, 30.0), Velocity { linear: Vec2::new(0.0, vy), angular: 0.0 })).id();
+        let mut highest = 0f32;
+        for _ in 0..90 {
+            steps(&mut app, 1);
+            highest = highest.max(pos(&app, b).y);
+        }
+        assert!(highest > 110.0, "越过了平台 vy {vy} {highest}");
+        assert!((pos(&app, b).y - 110.0).abs() < 1.5, "vy {vy}：停在平台上 {}", pos(&app, b));
+        let _ = plank;
+    }
+}

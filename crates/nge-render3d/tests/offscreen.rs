@@ -471,7 +471,9 @@ fn loaded_images_are_shared_by_2d_and_3d() {
     *gate.0.lock().unwrap() = true;
     gate.1.notify_all();
     let mut loaded = None;
-    for _ in 0..200 {
+    // 按墙钟等后台线程读完：机器忙时多画几帧也等得到
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while std::time::Instant::now() < deadline {
         let img = offscreen.frame(true).unwrap();
         if close(img.at(sprite_at.0, sprite_at.1), [255, 0, 0, 255]) {
             loaded = Some(img);

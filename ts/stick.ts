@@ -104,3 +104,12 @@ export function stickCommand(prev: Vec, next: Vec): { down: boolean; x?: number;
   if (x === px && y === py) return null;
   return x === 0 && y === 0 ? { down: false } : { down: true, x, y };
 }
+
+/** 摇杆往下推过多少算按着「下」（`VirtualStick` 的 `down`）。 */
+export const STICK_DOWN = 0.5;
+
+/** 「下」的按着状态从 `held` 变成什么；没变是 null。 */
+export function stickDown(held: boolean, next: Vec): boolean | null {
+  const now = next[1] < -STICK_DOWN;
+  return now === held ? null : now;
+}

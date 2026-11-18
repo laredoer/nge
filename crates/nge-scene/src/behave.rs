@@ -74,9 +74,9 @@ pub(crate) fn tap(
                 .filter(|(_, t, ..)| (t.z < 0.0) == back)
                 .filter(|(_, t, s, d, px)| contains(&drawn(t, *d, *px, &cam2d), atlases.sprite_size(&images, s), p.world))
                 .max_by(|a, b| a.1.z.total_cmp(&b.1.z))
-                .map(|(id, ..)| id)
+                .map(|(id, t, ..)| (id, t.z))
         };
-        if let Some(id) = top_sprite(false) {
+        if let Some((id, _)) = top_sprite(false) {
             outbox.send(TAP, &Tap { id: id.0.clone(), x: p.world.x, y: p.world.y, ..Tap::default() });
             continue;
         }
@@ -88,14 +88,18 @@ pub(crate) fn tap(
                 .min_by(|a, b| a.1.total_cmp(&b.1))
                 .map(|(id, t)| (id, ray.at(t).to_array()))
         });
-        // 写了 tap 的瓦片地图：z 大的先，报点中的格子
-        let tile = maps.iter().filter_map(|(id, m)| Some((id, m.z, m.at(p.world, &cam2d)?))).max_by(|a, b| a.1.total_cmp(&b.1));
         if let Some((id, point)) = hit {
             outbox.send(TAP, &Tap { id: id.0.clone(), x: p.world.x, y: p.world.y, point: Some(point), ..Tap::default() });
-        } else if let Some((id, _, (cell, frame))) = tile {
-            outbox.send(TAP, &Tap { id: id.0.clone(), x: p.world.x, y: p.world.y, cell: Some(cell), frame: Some(frame), ..Tap::default() });
-        } else if let Some(id) = top_sprite(true) {
-            outbox.send(TAP, &Tap { id: id.0.clone(), x: p.world.x, y: p.world.y, ..Tap::default() });
+            continue;
+        }
+        // 写了 tap 的瓦片地图（点在空格上不算）和 z < 0 的精灵按 z 一起排，z 大的先；一样高时精灵先
+        let tile = maps.iter().filter_map(|(id, m)| Some((id, m.z, m.at(p.world, &cam2d)?))).max_by(|a, b| a.1.total_cmp(&b.1));
+        match (tile, top_sprite(true)) {
+            (Some((id, z, (cell, frame))), back) if back.is_none_or(|(_, bz)| z > bz) => {
+                outbox.send(TAP, &Tap { id: id.0.clone(), x: p.world.x, y: p.world.y, cell: Some(cell), frame: Some(frame), ..Tap::default() });
+            }
+            (_, Some((id, _))) => outbox.send(TAP, &Tap { id: id.0.clone(), x: p.world.x, y: p.world.y, ..Tap::default() }),
+            (_, None) => {}
         }
     }
 }

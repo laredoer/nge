@@ -49,13 +49,14 @@
 - `stickKeep(state, ids)`：接管的手指不在现在按着的手指（事件的 `touches`）里，说明它的 end 丢了，放开；`ids` 是空的（平台没给）时不动。
 - `stickCommand(prev, next, …)`：要不要发、发什么。摇杆值变了才发；值是 `[0, 0]`（死区里、抬起）发松开，不然发按下带 `x`、`y`。值保留两位小数，免得手指抖一下就发一条。
 
-组件 `<VirtualStick game action player? mode="float"|"fixed" radius=60 deadZone=0.2 directions="analog"|"8"|"4" center? reach=1.5 source="stick" class style>`：
+组件 `<VirtualStick game action player? mode="float"|"fixed" radius=60 deadZone=0.2 directions="analog"|"8"|"4" center? reach=1.5 source="stick" down? class style>`：
 
 - 自己就是一块收触摸的区域（调用方用 `class` / `style` 摆位置和大小，比如屏幕左下半边）。底座和摇杆头是 `pointerEvents="none"` 的子视图，这样手指的 `target` 总是区域本身，`locationX/Y` 就是区域里的坐标。
 - 每次触摸变化走一遍 `stickStep`，算出的值交给 `stickCommand`，要发时用 `act()`（`action` command，`source` 默认 `"stick"`）。动作是一维轴时引擎只取 `x`。
 - 没按着时，浮动模式把底座淡淡地画在 `center`（不填是区域左下角往里一个半径），固定模式就在 `center`。
 - 组件卸载时还按着就发一次松开；App 不在前台（`lifecycle()` 不是 `"active"`）时放开、发松开；按下、挪动时先 `stickKeep`。
 - 固定模式只接管离中心 `reach × radius` 以内按下的手指（默认 1.5 倍半径），区域别处按下的不管。
+- `down` 给了动作名时，摇杆往下推过一半（`y < -0.5`，`stickDown`）按着这个动作、回来或抬起松开，来源是 `<source>:down`（平台跳跃用它当「下」，按下加跳穿下单向木板）。
 
 ### 有状态的组件别放在每帧都变的条件里
 

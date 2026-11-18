@@ -625,7 +625,7 @@ export interface TilemapNode {
   collide?: boolean;
   /** 视差，加在每个瓦片上（同精灵的 `parallax`）；碰撞体不跟着挪，别和 `solid` 一起用。 */
   parallax?: number | [number, number];
-  /** 单向平台的帧号：从下面跳得上去，站得住，角色按「下」加跳（`dropThrough`）穿下去。同一行连着的并成一块。见 docs/gameplay2d.md。 */
+  /** 单向平台的帧号：从下面跳得上去，站得住，角色按「下」加跳穿下去（Rust 里 `Physics::drop_through`，TSX 里 `dropThrough` command）。同一行连着的并成一块。见 docs/gameplay2d.md。 */
   oneWay?: number[];
   /** 斜坡的帧号：顶边左右两头的高（格高的 0 … 1），45° 上坡是 `{ left: 0, right: 1 }`，22.5° 两格一组 `0 → 0.5`、`0.5 → 1`。 */
   slopes?: { frame: number; left: number; right: number }[];
@@ -861,12 +861,23 @@ export interface AnimEvent {
   name: string;
 }
 
-/** 设节点 `id` 的状态机参数、发 trigger（一个名字或数组）。 */
 /** 往某个节点的行为树黑板上写，`value` 是 `null` 时删掉（见 docs/gameplay2d.md）。 */
 export function blackboard(game: NativeComponentRef | undefined, args: { id: string; key: string; value: BlackboardValue | null }) {
   game?.command("blackboard", args);
 }
 
+/** 让站在单向平台上的精灵 `id`（角色或动态刚体）从平台上穿下去；结果用 `dropThrough` 事件回：`ok` 是穿没穿（脚下没有单向平台、还踩着实心的时不穿）。见 docs/gameplay2d.md。 */
+export function dropThrough(game: NativeComponentRef | undefined, args: { id: string }) {
+  game?.command("dropThrough", args);
+}
+
+/** `dropThrough` 的结果。 */
+export interface DropThroughEvent {
+  id: string;
+  ok: boolean;
+}
+
+/** 设节点 `id` 的状态机参数、发 trigger（一个名字或数组）。 */
 export function animSet(game: NativeComponentRef | undefined, args: { id: string; params?: AnimParams; trigger?: string | string[] }) {
   game?.command("animSet", args);
 }
@@ -1057,6 +1068,7 @@ interface BuiltinEvents {
   http: HttpReply;
   /** 3D 空间查询的结果（见 `queries3d()`）。 */
   query3d: Query3dReply;
+  dropThrough: DropThroughEvent;
 }
 
 type TouchPhase = "start" | "move" | "end" | "cancel";
@@ -1065,14 +1077,14 @@ export type GameViewProps<P, E> = NativeComponentProps<Partial<BuiltinProps> & P
 
 /**
  * 生成游戏视图组件。`props` / `events` 是游戏自己的通道名（Rust 侧 `add_prop` / `add_state` / `add_event`），
- * 类型由泛型给出；内置 prop `scene` / `actions`、事件 `tap` / `collide` / `animEnd` / `animEvent` / `tweenEnd` / `key` / `action` / `pad` / `levelStart` / `chase` / `behavior` / `typed` / `fps` / `error` / `ready` / `net` / `http` / `query3d`，触摸自动转成引擎的 `touch` command。
+ * 类型由泛型给出；内置 prop `scene` / `actions`、事件 `tap` / `collide` / `animEnd` / `animEvent` / `tweenEnd` / `key` / `action` / `pad` / `levelStart` / `chase` / `behavior` / `typed` / `fps` / `error` / `ready` / `net` / `http` / `query3d` / `dropThrough`，触摸自动转成引擎的 `touch` command。
  */
 export function gameView<P extends object = {}, E extends object = {}>(
   spec: { props?: readonly (keyof P & string)[]; events?: readonly (keyof E & string)[] } = {},
 ) {
   const Native = nativeComponent<BuiltinProps & P, BuiltinEvents & E>("nge.game", {
     props: [...new Set(["scene", "captureKeys", "actions", "screenOrientation", ...(spec.props ?? [])])] as (keyof (BuiltinProps & P) & string)[],
-    events: [...new Set(["tap", "collide", "animEnd", "animEvent", "tweenEnd", "key", "action", "pad", "levelStart", "chase", "behavior", "typed", "fps", "error", "ready", "net", "http", "query3d", ...(spec.events ?? [])])] as (keyof (BuiltinEvents & E) & string)[],
+    events: [...new Set(["tap", "collide", "animEnd", "animEvent", "tweenEnd", "key", "action", "pad", "levelStart", "chase", "behavior", "typed", "fps", "error", "ready", "net", "http", "query3d", "dropThrough", ...(spec.events ?? [])])] as (keyof (BuiltinEvents & E) & string)[],
   });
 
   return (props: GameViewProps<P, E>) => {

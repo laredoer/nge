@@ -95,14 +95,14 @@ pub struct Node<L> {
     /// 顺序 / 选择跑到第几个；重复跑了几次。
     at: usize,
     /// 等待从什么时候开始；冷却到什么时候结束。
-    time: f32,
+    time: f64,
     /// 并行里每个孩子的结果（还在跑的是 None）。
     done: Vec<Option<Status>>,
 }
 
 impl<L> Node<L> {
     fn new(kind: Kind<L>) -> Self {
-        Self { kind, reactive: false, running: false, at: 0, time: f32::NEG_INFINITY, done: Vec::new() }
+        Self { kind, reactive: false, running: false, at: 0, time: f64::NEG_INFINITY, done: Vec::new() }
     }
 
     /// 一个一个跑，有一个失败就失败，全成了才成；还在跑的下一帧接着跑。
@@ -148,30 +148,35 @@ impl<L> Node<L> {
         self
     }
 
-    /// 打断：这个节点和下面在跑的都回到没开始的样子（冷却的时间留着）。
-    fn halt(&mut self) {
+    /// 打断：这个节点和下面在跑的都回到没开始的样子（冷却的时间留着）；在跑的叶子交给 `on` 收尾。
+    fn halt(&mut self, on: &mut Halted<'_, L>, bb: &mut Blackboard) {
+        if self.running
+            && let Kind::Leaf(leaf) = &self.kind
+        {
+            on(leaf, bb);
+        }
         self.running = false;
         self.at = 0;
         self.done.clear();
         if matches!(self.kind, Kind::Wait(_)) {
-            self.time = f32::NEG_INFINITY;
+            self.time = f64::NEG_INFINITY;
         }
         match &mut self.kind {
-            Kind::Sequence(c) | Kind::Selector(c) | Kind::Parallel(_, c) => c.iter_mut().for_each(Node::halt),
-            Kind::Invert(c) | Kind::Repeat(_, c) | Kind::Cooldown(_, c) => c.halt(),
+            Kind::Sequence(c) | Kind::Selector(c) | Kind::Parallel(_, c) => c.iter_mut().for_each(|c| c.halt(on, bb)),
+            Kind::Invert(c) | Kind::Repeat(_, c) | Kind::Cooldown(_, c) => c.halt(on, bb),
             Kind::Wait(_) | Kind::Leaf(_) => {}
         }
     }
 
-    fn tick(&mut self, now: f32, dt: f32, run: &mut dyn FnMut(&L, &mut Blackboard) -> Status, bb: &mut Blackboard) -> Status {
+    fn tick(&mut self, now: f64, dt: f64, cx: &mut Cx<L>, bb: &mut Blackboard) -> Status {
         let status = match &mut self.kind {
-            Kind::Sequence(children) => composite(children, self.reactive, &mut self.at, Status::Success, now, dt, run, bb),
-            Kind::Selector(children) => composite(children, self.reactive, &mut self.at, Status::Failure, now, dt, run, bb),
+            Kind::Sequence(children) => composite(children, self.reactive, &mut self.at, Status::Success, now, dt, cx, bb),
+            Kind::Selector(children) => composite(children, self.reactive, &mut self.at, Status::Failure, now, dt, cx, bb),
             Kind::Parallel(succeed, children) => {
                 self.done.resize(children.len(), None);
                 for (c, d) in children.iter_mut().zip(&mut self.done) {
                     if d.is_none() {
-                        let s = c.tick(now, dt, run, bb);
+                        let s = c.tick(now, dt, cx, bb);
                         *d = (s != Status::Running).then_some(s);
                     }
                 }
@@ -185,17 +190,17 @@ impl<L> Node<L> {
                     Status::Running
                 };
                 if s != Status::Running {
-                    children.iter_mut().for_each(Node::halt);
+                    children.iter_mut().for_each(|c| c.halt(cx.halted, bb));
                     self.done.clear();
                 }
                 s
             }
-            Kind::Invert(child) => match child.tick(now, dt, run, bb) {
+            Kind::Invert(child) => match child.tick(now, dt, cx, bb) {
                 Status::Success => Status::Failure,
                 Status::Failure => Status::Success,
                 Status::Running => Status::Running,
             },
-            Kind::Repeat(times, child) => match child.tick(now, dt, run, bb) {
+            Kind::Repeat(times, child) => match child.tick(now, dt, cx, bb) {
                 Status::Success => {
                     self.at += 1;
                     if times.is_some_and(|t| self.at as u32 >= t) {
@@ -216,9 +221,9 @@ impl<L> Node<L> {
                 if now < self.time {
                     Status::Failure
                 } else {
-                    let s = child.tick(now, dt, run, bb);
+                    let s = child.tick(now, dt, cx, bb);
                     if s != Status::Running {
-                        self.time = now + *seconds;
+                        self.time = now + f64::from(*seconds);
                     }
                     s
                 }
@@ -228,13 +233,13 @@ impl<L> Node<L> {
                     // 从这一帧开头算起
                     self.time = now - dt;
                 }
-                if now - self.time >= *seconds - 1e-6 { Status::Success } else { Status::Running }
+                if now - self.time >= f64::from(*seconds) - 1e-6 { Status::Success } else { Status::Running }
             }
-            Kind::Leaf(leaf) => run(leaf, bb),
+            Kind::Leaf(leaf) => (cx.run)(leaf, bb),
         };
         self.running = status == Status::Running;
         if !self.running && matches!(self.kind, Kind::Wait(_)) {
-            self.time = f32::NEG_INFINITY;
+            self.time = f64::NEG_INFINITY;
         }
         status
     }
@@ -247,21 +252,21 @@ fn composite<L>(
     reactive: bool,
     at: &mut usize,
     pass: Status,
-    now: f32,
-    dt: f32,
-    run: &mut dyn FnMut(&L, &mut Blackboard) -> Status,
+    now: f64,
+    dt: f64,
+    cx: &mut Cx<L>,
     bb: &mut Blackboard,
 ) -> Status {
     let start = if reactive { 0 } else { *at };
     for i in start..children.len() {
-        let s = children[i].tick(now, dt, run, bb);
+        let s = children[i].tick(now, dt, cx, bb);
         if s == pass {
             continue;
         }
         // 停在这：后面之前在跑的（反应式时被前面的打断了）回到没开始
         for later in &mut children[i + 1..] {
             if later.running {
-                later.halt();
+                later.halt(cx.halted, bb);
             }
         }
         *at = if s == Status::Running { i } else { 0 };
@@ -271,12 +276,21 @@ fn composite<L>(
     pass
 }
 
-/// 一棵树：根节点、黑板、树自己的时钟（冷却和等待按它算）。
+/// 叶子被打断时的收尾。
+type Halted<'a, L> = dyn FnMut(&L, &mut Blackboard) + 'a;
+
+/// 跑一遍时带着的：叶子怎么跑，被打断时怎么收尾。
+struct Cx<'a, L> {
+    run: &'a mut dyn FnMut(&L, &mut Blackboard) -> Status,
+    halted: &'a mut Halted<'a, L>,
+}
+
+/// 一棵树：根节点、黑板、树自己的时钟（冷却和等待按它算，用 f64，跑很久也不丢精度）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct Tree<L> {
     pub root: Node<L>,
     pub blackboard: Blackboard,
-    time: f32,
+    time: f64,
 }
 
 impl<L> Tree<L> {
@@ -286,17 +300,27 @@ impl<L> Tree<L> {
 
     /// 过了 `dt` 秒，从根跑一遍；叶子交给 `run`。
     pub fn tick(&mut self, dt: f32, run: &mut dyn FnMut(&L, &mut Blackboard) -> Status) -> Status {
-        let dt = if dt.is_finite() { dt.max(0.0) } else { 0.0 };
+        self.tick_halting(dt, run, &mut |_, _| {})
+    }
+
+    /// 同 `tick`，在跑的叶子被打断（反应式的前面变了、并行凑够了）时调 `halted` 收尾（比如停下动作、放开占着的东西）。
+    pub fn tick_halting(&mut self, dt: f32, run: &mut dyn FnMut(&L, &mut Blackboard) -> Status, halted: &mut Halted<'_, L>) -> Status {
+        let dt = if dt.is_finite() { f64::from(dt.max(0.0)) } else { 0.0 };
         self.time += dt;
-        self.root.tick(self.time, dt, run, &mut self.blackboard)
+        self.root.tick(self.time, dt, &mut Cx { run, halted }, &mut self.blackboard)
     }
 
     /// 打断整棵树（在跑的都回到没开始，冷却留着）。
     pub fn halt(&mut self) {
-        self.root.halt();
+        self.halt_with(&mut |_, _| {});
     }
 
-    pub fn time(&self) -> f32 {
+    /// 同 `halt`，在跑的叶子交给 `halted` 收尾。
+    pub fn halt_with(&mut self, halted: &mut Halted<'_, L>) {
+        self.root.halt(halted, &mut self.blackboard);
+    }
+
+    pub fn time(&self) -> f64 {
         self.time
     }
 }

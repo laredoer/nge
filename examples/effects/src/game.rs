@@ -204,7 +204,9 @@ mod tests {
     fn loaded_app() -> App {
         let files = files();
         let mut app = app(files.iter().map(|(u, p)| (u.as_str(), p.as_str())));
-        for _ in 0..500 {
+        // 按墙钟等后台线程读完：机器忙时多跑几帧也等得到
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        while std::time::Instant::now() < deadline {
             app.tick(VIEWPORT, 0.016);
             if !app.world().resource::<Status>().loading {
                 return app;

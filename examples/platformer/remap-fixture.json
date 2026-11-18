@@ -31,7 +31,8 @@
      "kind": "button",
      "keys": [
       "ArrowDown",
-      "GamepadDown"
+      "GamepadDown",
+      "GamepadLeftStickDown"
      ]
     },
     "restart": {
@@ -92,6 +93,14 @@
      "keys": [
       "KeyT",
       "GamepadA"
+     ]
+    },
+    "down": {
+     "kind": "button",
+     "keys": [
+      "KeyV",
+      "GamepadDown",
+      "GamepadLeftStickDown"
      ]
     }
    }
@@ -130,7 +139,8 @@
      "kind": "button",
      "keys": [
       "ArrowDown",
-      "GamepadDown"
+      "GamepadDown",
+      "GamepadLeftStickDown"
      ]
     },
     "restart": {
@@ -191,6 +201,14 @@
      "keys": [
       "KeyT",
       "GamepadA"
+     ]
+    },
+    "down": {
+     "kind": "button",
+     "keys": [
+      "KeyV",
+      "GamepadDown",
+      "GamepadLeftStickDown"
      ]
     }
    }
@@ -229,7 +247,8 @@
      "kind": "button",
      "keys": [
       "ArrowDown",
-      "GamepadDown"
+      "GamepadDown",
+      "GamepadLeftStickDown"
      ]
     },
     "restart": {
@@ -290,6 +309,14 @@
      "keys": [
       "KeyT",
       "GamepadA"
+     ]
+    },
+    "down": {
+     "kind": "button",
+     "keys": [
+      "KeyV",
+      "GamepadDown",
+      "GamepadLeftStickDown"
      ]
     }
    }

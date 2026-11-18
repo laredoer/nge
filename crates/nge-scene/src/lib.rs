@@ -62,7 +62,7 @@ pub use joints3d::{Joint3dKindName, Joint3dNode};
 pub use level::{LEVEL_START, LevelStart};
 pub use nodes::{AmbientNode, AnchorName, BURST, Burst, Camera3dNode, EmitterNode, FLOAT_TEXT, FloatText, LightKind, LightNode, ModelNode, Particles, TextNode};
 pub use net::{NetNode, REMOTE_PREFIX, parse_remote};
-pub use physics::{BodyKind, BodyNode, COLLIDE, Collide, PUSH, PhysicsNode, Push, ShapeName};
+pub use physics::{BodyKind, BodyNode, COLLIDE, Collide, DROP_THROUGH, DROPPED, DropThrough, Dropped, PUSH, PhysicsNode, Push, ShapeName};
 pub use physics3d::{Body3dKind, ModelBody, Physics3dNode, Shape3dName};
 pub use query3d::{Hit3d, QUERY3D, QUERY3D_RESULT, Query3d, Query3dCommand, Query3dKind, Query3dResult, Shape3dQuery};
 pub use protocol::{Bounds, CameraNode, Color, SCENE, Scene, SpriteNode, TAP, Tap};
@@ -179,6 +179,7 @@ impl Plugin for ScenePlugin {
             .add_command(BURST)
             .add_command(FLOAT_TEXT)
             .add_command(PUSH)
+            .add_command(DROP_THROUGH)
             .add_command(SOUND)
             .add_command(TWEEN)
             .add_command(SHAKE)
@@ -193,6 +194,7 @@ impl Plugin for ScenePlugin {
             .add_systems(PostUpdate, (anim_graph::animate_sprite_graphs.in_set(nge_anim::Animated), anim_graph::forward_events.after(nge_anim::Animated)))
             .add_event(TWEEN_END)
             .add_event(COLLIDE)
+            .add_event(DROPPED)
             .add_event(LEVEL_START)
             .add_event(CHASE)
             .add_event(TYPED)
@@ -203,7 +205,7 @@ impl Plugin for ScenePlugin {
             .add_systems(PreUpdate, level::switch_level.run_if(resource_changed::<Scene>).before(sync::sync_sprites))
             .add_systems(PreUpdate, synced.run_if(resource_changed::<Scene>).after(level::switch_level).before(PointerWorld))
             .add_systems(PreUpdate, match2d::match_2d.after(sync_nodes::sync_camera3d).after(camera::sync_camera).before(PointerWorld))
-            .add_systems(Update, (behave::spin, behave::tap, behave::burst, behave::float_text, physics::push, audio::play_sound, anim::animate))
+            .add_systems(Update, (behave::spin, behave::tap, behave::burst, behave::float_text, physics::push, physics::drop_through, audio::play_sound, anim::animate))
             // 补间最后写，盖过 spin / push 这一帧的改动
             .add_systems(Update, (anim::start_tweens, anim::tween).chain().after(behave::spin).after(physics::push))
             // 精灵和关节都同步完了再连：关节可以在精灵之后才出现，反过来也行

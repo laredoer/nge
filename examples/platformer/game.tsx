@@ -9,7 +9,7 @@ import { NEW_SAVE, nextSlot, SAVE_MIGRATIONS, SAVE_VERSION, saveDataOf, saveSumm
 import { hpBar, outOfHearts, padPlace, stickPlace, TITLE_HOLD_MS, titleBubble, zoomBy } from "./hud";
 import { boardOf, leaderOf, nameTags, netLabel, netNode, netSetting, playerName, remotePlayers, scoresUrl, submitUrl, type Leader } from "./online";
 import { labAction, labScene, levelAfterLab } from "./lab";
-import { campfireAt, finish, flagOn, HERO, JELLY_ZONE, jellyAt, LEVELS, TILE, TOWER_TRIGGER, towerAt, towerSpot, walkerBehavior, type Built, type Progress } from "./levels";
+import { campfireAt, finish, flagOn, HERO, JELLY_ZONE, jellyAt, LEVELS, TILE, TOWER_TRIGGER, towerAt, towerSpot, walkerSprites, type Built, type Progress } from "./levels";
 
 /** Rust 发的事件：掉出关卡或被敌人撞到送回起点、按 R 重新开始、踩到敌人。 */
 interface Events {
@@ -277,12 +277,8 @@ export function Game(props: GameProps = {}) {
           ? { id, x, y, w: 22, h: 22, z: 4, color: "#00000000" }
           : { id, x, y, w: 22, h: 22, z: 4, color: "#c8d2ffd0", unlit: true, body: { kind: "kinematic", friction: 0 }, chase: GHOST_CHASE },
       ),
-      // 走地面的敌人：行为树巡逻、追角色（见 docs/gameplay2d.md）；踩到的和敌人一样变透明
-      ...now().walkers.map(({ id, x, y, patrol }): SpriteNode =>
-        stomped().includes(id)
-          ? { id, x, y, w: 24, h: 24, z: 4, color: "#00000000" }
-          : { id, x, y, w: 24, h: 24, z: 4, color: "#d35f5f", body: { kind: "character", friction: 0 }, behavior: walkerBehavior(x, y, patrol) },
-      ),
+      // 走地面的敌人：行为树巡逻、追角色（见 docs/gameplay2d.md）；踩到的和敌人一样变透明，按 R 重开换 id 重建
+      ...walkerSprites(now().walkers, towerRound(), stomped()),
       ...now().ramps,
       ...(tower() === null ? [] : [tower()!.trigger]),
       ...(jelly() === null ? [] : [jelly()!.zone]),
@@ -459,7 +455,7 @@ export function Game(props: GameProps = {}) {
 function TouchPad(props: { game: () => NativeComponentRef | undefined }) {
   return (
     <View style={{ pointerEvents: "box-none" }} class="absolute top-0 left-0 right-0 bottom-0">
-      <VirtualStick game={props.game} action="move" class="absolute" style={stickPlace(safeArea())} />
+      <VirtualStick game={props.game} action="move" down="down" class="absolute" style={stickPlace(safeArea())} />
       <View class="absolute flex-row justify-end items-end" style={{ pointerEvents: "box-none", ...padPlace(safeArea()) }}>
         <View class="flex-row gap-4 items-end">
           <ActionButton game={props.game} action="restart" label="↺" class="w-12 h-12" />

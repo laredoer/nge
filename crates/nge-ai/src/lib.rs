@@ -11,7 +11,7 @@ use nge_ecs::{App, Plugin, Update};
 pub use bt::{Blackboard, Node, Status, Tree, Value};
 pub use chase::{AGENT_RADIUS, ARRIVE, ChaseChanged, ChaseState, Chaser, LOSE, NavGrid, REPLAN, chase};
 pub use fsm::Fsm;
-pub use ground::{Ground, GroundGraph, GroundMap, Hop, Link, Move, Reach, Spot, Terrain};
+pub use ground::{Ground, GroundGraph, GroundMap, Hop, Link, Move, Reach, Spot, Terrain, Walker};
 pub use grid::{Cell, Grid, MAX_EXPANDED, clear, find_path, middle, smooth};
 
 /// 注册 [`ChaseChanged`] 消息和追击系统（`Update`）。

@@ -1,7 +1,7 @@
 // 触屏控制的纯逻辑（docs/touch-input.md）：摇杆的数学和手指跟踪、手势状态机、按钮的连发和冷却。
 import { expect, test } from "nsh/test";
 import { GESTURE_IDLE, gestureHandlers, gestureStep, type Gesture, type GestureInput, type GestureState } from "../../ts/gestures";
-import { knobOffset, snapDirection, stickCommand, stickKeep, stickOutput, stickStep, stickValue, type StickState, type StickTouch } from "../../ts/stick";
+import { knobOffset, snapDirection, stickCommand, stickDown, stickKeep, stickOutput, stickStep, stickValue, type StickState, type StickTouch } from "../../ts/stick";
 import { cooldownFill, heldKey, pressedLook, repeater } from "../../ts/touch";
 
 const near = (a: number[], b: number[], eps = 1e-6) => expect(a.every((v, i) => Math.abs(v - b[i]) < eps)).toBe(true);
@@ -101,6 +101,14 @@ test("摇杆发什么：值变了才发，0 是松开，保留两位小数", () 
   expect(stickCommand([0.5, 0.25], [0.501, 0.2499])).toBe(null);
   expect(stickCommand([0.5, 0.25], [0.333333, -1])).toEqual({ down: true, x: 0.33, y: -1 });
   expect(stickCommand([0.5, 0.25], [0.001, 0])).toEqual({ down: false });
+});
+
+test("摇杆的「下」：往下推过一半才按着，变了才发", () => {
+  expect(stickDown(false, [0, -0.4])).toBe(null);
+  expect(stickDown(false, [0.3, -0.6])).toBe(true);
+  expect(stickDown(true, [0, -0.9])).toBe(null);
+  expect(stickDown(true, [0, 0])).toBe(false);
+  expect(stickDown(false, [0, 0.9])).toBe(null);
 });
 
 // ——— 手势 ———

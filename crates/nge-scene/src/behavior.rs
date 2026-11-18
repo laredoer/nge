@@ -8,10 +8,10 @@ use std::sync::Arc;
 
 use bevy_ecs::prelude::*;
 use glam::Vec2;
-use nge_ai::{Blackboard, GroundGraph, GroundMap, Move, NavGrid, Node, Reach, Status, Tree, Value};
+use nge_ai::{Blackboard, GroundGraph, GroundMap, Move, NavGrid, Node, Reach, Status, Tree, Value, Walker};
 use nge_core::{CommandKey, EventKey};
 use nge_ecs::{Outbox, Time};
-use nge_physics2d::{Physics, Velocity};
+use nge_physics2d::{Character, Physics, Velocity};
 use nge_render2d::Transform2d;
 use serde::{Deserialize, Serialize};
 
@@ -139,6 +139,27 @@ fn non_negative(name: &str, v: f32) -> Result<f32, String> {
 }
 
 impl BtNode {
+    /// 能跑但多半写错了的地方（比如并行要的成功数比孩子还多，永远成不了）。
+    pub(crate) fn lint(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        self.lint_into(&mut out);
+        out
+    }
+
+    fn lint_into(&self, out: &mut Vec<String>) {
+        match self {
+            BtNode::Parallel { succeed, children } if *succeed > children.len() => {
+                out.push(format!("parallel 的 succeed 是 {succeed}，可只有 {} 个孩子，永远成不了", children.len()));
+            }
+            _ => {}
+        }
+        match self {
+            BtNode::Sequence { children, .. } | BtNode::Selector { children, .. } | BtNode::Parallel { children, .. } => children.iter().for_each(|c| c.lint_into(out)),
+            BtNode::Invert { child } | BtNode::Repeat { child, .. } | BtNode::Cooldown { child, .. } => child.lint_into(out),
+            _ => {}
+        }
+    }
+
     pub(crate) fn build(&self) -> Result<Node<Leaf>, String> {
         let all = |c: &[BtNode]| c.iter().map(BtNode::build).collect::<Result<Vec<_>, _>>();
         Ok(match self {
@@ -177,22 +198,33 @@ pub struct BehaviorEvent {
     pub y: f32,
 }
 
-/// TSX 的 `blackboard` command：往某个节点的黑板上写（`value` 是 `null` 时删掉）。
+/// TSX 的 `blackboard` command：往某个节点的黑板上写（`value` 是 `null` 时删掉；没写 `value` 时 warn，不改）。
 #[derive(Message, Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BlackboardSet {
     pub id: String,
     pub key: String,
-    #[serde(default)]
-    pub value: serde_json::Value,
+    #[serde(default, deserialize_with = "present")]
+    pub value: Option<serde_json::Value>,
+}
+
+/// 写了（哪怕是 `null`）就是 `Some`。
+fn present<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<serde_json::Value>, D::Error> {
+    serde_json::Value::deserialize(d).map(Some)
 }
 
 /// 跳在半空：横着的速度，往哪落（世界坐标的 x）。走出边落下时速度是 `None`，一路往落点挪。
+/// `seen`：起跳以后离过地（物理这一帧可能还没动，接触还是旧的）；`since`：起跳的时刻。
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Air {
     vx: Option<f32>,
     to: f32,
+    seen: bool,
+    since: f64,
 }
+
+/// 地面寻路的一条连线（起点格、终点格），按格子记：地图重建以后编号会变。
+type LinkCells = (nge_ai::Cell, nge_ai::Cell);
 
 /// 组件：跑着的行为树和走路的状态。
 #[derive(Component)]
@@ -201,8 +233,39 @@ pub(crate) struct Agent {
     speed: f32,
     jump: f32,
     home: Vec2,
-    half: f32,
+    /// 半宽、半高（point）。
+    size: Vec2,
     air: Option<Air>,
+    /// 正在试的跳 / 穿下去的连线。
+    attempt: Option<LinkCells>,
+    /// 每条连线接连失败了几次。
+    fails: HashMap<LinkCells, u32>,
+    /// 失败太多次、暂时不走的连线，到什么时候。
+    banned: Vec<(LinkCells, f64)>,
+    /// 这一帧放弃了一条连线：移动的叶子失败一次，树换别的做。
+    gave_up: bool,
+    clock: f64,
+}
+
+impl Agent {
+    fn new(tree: Tree<Leaf>, speed: f32, jump: f32, home: Vec2, size: Vec2) -> Self {
+        Self { tree, speed, jump, home, size, air: None, attempt: None, fails: HashMap::new(), banned: Vec::new(), gave_up: false, clock: 0.0 }
+    }
+
+    /// 试的连线有了结果：成了清掉失败次数；失败了记一次，够数就暂时不走它。
+    fn settle(&mut self, link: LinkCells, ok: bool) {
+        if ok {
+            self.fails.remove(&link);
+            return;
+        }
+        let n = self.fails.entry(link).or_default();
+        *n += 1;
+        if *n >= GIVE_UP {
+            self.fails.remove(&link);
+            self.banned.push((link, self.clock + BAN));
+            self.gave_up = true;
+        }
+    }
 }
 
 /// 行为树变了才重建（树从头跑、黑板回到初值）；只是位置变了只换出生点。去掉就删。
@@ -234,10 +297,13 @@ pub(crate) fn apply_behavior(entity: &mut EntityCommands, before: Option<&Sprite
         entity.remove::<Agent>();
         return;
     };
+    for w in b.tree.lint() {
+        crate::lenient::warn_once(format!("节点 {:?} 的 behavior：{w}", node.id));
+    }
     match built {
         Ok(tree) => {
-            let half = crate::physics::square(node.w, node.h).map_or(0.0, |s| s.y.abs() / 2.0);
-            entity.insert(Agent { tree, speed, jump, home, half, air: None });
+            let size = crate::physics::square(node.w, node.h).map_or(Vec2::ZERO, |s| s.abs() / 2.0);
+            entity.insert(Agent::new(tree, speed, jump, home, size));
         }
         Err(e) => {
             crate::lenient::warn_once(format!("节点 {:?} 的 behavior 写错了，没有行为：{e}", node.id));
@@ -259,7 +325,11 @@ pub(crate) fn blackboard(mut reader: MessageReader<BlackboardSet>, mut agents: Q
             log::warn!("blackboard：没有 id 为 {:?} 的节点，或它没有 behavior", c.id);
             continue;
         };
-        match value(&c.value) {
+        let Some(v) = &c.value else {
+            log::warn!("blackboard：{:?} 的 {:?} 没写 value，没改（要删掉写 null）", c.id, c.key);
+            continue;
+        };
+        match value(v) {
             Ok(Some(v)) => agent.tree.blackboard.set(&c.key, v),
             Ok(None) => {
                 agent.tree.blackboard.remove(&c.key);
@@ -269,8 +339,8 @@ pub(crate) fn blackboard(mut reader: MessageReader<BlackboardSet>, mut agents: Q
     }
 }
 
-/// 一张地图按一种跳跃能力建的图（地图变了重建）。
-type Graphs = HashMap<(Entity, [u32; 3]), Arc<GroundGraph>>;
+/// 一张地图按一种角色（跳跃能力、大小、坡）建的图（地图变了重建）。
+type Graphs = HashMap<(Entity, [u32; 6]), Arc<GroundGraph>>;
 
 /// 追到的距离：横着差多少格以内、竖着差多少格以内。
 const ARRIVE: f32 = 0.4;
@@ -281,6 +351,15 @@ const TAKEOFF: f32 = 0.15;
 const MARGIN: f32 = 0.85;
 /// 落地多深以内找脚下的地面（格）。
 const DEPTH: i32 = 64;
+/// 一条跳 / 穿下去的连线接连失败几次就暂时不走，不走多少秒。
+const GIVE_UP: u32 = 3;
+const BAN: f64 = 10.0;
+/// 起跳以后多久还没离地算没跳起来（秒）。
+const LIFTOFF: f64 = 1.0;
+/// 比所有地图的底边还低多少格算掉出地图。
+const OUT: f32 = 2.0;
+/// 掉出地图时发的 `behavior` 事件名。
+pub const FELL: &str = "fell";
 
 /// 跑一帧：每个有行为树的跑一遍树，叶子定下要去哪，再按地面寻路的下一步写速度。
 #[allow(clippy::too_many_arguments)]
@@ -288,10 +367,11 @@ pub(crate) fn run(
     time: Res<Time>,
     mut physics: ResMut<Physics>,
     mut outbox: ResMut<Outbox>,
+    mut commands: Commands,
     ids: Query<(&SceneId, &Transform2d)>,
     maps: Query<(Entity, Ref<GroundMap>)>,
     navs: Query<&NavGrid>,
-    mut agents: Query<(Entity, &SceneId, &Transform2d, &mut Agent, Option<&mut Velocity>)>,
+    mut agents: Query<(Entity, &SceneId, &Transform2d, &mut Agent, Option<&mut Velocity>, Option<&Character>)>,
     mut graphs: Local<Graphs>,
 ) {
     if agents.is_empty() {
@@ -302,29 +382,55 @@ pub(crate) fn run(
     graphs.retain(|(e, _), _| !changed.contains(e) && maps.contains(*e));
     let targets: HashMap<&str, Vec2> = ids.iter().map(|(id, t)| (id.0.as_str(), t.translation)).collect();
     let gravity = physics.gravity().y.abs();
-    for (entity, id, transform, mut agent, velocity) in &mut agents {
+    // 所有地图最低的底边：比它还低就是掉出去了
+    let floor = maps.iter().map(|(_, m)| m.bottom() - OUT * m.tile).reduce(f32::min);
+    for (entity, id, transform, mut agent, velocity, character) in &mut agents {
         let Some(mut velocity) = velocity else {
             crate::lenient::warn_once(format!("节点 {:?} 有 behavior 但没有 kind 是 character 的 body，不会走", id.0));
             continue;
         };
+        agent.clock += f64::from(dt);
+        let clock = agent.clock;
+        agent.banned.retain(|&(_, until)| until > clock);
         let me = transform.translation;
+        if floor.is_some_and(|f| me.y < f) {
+            // 掉出地图：说一声，回到出生点从头来
+            outbox.send(BEHAVIOR, &BehaviorEvent { id: id.0.clone(), name: FELL.into(), x: me.x, y: me.y });
+            commands.entity(entity).insert(Transform2d { translation: agent.home, ..*transform });
+            velocity.linear = Vec2::ZERO;
+            (agent.air, agent.attempt) = (None, None);
+            agent.tree.halt();
+            continue;
+        }
         let grounded = physics.contacts(entity).iter().any(|c| c.normal.y > 0.5);
-        let map = maps.iter().find(|(_, m)| m.covers(me));
-        let graph = map.map(|(e, m)| {
-            let m = m.into_inner();
-            let reach = Reach::from_physics(agent.jump, gravity, agent.speed, m.tile);
-            let reach = Reach { height: reach.height * MARGIN, distance: reach.distance * MARGIN };
-            let key = (e, [reach.height.to_bits(), reach.distance.to_bits(), m.tile.to_bits()]);
-            (m, graphs.entry(key).or_insert_with(|| Arc::new(GroundGraph::build(&m.terrain, reach))).clone())
-        });
+        let feet = me - Vec2::Y * agent.size.y;
+        let max_slope = character.map_or(nge_physics2d::Character::default().max_slope, |c| c.max_slope);
+        // 脚下有站的地方的那张图；都没有就用第一张盖住角色的
+        let mut graph_of = |e: Entity, m: &GroundMap| {
+            let walker = walker(&agent, m.tile, gravity, max_slope);
+            let key = (e, [walker.reach.height, walker.reach.distance, walker.half, walker.height, walker.max_slope, m.tile].map(f32::to_bits));
+            graphs.entry(key).or_insert_with(|| Arc::new(GroundGraph::build_for(&m.terrain, walker))).clone()
+        };
+        let covering: Vec<(&GroundMap, Arc<GroundGraph>)> =
+            maps.iter().filter(|(_, m)| m.covers(me)).map(|(e, m)| (m.into_inner(), e)).map(|(m, e)| (m, graph_of(e, m))).collect();
+        let picked = covering.iter().position(|(m, g)| g.spot_below(m.local(feet), 2).is_some()).or((!covering.is_empty()).then_some(0));
+        let map = picked.map(|i| (covering[i].0, &*covering[i].1));
+        landed(&mut agent, grounded, map, feet);
         let nav = navs.iter().find(|n| n.contains(me));
-        let mut walk = Walk { me, feet: me - Vec2::Y * agent.half, grounded, map: graph.as_ref().map(|(m, g)| (*m, &**g)), goal: None, plan: None };
+        let banned: Vec<LinkCells> = agent.banned.iter().map(|&(l, _)| l).collect();
+        let gave_up = std::mem::take(&mut agent.gave_up);
+        let mut walk = Walk { me, feet, grounded, map, banned: &banned, gave_up, goal: None, plan: None };
         let mut emits = Vec::new();
         let home = agent.home;
         agent.tree.tick(dt, &mut |leaf: &Leaf, bb: &mut Blackboard| match leaf {
-            Leaf::See(target, range) => {
-                Status::from(targets.get(target.as_str()).is_some_and(|&t| t.distance(me) <= *range && nav.is_none_or(|n| n.sees(me, t))))
-            }
+            Leaf::See(target, range) => Status::from(targets.get(target.as_str()).is_some_and(|&t| {
+                t.distance(me) <= *range
+                    && match map {
+                        // 有地形时按地形看：斜坡格按顶边算，不整格当墙
+                        Some((m, _)) if m.covers(t) => m.sees(me, t),
+                        _ => nav.is_none_or(|n| n.sees(me, t)),
+                    }
+            })),
             Leaf::Near(target, range) => Status::from(targets.get(target.as_str()).is_some_and(|&t| t.distance(me) <= *range)),
             Leaf::Check(key) => Status::from(bb.get(key).is_some_and(Value::truthy)),
             Leaf::Set(key, v) => {
@@ -351,55 +457,115 @@ pub(crate) fn run(
             outbox.send(BEHAVIOR, &BehaviorEvent { id: id.0.clone(), name, x: me.x, y: me.y });
         }
         let (goal, plan) = (walk.goal, walk.plan);
-        steer(entity, &mut agent, &mut velocity, &mut physics, me, grounded, gravity, dt, goal, plan.zip(graph.as_ref()));
+        steer(entity, &mut agent, &mut velocity, &mut physics, Pose { me, feet, grounded }, gravity, dt, goal, plan, map);
     }
 }
 
-/// 叶子定下的「这一帧往哪走」：目标点，和站在地上时找好的下一步。
+/// 角色的跳跃能力和大小换成格（跳跃能力打个折扣）。
+fn walker(agent: &Agent, tile: f32, gravity: f32, max_slope: f32) -> Walker {
+    let reach = Reach::from_physics(agent.jump, gravity, agent.speed, tile);
+    let reach = Reach { height: reach.height * MARGIN, distance: reach.distance * MARGIN };
+    let tile = tile.max(1e-3);
+    Walker { reach, half: agent.size.x / tile, height: 2.0 * agent.size.y / tile, max_slope }
+}
+
+/// 跳起来或穿下去以后落了地：看落没落在要去的地方。
+fn landed(agent: &mut Agent, grounded: bool, map: Option<(&GroundMap, &GroundGraph)>, feet: Vec2) {
+    let Some(air) = agent.air.as_mut() else { return };
+    if !grounded {
+        air.seen = true;
+        return;
+    }
+    if !air.seen && agent.clock - air.since < LIFTOFF {
+        // 刚起跳：物理还没动
+        return;
+    }
+    agent.air = None;
+    let Some(link) = agent.attempt.take() else { return };
+    let at = map.and_then(|(m, g)| g.spot_below(m.local(feet), 2).map(|i| g.spots[i].cell));
+    agent.settle(link, at == Some(link.1));
+}
+
+/// 叶子定下的「这一帧往哪走」：目标点，和站在地上时找好的下一步。最后一个在跑的移动叶子说了算。
 struct Walk<'a> {
     me: Vec2,
     feet: Vec2,
     grounded: bool,
     map: Option<(&'a GroundMap, &'a GroundGraph)>,
+    banned: &'a [LinkCells],
+    gave_up: bool,
     goal: Option<Vec2>,
     plan: Option<Step>,
 }
 
-/// 地面寻路的下一步：起点、终点（世界坐标，地面中间），怎么走，跳多高（格）。
+/// 地面寻路的下一步：起点、终点（世界坐标，地面中间），怎么走，跳多高（point），哪条连线。
 #[derive(Debug, Clone, Copy)]
 struct Step {
     from: Vec2,
     to: Vec2,
     kind: Move,
     height: f32,
+    link: LinkCells,
 }
 
 impl Walk<'_> {
-    /// 去 `p`：到了是成；站在地上、地图里找不到路是失败；别的是在跑（半空中接着按上一步走）。
+    /// 去 `p`：到了是成；站在地上、地图里找不到路、或者刚放弃了一条连线是失败；别的是在跑（半空中接着按上一步走）。
+    /// 只有在跑时才定下这一帧往哪走：失败、成了的不留下目标。
     fn toward(&mut self, p: Vec2) -> Status {
         let tile = self.map.map_or(32.0, |(m, _)| m.tile);
         let d = p - self.me;
         if d.x.abs() <= ARRIVE * tile && d.y.abs() <= ARRIVE_Y * tile {
             return Status::Success;
         }
-        self.goal = Some(p);
-        let Some((map, graph)) = self.map else { return Status::Running };
+        let Some((map, graph)) = self.map else { return self.go(p, None) };
         if !self.grounded {
-            return Status::Running;
+            return self.go(p, None);
         }
-        let (Some(from), Some(to)) = (graph.spot_below(map.local(self.feet), 2), graph.spot_below(map.local(p), DEPTH)) else {
-            // 不在站的地方（比如被推到半空的边上）：直接朝目标走
-            return Status::Running;
+        if self.gave_up {
+            return Status::Failure;
+        }
+        let Some(from) = graph.spot_below(map.local(self.feet), 2) else {
+            // 不在站的地方（比如站在不是瓦片的刚体上）：朝目标走，不走出脚下的边
+            return self.go(p, None);
         };
-        let Some(hops) = graph.find(from, to) else { return Status::Failure };
-        self.plan = hops.first().map(|h| Step {
+        let avoid = |a, b| self.banned.contains(&(a, b));
+        let hops = match graph.spot_below(map.local(p), DEPTH) {
+            Some(to) => graph.find_avoiding(from, to, &avoid),
+            // 目标脚下没有站的地方（悬在坑上、站在移动平台上）：去离它最近、走得到的地方
+            None => match graph.find_near(from, map.local(p), &avoid) {
+                Some(hops) if hops.is_empty() => {
+                    // 已经在最近的地方了：站着等
+                    self.goal = None;
+                    self.plan = None;
+                    return Status::Running;
+                }
+                hops => hops,
+            },
+        };
+        let Some(hops) = hops else { return Status::Failure };
+        let plan = hops.first().map(|h| Step {
             from: map.world(graph.spots[h.from].point()),
             to: map.world(graph.spots[h.to].point()),
             kind: h.kind,
             height: graph.jump_height(h.from, h.to).unwrap_or(0.0) * map.tile,
+            link: (graph.spots[h.from].cell, graph.spots[h.to].cell),
         });
+        self.go(p, plan)
+    }
+
+    fn go(&mut self, p: Vec2, plan: Option<Step>) -> Status {
+        self.goal = Some(p);
+        self.plan = plan;
         Status::Running
     }
+}
+
+/// 这一帧角色在哪：中心、脚底，站没站在地上。
+#[derive(Clone, Copy)]
+struct Pose {
+    me: Vec2,
+    feet: Vec2,
+    grounded: bool,
 }
 
 /// 按目标和下一步写速度：走、到起跳点起跳、从单向平台穿下去；半空中按起跳时算好的速度飞。
@@ -409,52 +575,66 @@ fn steer(
     agent: &mut Agent,
     velocity: &mut Velocity,
     physics: &mut Physics,
-    me: Vec2,
-    grounded: bool,
+    Pose { me, feet, grounded }: Pose,
     gravity: f32,
     dt: f32,
     goal: Option<Vec2>,
-    plan: Option<(Step, &(&GroundMap, Arc<GroundGraph>))>,
+    plan: Option<Step>,
+    map: Option<(&GroundMap, &GroundGraph)>,
 ) {
     let speed = agent.speed;
     // 朝 x 走，不冲过头
     let toward = |x: f32| ((x - me.x) / dt.max(1e-3)).clamp(-speed, speed);
     let v = &mut velocity.linear;
-    if !grounded {
-        if let Some(air) = agent.air {
-            v.x = match air.vx {
-                Some(vx) if (air.to - me.x) * vx > 0.0 => vx,
-                Some(_) => 0.0,
-                None => toward(air.to),
-            };
-        }
+    if let Some(air) = agent.air {
+        // 半空中（或者刚起跳、还没离地）：按起跳时定的走
+        v.x = match air.vx {
+            Some(vx) if (air.to - me.x) * vx > 0.0 => vx,
+            Some(_) => 0.0,
+            None => toward(air.to),
+        };
         return;
     }
-    agent.air = None;
+    if !grounded {
+        return;
+    }
     let Some(goal) = goal else {
         v.x = 0.0;
         return;
     };
-    let Some((step, (map, _))) = plan else {
+    let clock = agent.clock;
+    let Some(step) = plan else {
         v.x = toward(goal.x);
+        // 没有找好的路：前面脚下没有地面就不走过去
+        if let Some((m, g)) = map {
+            let ahead = feet + Vec2::new(v.x.signum() * (agent.size.x + 2.0), 0.0);
+            if v.x != 0.0 && g.spot_below(m.local(ahead), 2).is_none() {
+                v.x = 0.0;
+            }
+        }
         return;
     };
+    let tile = map.map_or(32.0, |(m, _)| m.tile);
     match step.kind {
-        Move::Walk => v.x = toward(step.to.x + (step.to.x - step.from.x).signum() * map.tile * 0.5),
+        Move::Walk => v.x = toward(step.to.x + (step.to.x - step.from.x).signum() * tile * 0.5),
         Move::Fall => {
             v.x = toward(step.to.x);
-            agent.air = Some(Air { vx: None, to: step.to.x });
+            agent.air = Some(Air { vx: None, to: step.to.x, seen: false, since: clock });
         }
         Move::Drop => {
             v.x = 0.0;
-            if (me.x - step.from.x).abs() > map.tile * 0.25 {
+            if (me.x - step.from.x).abs() > tile * 0.25 {
                 v.x = toward(step.from.x);
             } else if physics.drop_through(entity) {
-                agent.air = Some(Air { vx: None, to: step.to.x });
+                agent.air = Some(Air { vx: None, to: step.to.x, seen: false, since: clock });
+                agent.attempt = Some(step.link);
+            } else {
+                // 穿不下去（脚下还踩着实心的）：也算失败一次
+                agent.settle(step.link, false);
             }
         }
         Move::Jump => {
-            if (me.x - step.from.x).abs() > map.tile * TAKEOFF {
+            if (me.x - step.from.x).abs() > tile * TAKEOFF {
                 v.x = toward(step.from.x);
                 return;
             }
@@ -464,7 +644,8 @@ fn steer(
             let t = (vy + (vy * vy - 2.0 * g * dy).max(0.0).sqrt()) / g;
             let vx = ((step.to.x - me.x) / t.max(1e-3)).clamp(-speed, speed);
             *v = Vec2::new(vx, vy);
-            agent.air = Some(Air { vx: Some(vx), to: step.to.x });
+            agent.air = Some(Air { vx: Some(vx), to: step.to.x, seen: false, since: clock });
+            agent.attempt = Some(step.link);
         }
     }
 }

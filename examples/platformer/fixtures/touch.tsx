@@ -31,7 +31,7 @@ function App() {
       <Text testID="log" class="absolute top-12 right-0">{`frame ${frame()}: ${log().join(" | ")}`}</Text>
       {shown() ? (
         <View class="absolute top-0 left-0 right-0 bottom-0" style={{ pointerEvents: "box-none" }}>
-          <VirtualStick game={() => fake} action="move" player={1} source="pad" class="absolute" style={{ left: 0, bottom: 0, width: 300, height: 400 }} />
+          <VirtualStick game={() => fake} action="move" player={1} source="pad" down="crouch" class="absolute" style={{ left: 0, bottom: 0, width: 300, height: 400 }} />
           <Gestures />
           <ActionButton game={() => fake} action="fire" label="火" repeat={0.1} repeatDelay={0.2} cooldown={() => cooldown() + frame() * 0} class="absolute right-4 top-40" />
         </View>

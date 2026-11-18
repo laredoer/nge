@@ -1,8 +1,9 @@
 // 编辑器的面板（docs/editor.md）：工具栏、场景树、物件库和瓦片、属性、文件。都只调 store 的操作。
 import { computed, effect, signal, Scroll, Text, untracked, View } from "nsh";
 import { Button, Input } from "nsh/base";
-import { labelOf, propOf, TILESET, TYPE_ORDER, TYPES } from "../platformer/catalog";
+import { labelOf, propOf, TYPE_ORDER, TYPES } from "../platformer/catalog";
 import type { Store } from "./store";
+import { paletteOf } from "./tiles";
 import type { ToolName } from "./tool";
 
 const TOOLS: { name: ToolName; label: string; key: string }[] = [
@@ -105,7 +106,7 @@ export function Library(p: { store: Store }) {
       </View>
       <Text class="text-neutral-400 text-xs pt-1">瓦片</Text>
       <View class="flex-row flex-wrap gap-1">
-        {TILESET.frames.map((f) => (
+        {paletteOf(s.level().tiles[0]).map((f) => (
           <Btn
             id={`tile-${f.frame}`}
             label={f.label}

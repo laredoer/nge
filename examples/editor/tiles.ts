@@ -1,6 +1,35 @@
 // 瓦片刷（docs/editor.md）：世界坐标 → 格子，拖动时补齐两点之间的格子，一笔里的改动。
-import type { TileLayer } from "../../ts/level";
+import type { LevelFile, TileLayer } from "../../ts/level";
+import { TILESET } from "../platformer/catalog";
 import type { TileChange } from "./commands";
+
+/** 调色板：只列这一层的瓦片图里有的帧（旧瓦片图帧少，画了超出的存不下来）；没有瓦片层是空的。 */
+export function paletteOf(t: TileLayer | undefined): typeof TILESET.frames {
+  if (t === undefined) return [];
+  const count = t.grid[0] * t.grid[1];
+  return TILESET.frames.filter((f) => f.frame < count);
+}
+
+/**
+ * 旧关卡升级：用现在这张瓦片图的层，帧数比现在少的把 grid 换成现在的，没写的规则（单向板、斜坡、动画）补上现在的。
+ * 别的瓦片图的层不动。返回新的关卡（不改原来的）和改没改。
+ */
+export function upgradeTiles(level: LevelFile): { level: LevelFile; upgraded: boolean } {
+  let upgraded = false;
+  const tiles = level.tiles.map((t) => {
+    if (t.texture !== TILESET.texture) return t;
+    const grow = t.grid[0] * t.grid[1] < TILESET.grid[0] * TILESET.grid[1];
+    const rules = {
+      ...(t.oneWay === undefined ? { oneWay: TILESET.oneWay } : {}),
+      ...(t.slopes === undefined ? { slopes: TILESET.slopes } : {}),
+      ...(t.animated === undefined ? { animated: TILESET.animated } : {}),
+    };
+    if (!grow && Object.keys(rules).length === 0) return t;
+    upgraded = true;
+    return { ...t, ...rules, grid: grow ? TILESET.grid : t.grid };
+  });
+  return { level: upgraded ? { ...level, tiles } : level, upgraded };
+}
 
 export interface Cell {
   r: number;

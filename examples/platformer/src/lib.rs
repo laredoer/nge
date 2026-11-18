@@ -251,11 +251,11 @@ fn control(
     }
 }
 
-/// 第二个玩家（见 docs/input-actions.md）：只会跑、跳；一出现就挪到第一个角色身边，掉下去也回到他身边。不踩敌人、不算失手。
+/// 第二个玩家（见 docs/input-actions.md）：只会跑、跳、从单向平台穿下去；一出现就挪到第一个角色身边，掉下去也回到他身边。不踩敌人、不算失手。
 fn control_guest(
     time: Res<Time>,
     actions: Res<Actions>,
-    physics: Res<Physics>,
+    mut physics: ResMut<Physics>,
     mut placed: Local<Option<Entity>>,
     mut players: Query<(Entity, &SceneId, &mut Transform2d, &mut Velocity)>,
 ) {
@@ -280,7 +280,8 @@ fn control_guest(
     let grounded = physics.contacts(entity).iter().any(|c| c.normal.y > GROUND_NORMAL);
     let mut velocity = v.linear;
     velocity.x = move_toward(velocity.x, input.value(MOVE) * SPEED, if grounded { GROUND_ACCEL } else { AIR_ACCEL } * dt);
-    if grounded && input.pressed(JUMP_ACTION) {
+    // 按着下再跳：站在单向平台上就穿下去，不跳
+    if grounded && input.pressed(JUMP_ACTION) && !(input.down(DOWN_ACTION) && physics.drop_through(entity)) {
         velocity.y = JUMP;
     }
     if velocity != v.linear {
@@ -1233,6 +1234,38 @@ mod tests {
         key(&mut app, "Space", true);
         run(&mut app, 3);
         assert!(player(&mut app).1.y > 300.0, "地上不是单向平台，照常跳");
+    }
+
+    #[test]
+    fn the_stick_pushed_down_and_the_second_player_drop_through_planks_too() {
+        let mut app = app();
+        let mut scene = with_plank(two_players());
+        scene["sprites"][1]["x"] = json!(0);
+        app.prop("scene", Some(&scene));
+        pad(&mut app, 0, &[], [0.0; 2]);
+        pad(&mut app, 1, &[], [0.0; 2]);
+        run(&mut app, 20);
+        // 两个都跳上木板
+        pad(&mut app, 0, &["GamepadA"], [0.0; 2]);
+        pad(&mut app, 1, &["GamepadA"], [0.0; 2]);
+        run(&mut app, 60);
+        pad(&mut app, 0, &[], [0.0; 2]);
+        pad(&mut app, 1, &[], [0.0; 2]);
+        run(&mut app, 30);
+        assert!((player(&mut app).0.y - 80.0).abs() < 1.0 && (guest(&mut app).0.y - 80.0).abs() < 1.0, "都站在木板上 {} {}", player(&mut app).0, guest(&mut app).0);
+        // 第一个手柄：摇杆往下推过一半加 A
+        pad(&mut app, 0, &["GamepadLeftStickDown", "GamepadA"], [0.0, -1.0]);
+        run(&mut app, 40);
+        pad(&mut app, 0, &[], [0.0; 2]);
+        run(&mut app, 2);
+        assert!((player(&mut app).0.y - 16.0).abs() < 1.0, "摇杆往下加跳穿下去 {}", player(&mut app).0);
+        assert!((guest(&mut app).0.y - 80.0).abs() < 1.0, "第二个角色不动");
+        // 第二个手柄：十字键下加 A
+        pad(&mut app, 1, &["GamepadDown", "GamepadA"], [0.0; 2]);
+        run(&mut app, 40);
+        pad(&mut app, 1, &[], [0.0; 2]);
+        run(&mut app, 2);
+        assert!((guest(&mut app).0.y - 16.0).abs() < 1.0, "第二个玩家也能穿下去 {}", guest(&mut app).0);
     }
 
     /// 单向木板上的走地怪：沿地面寻路下来，撞到角色，角色回到起点。
