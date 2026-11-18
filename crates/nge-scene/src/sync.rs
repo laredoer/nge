@@ -218,8 +218,10 @@ mod tests {
         frame(&mut app, Some(json!({ "sprites": [{ "id": "hills", "w": 10 }] })));
         assert_eq!(repeat(&mut app), None, "去掉就只画一份");
         frame(&mut app, Some(json!({ "sprites": [{ "id": "hills", "w": 10, "repeat": "x" }] })));
-        frame(&mut app, Some(json!({ "sprites": [{ "id": "hills", "w": 10, "repeat": "z" }] })));
-        assert_eq!(repeat(&mut app), Some(nge_render2d::Repeat { x: true, y: false }), "写错的值整份场景解析失败，保持上一份");
+        frame(&mut app, Some(json!({ "sprites": [{ "id": "hills", "w": 10, "repeat": "z" }, { "id": "sky", "w": 10 }] })));
+        let world = app.world_mut();
+        let ids: Vec<String> = world.query::<&SceneId>().iter(world).map(|s| s.0.clone()).collect();
+        assert_eq!(ids, ["sky"], "写错值的那个精灵跳过，别的照常");
     }
 
     #[test]

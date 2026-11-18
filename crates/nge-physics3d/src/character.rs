@@ -1,7 +1,7 @@
 //! 3D 角色控制器：游戏给速度，引擎负责重力、贴地、沿墙滑、爬坡、上台阶、被脚下的平台带着走（见 docs/gameplay3d.md）。
 
 use bevy_ecs::prelude::*;
-use glam::Vec3;
+use glam::{Quat, Vec3};
 
 use crate::Contact;
 
@@ -16,11 +16,15 @@ pub struct Character3d {
     /// 离地多近就往下贴（世界单位），下坡、下台阶时不飞出去；0 不贴。
     pub snap: f32,
     pub gravity_scale: f32,
+    /// 站在转动的东西上时朝向也跟着转；默认只跟着走、朝向不变（游戏自己管朝哪）。
+    pub turn_with_ground: bool,
 }
 
+/// 默认值按 point 给（和引擎的重力 -981、一米 100 一致）：贴地 4 ≈ 4 厘米。
+/// 改了 `length_unit`、按米算的游戏自己设 `snap`、`step`。
 impl Default for Character3d {
     fn default() -> Self {
-        Self { max_slope: 50f32.to_radians(), step: 0.0, snap: 0.05, gravity_scale: 1.0 }
+        Self { max_slope: 50f32.to_radians(), step: 0.0, snap: 4.0, gravity_scale: 1.0, turn_with_ground: false }
     }
 }
 
@@ -42,7 +46,7 @@ use rapier3d::parry::query::contact;
 use rapier3d::prelude::{ColliderHandle, QueryFilter as RapierFilter, RigidBodyHandle};
 
 use crate::Physics3d;
-use crate::world::{vec3, vector};
+use crate::world::{quat, rotation, vec3, vector};
 
 /// 贴着多近（乘 `length_unit`）算接触。
 const CONTACT_GAP: f32 = 0.02;
@@ -81,6 +85,31 @@ fn controller(c: &Character3d) -> KinematicCharacterController {
     }
 }
 
+/// 脚下的东西这一步怎么动：点 p 移到 `turn * (p - pivot) + to`。
+#[derive(Debug, Clone, Copy)]
+struct Ride {
+    turn: Quat,
+    pivot: Vec3,
+    to: Vec3,
+}
+
+impl Ride {
+    /// kinematic 按游戏设好的下一个位姿，动态刚体按线速度和绕质心的角速度。
+    fn of(g: &rapier3d::prelude::RigidBody, dt: f32) -> Self {
+        if g.is_kinematic() {
+            let (now, next) = (g.position(), g.next_position());
+            Self { turn: quat(next.rotation) * quat(now.rotation).inverse(), pivot: vec3(now.translation), to: vec3(next.translation) }
+        } else {
+            let com = vec3(g.center_of_mass());
+            Self { turn: Quat::from_scaled_axis(vec3(g.angvel()) * dt), pivot: com, to: com + vec3(g.linvel()) * dt }
+        }
+    }
+
+    fn apply(&self, p: Vec3) -> Vec3 {
+        self.turn * (p - self.pivot) + self.to
+    }
+}
+
 /// 物理走一步之前：按速度移动每个角色，设好 kinematic 的下一个位置，改速度。
 pub(crate) fn advance(physics: &mut Physics3d, dt: f32) {
     let gravity = vec3(physics.world.gravity);
@@ -96,14 +125,11 @@ pub(crate) fn advance(physics: &mut Physics3d, dt: f32) {
         if !(mover.grounded && v.y <= 0.0) && mover.params.gravity_scale.is_finite() {
             v += gravity * mover.params.gravity_scale * dt;
         }
-        // 脚下的东西这一步要走的位移：kinematic 是游戏设好的下一个位置，动态刚体按速度
-        let carry = mover.ground.and_then(|g| world.bodies.get(g)).map_or(Vec3::ZERO, |g| {
-            if g.is_kinematic() { vec3(g.next_position().translation - g.translation()) } else { vec3(g.linvel()) * dt }
-        });
-        if !(v * dt + carry).is_finite() {
+        if !(v * dt).is_finite() {
             h.velocity.linear = Vec3::ZERO;
             continue;
         }
+        let ride = mover.ground.and_then(|g| world.bodies.get(g)).map(|g| Ride::of(g, dt));
         let ctl = controller(&mover.params);
         // 同一个碰撞分组的不挡路
         let filter = RapierFilter::default().exclude_sensors().exclude_rigid_body(body).groups(groups);
@@ -113,6 +139,9 @@ pub(crate) fn advance(physics: &mut Physics3d, dt: f32) {
         // 再从走到的地方跟着脚下的东西走，查碰撞时不算它（它还在旧位置，往下走的平台会挡住角色）
         let mut moved = pose;
         moved.translation += out.translation;
+        // 脚下的东西这一步的整个移动（含转动）作用到走到的位置上：转盘上沿圆弧走
+        let carry = ride.map_or(Vec3::ZERO, |r| r.apply(vec3(moved.translation)) - vec3(moved.translation));
+        let carry = if carry.is_finite() { carry } else { Vec3::ZERO };
         if carry != Vec3::ZERO {
             let ground = mover.ground;
             let not_ground = |_: ColliderHandle, c: &rapier3d::prelude::Collider| c.parent() != ground;
@@ -126,8 +155,14 @@ pub(crate) fn advance(physics: &mut Physics3d, dt: f32) {
         ctl.solve_character_collision_impulses(dt, &mut queries, &*shape, mass, &hits);
         if let Some(b) = world.bodies.get_mut(body) {
             b.set_next_kinematic_translation(moved.translation);
+            if let Some(r) = ride.filter(|r| mover.params.turn_with_ground && r.turn.is_finite()) {
+                b.set_next_kinematic_rotation(rotation((r.turn * quat(*b.rotation())).normalize()));
+            }
         }
-        mover.grounded = out.grounded;
+        // 控制器说着地还不够：得踩着够平的面（这一步碰到的，或上一步贴着的），不然陡坡上也算站住了
+        let floor = slope(&mover.params).cos();
+        let on_floor = mover.ground_normal != Vec3::ZERO || hits.iter().any(|hit| vec3(hit.hit.normal1).y >= floor);
+        mover.grounded = out.grounded && on_floor;
         if mover.grounded && v.y < 0.0 {
             v.y = 0.0;
         }
@@ -177,11 +212,16 @@ pub(crate) fn touch(physics: &mut Physics3d) {
             .filter_map(|c| {
                 // 别的角色不当地面：它这一步走没走取决于处理的先后
                 let h = physics.entities.get(&c.other).filter(|h| h.mover.is_none())?;
-                h.body.filter(|_| matches!(h.kind, Some(crate::RigidBody::Kinematic | crate::RigidBody::Dynamic))).map(|b| (b, h.velocity.linear))
+                let b = h.body.filter(|_| matches!(h.kind, Some(crate::RigidBody::Kinematic | crate::RigidBody::Dynamic)))?;
+                // 按角色所在处的速度比：转动的东西离轴越远走得越快
+                let speed = physics.world.bodies.get(b).map_or(0.0, |rb| vec3(rb.velocity_at_point(pose.translation)).length_squared());
+                Some((b, speed))
             })
-            .max_by(|a, b| a.1.length_squared().total_cmp(&b.1.length_squared()))
+            .max_by(|a, b| a.1.total_cmp(&b.1))
             .map(|(b, _)| b);
         let mover = physics.entities.get_mut(&entity).and_then(|h| h.mover.as_mut()).expect("刚查过");
+        // 走完贴着的里没有够平的就不算着地：下一步加重力，陡坡上滑下去
+        mover.grounded &= ground_normal != Vec3::ZERO;
         (mover.touching, mover.ground, mover.ground_normal) = (touching, ground, ground_normal);
     }
 }
@@ -190,12 +230,8 @@ pub(crate) fn touch(physics: &mut Physics3d) {
 pub(crate) fn report(physics: &Physics3d, mover: &Mover, now: Vec3, elapsed: f32) -> CharacterState3d {
     let hits = mover.hits.iter().filter_map(|&(c, normal)| Some(Contact { other: physics.entity_of(c)?, normal })).collect();
     let grounded = mover.grounded;
-    let ground_normal = match (grounded, mover.ground_normal) {
-        (false, _) => Vec3::ZERO,
-        // 控制器说着地（贴地吸住了）但贴着的里没有够平的：按朝上算
-        (true, n) if n == Vec3::ZERO => Vec3::Y,
-        (true, n) => n,
-    };
+    // 着地时一定贴着够平的面（touch 里保证了），不着地是 0
+    let ground_normal = if grounded { mover.ground_normal } else { Vec3::ZERO };
     let velocity = if elapsed > 0.0 { (now - mover.start) / elapsed } else { Vec3::ZERO };
     CharacterState3d { grounded, ground_normal, velocity, hits }
 }

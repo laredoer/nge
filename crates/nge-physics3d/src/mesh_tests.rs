@@ -152,3 +152,122 @@ fn mesh_colliders_wait_for_the_model_and_then_land() {
     steps(&mut app, 1);
     assert!(matches!(&app.world().get::<Collider>(b).unwrap().shape, Shape::Convex(p) if p[0].abs() == Vec3::splat(20.0)));
 }
+
+fn flat_square() -> Mesh {
+    Mesh {
+        vertices: [[-1.0, 0.0, -1.0], [1.0, 0.0, -1.0], [1.0, 0.0, 1.0], [-1.0, 0.0, 1.0]].map(|p| Vertex { position: p, normal: [0.0, 1.0, 0.0], uv: [0.0; 2] }).to_vec(),
+        indices: vec![0, 1, 2, 0, 2, 3],
+        skin: Vec::new(),
+        targets: Vec::new(),
+    }
+}
+
+#[test]
+fn flat_parts_are_skipped_when_making_hulls() {
+    let mut assets = Assets3d::default();
+    let mixed = model(&mut assets, vec![(Mesh::cube(2.0), Mat4::IDENTITY), (flat_square(), Mat4::from_translation(Vec3::new(5.0, 0.0, 0.0)))]);
+    let Ok(Shape::Hulls(parts)) = mesh_shape(&assets, mixed, MeshShape::Hulls, Vec3::ONE) else { panic!("平的部件跳过，剩下的照样生成") };
+    assert_eq!(parts.len(), 1);
+    assert!(parts[0].iter().all(|p| p.abs() == Vec3::ONE), "{parts:?}");
+    let all_flat = model(&mut assets, vec![(flat_square(), Mat4::IDENTITY), (flat_square(), Mat4::from_translation(Vec3::Y))]);
+    assert!(mesh_shape(&assets, all_flat, MeshShape::Hulls, Vec3::ONE).is_err(), "全是平的才算生不出来");
+}
+
+/// 三角形 (a, b, c) 的朝向：(b − a) × (c − a)。
+fn facing(points: &[Vec3], t: [u32; 3]) -> Vec3 {
+    let [a, b, c] = t.map(|i| points[i as usize]);
+    (b - a).cross(c - a)
+}
+
+#[test]
+fn mirrored_trimeshes_keep_their_triangles_facing_out() {
+    let mut assets = Assets3d::default();
+    let cube = cube_model(&mut assets);
+    for scale in [Vec3::splat(10.0), Vec3::new(-10.0, 10.0, 10.0), Vec3::new(-10.0, -10.0, 10.0), Vec3::splat(-10.0)] {
+        let Ok(Shape::TriMesh(mesh)) = mesh_shape(&assets, cube, MeshShape::TriMesh, scale) else { panic!() };
+        for &t in &mesh.1 {
+            let center = t.iter().map(|&i| mesh.0[i as usize]).sum::<Vec3>() / 3.0;
+            assert!(facing(&mesh.0, t).dot(center) > 0.0, "缩放 {scale}：三角形 {t:?} 朝外");
+        }
+    }
+}
+
+#[test]
+fn nearly_equal_vertices_are_merged() {
+    let mut assets = Assets3d::default();
+    // 两个三角形共一条边，但共用的两个顶点各写了两遍：一个是 0 和 -0，一个差一点点
+    let positions = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [-0.0, 0.0, -0.0], [1.0, 0.0, 1.0], [1.0 + 1e-7, 0.0, 0.0]];
+    let mesh = Mesh {
+        vertices: positions.map(|p| Vertex { position: p, normal: [0.0, 1.0, 0.0], uv: [0.0; 2] }).to_vec(),
+        indices: vec![0, 2, 1, 5, 2, 4],
+        skin: Vec::new(),
+        targets: Vec::new(),
+    };
+    let quad = model(&mut assets, vec![(mesh, Mat4::IDENTITY)]);
+    let Ok(Shape::TriMesh(mesh)) = mesh_shape(&assets, quad, MeshShape::TriMesh, Vec3::splat(100.0)) else { panic!() };
+    assert_eq!(mesh.0.len(), 4, "-0 和 0、差 1e-7 的算同一个顶点 {:?}", mesh.0);
+    let _ = positions[3];
+}
+
+#[test]
+fn bad_shapes_given_directly_build_nothing() {
+    let mut app = app();
+    let shapes = [
+        Shape::Convex(Vec::new().into()),
+        Shape::Convex(vec![Vec3::ZERO, Vec3::X].into()),
+        Shape::Convex(vec![Vec3::ZERO, Vec3::X, Vec3::Z, Vec3::new(1.0, 0.0, 1.0)].into()),
+        Shape::Hulls(vec![vec![Vec3::ZERO, Vec3::X]].into()),
+        Shape::TriMesh((vec![Vec3::ZERO, Vec3::X, Vec3::Z], vec![[0, 1, 9]]).into()),
+    ];
+    let bodies: Vec<Entity> = shapes.iter().map(|s| app.world_mut().spawn((RigidBody::Dynamic, Collider::new(s.clone()), at(0.0, 100.0, 0.0), Velocity::default())).id()).collect();
+    let fixed = app.world_mut().spawn((RigidBody::Fixed, Collider::new(shapes[4].clone()), at(0.0, 0.0, 0.0))).id();
+    steps(&mut app, 30);
+    assert_eq!(app.world().resource::<Physics3d>().len(), (0, 0), "碰撞体生不出来的，刚体也不建（和等模型的一样）");
+    for b in bodies {
+        assert_eq!(pos(&app, b).y, 100.0, "不建就不往下掉");
+    }
+    // 改成能生成的形状就建
+    app.world_mut().get_mut::<Collider>(fixed).unwrap().shape = Shape::TriMesh((vec![Vec3::ZERO, Vec3::X, Vec3::Z], vec![[0, 1, 2]]).into());
+    steps(&mut app, 1);
+    assert_eq!(app.world().resource::<Physics3d>().len(), (1, 1));
+}
+
+#[test]
+fn pending_mesh_colliders_are_counted_and_long_waits_warned_once() {
+    let mut app = app();
+    app.insert_resource(Assets3d::default());
+    let cube = cube_model(&mut app.world_mut().resource_mut::<Assets3d>());
+    let mc = MeshCollider { kind: MeshShape::Convex, scale: Vec3::splat(10.0), collider: Collider::ball(1.0) };
+    let b = app.world_mut().spawn((RigidBody::Dynamic, mc.clone(), at(0.0, 100.0, 0.0), Velocity::default())).id();
+    steps(&mut app, 1);
+    assert_eq!(app.world().resource::<Physics3d>().pending_meshes(), 1, "等着模型");
+    assert!(!app.world().resource::<Physics3d>().warned(b), "刚开始等不报警");
+    steps(&mut app, 5 * 60 + 1);
+    assert!(app.world().resource::<Physics3d>().warned(b), "等了 5 秒报一次警");
+    app.world_mut().entity_mut(b).insert(Model3d(cube));
+    steps(&mut app, 1);
+    assert_eq!(app.world().resource::<Physics3d>().pending_meshes(), 0, "加载完不再等");
+    // 生不出来的（平的模型生凸包）不算在等：不然游戏会一直等下去
+    let flat = model(&mut app.world_mut().resource_mut::<Assets3d>(), vec![(flat_square(), Mat4::IDENTITY)]);
+    app.world_mut().spawn((RigidBody::Dynamic, mc, Model3d(flat), at(0.0, 100.0, 0.0), Velocity::default()));
+    steps(&mut app, 1);
+    assert_eq!(app.world().resource::<Physics3d>().pending_meshes(), 0, "生不出来的不算在等");
+}
+
+#[test]
+fn changing_the_model_rebuilds_the_collider() {
+    let mut app = app();
+    app.insert_resource(Assets3d::default());
+    let (small, big) = {
+        let mut assets = app.world_mut().resource_mut::<Assets3d>();
+        (model(&mut assets, vec![(Mesh::cube(2.0), Mat4::IDENTITY)]), model(&mut assets, vec![(Mesh::cube(6.0), Mat4::IDENTITY)]))
+    };
+    let mc = MeshCollider { kind: MeshShape::Convex, scale: Vec3::ONE, collider: Collider::ball(1.0) };
+    let e = app.world_mut().spawn((RigidBody::Fixed, mc, Model3d(small), at(0.0, 0.0, 0.0))).id();
+    steps(&mut app, 1);
+    assert!(!app.world().resource::<Physics3d>().overlap_point(Vec3::new(2.0, 0.0, 0.0), QueryFilter::default()).contains(&e));
+    app.world_mut().entity_mut(e).insert(Model3d(big));
+    steps(&mut app, 1);
+    assert!(matches!(&app.world().get::<Collider>(e).unwrap().shape, Shape::Convex(p) if p[0].abs() == Vec3::splat(3.0)), "换了模型就按新模型生成");
+    assert!(app.world().resource::<Physics3d>().overlap_point(Vec3::new(2.0, 0.0, 0.0), QueryFilter::default()).contains(&e), "物理里也换了");
+}

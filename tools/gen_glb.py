@@ -388,7 +388,7 @@ def lab_model(name, parts, color, metallic=0.0, roughness=0.8):
 
 
 def lab_models():
-    lab_model("floor", [flat_mesh(box_faces((-800, -20, -800), (800, 0, 800)))], (0.32, 0.36, 0.4))
+    lab_model("floor", [flat_mesh(box_faces((-800, -10, -800), (800, 10, 800)))], (0.32, 0.36, 0.4))  # 中心在原点，和场景里的盒子碰撞体一样
     # 20° 的缓坡（长 300）和 40° 的陡坡（长 150），并排，宽 160
     gentle, steep = math.tan(math.radians(20)), math.tan(math.radians(40))
     lab_model("ramps", [flat_mesh(wedge_faces(0, 300, 300 * gentle, -80, 80) + wedge_faces(0, 150, 150 * steep, 140, 300))], (0.55, 0.5, 0.38))

@@ -56,8 +56,8 @@ pub struct BodyNode {
     pub collide: bool,
     /// 不让碰撞把它转起来（平台游戏的角色）。
     pub fixed_rotation: bool,
-    /// 碰撞分组（1 … 31）：同一组的互相不碰撞；0 不分组。
-    pub group: u8,
+    /// 碰撞分组（1 … 31）：同一组的互相不碰撞；0 不分组。收宽的类型：超出范围的 warn 后当不分组，不让整个节点解析失败。
+    pub group: i64,
     /// `character`：能爬的最陡的坡（度）。
     pub slope: f32,
     /// `character`：自动迈上去的台阶最高多高，0 不自动上。
@@ -161,7 +161,7 @@ fn collider(body: &BodyNode, size: Option<Vec2>, scale: f32) -> Option<Collider>
     c.density = body.density;
     c.sensor = body.sensor;
     c.events = body.collide;
-    c.group = body.group;
+    c.group = crate::lenient::group("2D 刚体", body.group);
     Some(c)
 }
 
@@ -367,6 +367,11 @@ mod tests {
         frame(&mut app, Some(json!({ "sprites": [{ "id": "p", "w": 10, "body": { "group": 2 } }, { "id": "q", "w": 10, "body": {} }] })));
         assert_eq!(get::<Collider>(&mut app, "p").map(|c| c.group), Some(2));
         assert_eq!(get::<Collider>(&mut app, "q").map(|c| c.group), Some(0));
+        // 超出 0 … 31 的：这个刚体照样有，当不分组；别的不受影响
+        frame(&mut app, Some(json!({ "sprites": [{ "id": "p", "w": 10, "body": { "group": 300 } }, { "id": "q", "w": 10, "body": { "group": -1 } }, { "id": "r", "w": 10, "body": { "group": 3 } }] })));
+        assert_eq!(get::<Collider>(&mut app, "p").map(|c| c.group), Some(0));
+        assert_eq!(get::<Collider>(&mut app, "q").map(|c| c.group), Some(0));
+        assert_eq!(get::<Collider>(&mut app, "r").map(|c| c.group), Some(3));
     }
 
     #[test]

@@ -18,46 +18,71 @@ pub const TAP: EventKey<Tap> = EventKey::new("tap");
 
 #[derive(Resource, Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(default)]
+/// 每一项单独解析：写错的只丢那一项（见 `lenient`），不让整个场景失败。
 pub struct Scene {
+    #[serde(deserialize_with = "crate::lenient::background")]
     pub background: Option<Color>,
+    #[serde(deserialize_with = "crate::lenient::camera")]
     pub camera: Option<CameraNode>,
+    #[serde(deserialize_with = "crate::lenient::sprites")]
     pub sprites: Vec<SpriteNode>,
+    #[serde(deserialize_with = "crate::lenient::tilemaps")]
     pub tilemaps: Vec<TilemapNode>,
+    #[serde(deserialize_with = "crate::lenient::texts")]
     pub texts: Vec<TextNode>,
+    #[serde(deserialize_with = "crate::lenient::emitters")]
     pub emitters: Vec<EmitterNode>,
+    #[serde(deserialize_with = "crate::lenient::models")]
     pub models: Vec<ModelNode>,
     /// 3D 粒子发射器（见 docs/particles3d.md）。
+    #[serde(deserialize_with = "crate::lenient::emitters3d")]
     pub emitters3d: Vec<crate::particles3d::Emitter3dNode>,
+    #[serde(deserialize_with = "crate::lenient::camera3d")]
     pub camera3d: Option<Camera3dNode>,
+    #[serde(deserialize_with = "crate::lenient::lights")]
     pub lights: Vec<LightNode>,
+    #[serde(deserialize_with = "crate::lenient::ambient")]
     pub ambient: Option<AmbientNode>,
+    #[serde(deserialize_with = "crate::lenient::physics")]
     pub physics: Option<PhysicsNode>,
     /// 3D 物理（见 docs/physics3d.md）。
+    #[serde(deserialize_with = "crate::lenient::physics3d")]
     pub physics3d: Option<crate::physics3d::Physics3dNode>,
     /// 进度条（见 docs/world-ui.md）。
+    #[serde(deserialize_with = "crate::lenient::bars")]
     pub bars: Vec<crate::world_ui::BarNode>,
     /// 气泡。
+    #[serde(deserialize_with = "crate::lenient::bubbles")]
     pub bubbles: Vec<crate::world_ui::BubbleNode>,
     /// 关节（见 docs/joints.md）。
+    #[serde(deserialize_with = "crate::lenient::joints")]
     pub joints: Vec<JointNode>,
     /// 3D 关节（见 docs/gameplay3d.md）。
+    #[serde(deserialize_with = "crate::lenient::joints3d")]
     pub joints3d: Vec<crate::joints3d::Joint3dNode>,
     /// 游戏写的着色器：名字 → WGSL（见 docs/effects2d.md）。
+    #[serde(deserialize_with = "crate::lenient::shaders")]
     pub shaders: std::collections::HashMap<String, String>,
     /// 2D 光照，写了就开。
+    #[serde(deserialize_with = "crate::lenient::lighting")]
     pub lighting: Option<LightingNode>,
     /// 后处理，按顺序。
+    #[serde(deserialize_with = "crate::lenient::post")]
     pub post: Vec<PostNode>,
+    #[serde(deserialize_with = "crate::lenient::audio")]
     pub audio: Option<AudioNode>,
     /// 时间缩放，1 正常、0 暂停。
     #[serde(rename = "timeScale")]
+    #[serde(deserialize_with = "crate::lenient::time_scale")]
     pub time_scale: Option<f32>,
     /// 左上角的性能面板（见 docs/perf-overlay.md）。
+    #[serde(deserialize_with = "crate::lenient::perf")]
     pub perf: Option<bool>,
     /// 关卡：换了值就整个重建场景（见 docs/levels.md）。数字和字符串都行。
     #[serde(deserialize_with = "crate::level::level_id")]
     pub level: Option<String>,
     /// 联网（见 docs/networking.md）：写了就连中继。
+    #[serde(deserialize_with = "crate::lenient::net")]
     pub net: Option<crate::net::NetNode>,
 }
 
@@ -72,6 +97,7 @@ pub struct CameraNode {
     pub follow: Option<String>,
     /// 跟随的平滑时间（秒），0 是每帧对准。
     pub smooth: f32,
+    #[serde(deserialize_with = "crate::lenient::bounds")]
     pub bounds: Option<Bounds>,
 }
 
@@ -261,6 +287,41 @@ mod tests {
         for bad in ["red", "#12345", "#gggggg", "ff0000", "#ff00000", "#+f+f+f"] {
             assert!(Color::try_from(bad.to_owned()).is_err(), "{bad}");
         }
-        assert!(SCENE.decode(&json!({ "background": "nope" })).is_err());
+        let scene = SCENE.decode(&json!({ "background": "nope", "sprites": [{ "id": "a" }] })).expect("颜色写错只丢背景");
+        assert_eq!((scene.background, scene.sprites.len()), (None, 1));
+    }
+
+    #[test]
+    fn a_bad_item_only_drops_that_item() {
+        let scene = SCENE
+            .decode(&json!({
+                "sprites": [{ "id": "a" }, { "x": 1 }, { "id": "c", "x": "far" }, { "id": "d" }],
+                "models": [{ "id": "m", "model": "asset:/@g/a.glb" }, { "id": "bad", "model": "asset:/@g/a.glb", "body": { "kind": "rubber" } }],
+                "joints": [{ "id": "j", "a": "a", "b": "d", "kind": "weld", "typo": 1 }],
+                "texts": 5,
+                "camera": { "x": 3, "bounds": { "left": 0, "right": 1, "bottom": 0, "top": 1, "front": 2 } },
+                "lighting": { "lights": [{ "radius": 10 }, { "radius": 20, "glow": true }] },
+                "post": [{ "shader": "s", "params": [1, 2] }, { "shader": "t" }],
+                "shaders": { "s": "fn x() {}", "t": 3 },
+                "timeScale": "fast",
+                "physics": { "gravity": "down" },
+            }))
+            .expect("写错的项不让整个场景失败");
+        let ids: Vec<&str> = scene.sprites.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, ["a", "d"], "没有 id、x 不是数的两个精灵跳过");
+        assert_eq!(scene.models.len(), 1);
+        assert!(scene.joints.is_empty() && scene.texts.is_empty());
+        let camera = scene.camera.expect("相机还在");
+        assert_eq!((camera.x, camera.bounds), (3.0, None), "只丢写错的 bounds");
+        assert_eq!(scene.lighting.expect("光照还开着").lights.len(), 1);
+        assert_eq!(scene.post.len(), 1);
+        assert_eq!(scene.shaders.keys().collect::<Vec<_>>(), ["s"]);
+        assert_eq!((scene.time_scale, scene.physics), (None, None));
+    }
+
+    #[test]
+    fn the_same_warning_is_said_once() {
+        assert!(crate::lenient::warn_once("场景测试：只说一次".into()));
+        assert!(!crate::lenient::warn_once("场景测试：只说一次".into()));
     }
 }

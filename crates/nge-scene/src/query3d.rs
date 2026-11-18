@@ -10,7 +10,8 @@ use serde::{Deserialize, Serialize};
 use crate::nodes::ModelNode;
 use crate::sync::{Declared, SceneId};
 
-pub const QUERY3D: CommandKey<Query3d> = CommandKey::new("query3d");
+/// 收到的是原样的 JSON：解析不了也能按 `id` 马上回一个带原因的空结果，不让 TSX 干等到超时。
+pub const QUERY3D: CommandKey<Query3dCommand> = CommandKey::new("query3d");
 pub const QUERY3D_RESULT: EventKey<Query3dResult> = EventKey::new("query3d");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -38,6 +39,10 @@ pub enum Shape3dQuery {
 }
 
 #[derive(Message, Debug, Clone, PartialEq, Deserialize)]
+#[serde(transparent)]
+pub struct Query3dCommand(pub serde_json::Value);
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Query3d {
     pub id: u64,
@@ -59,12 +64,12 @@ pub struct Query3d {
     /// sensor 也算。
     #[serde(default)]
     pub sensors: bool,
-    /// 像这一组的碰撞体一样查：跳过同一组的。
+    /// 像这一组的碰撞体一样查：跳过同一组的（0 … 31；收宽的类型，超出范围回错误，不是整个解析失败）。
     #[serde(default)]
-    pub group: u8,
-    /// 只查这些分组（0 是不分组的）；不写时都查。
+    pub group: i64,
+    /// 只查这些分组（0 是不分组的，0 … 31）；不写时都查。
     #[serde(default)]
-    pub only: Option<Vec<u8>>,
+    pub only: Option<Vec<i64>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -85,24 +90,40 @@ pub struct Hit3d {
 pub struct Query3dResult {
     pub id: u64,
     pub hits: Vec<Hit3d>,
+    /// 查询本身不对（字段写错、分组超出 0 … 31、没写 shape 等）时的原因；这时 `hits` 是空的。
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub error: Option<String>,
 }
 
 const FAR: f32 = 10_000.0;
 
-/// 物理这一步之后回答这一帧收到的查询。
-pub(crate) fn answer(mut reader: MessageReader<Query3d>, physics: Res<Physics3d>, models: Query<(Entity, &SceneId), With<Declared<ModelNode>>>, mut outbox: ResMut<Outbox>) {
-    for q in reader.read() {
-        let hits = run(q, &physics, &models).unwrap_or_else(|why| {
-            log::warn!("query3d {}：{why}", q.id);
-            Vec::new()
-        });
-        outbox.send(QUERY3D_RESULT, &Query3dResult { id: q.id, hits });
+/// 物理这一步之后、调试视图画之前回答这一帧收到的查询（查询在同一帧画出来）。
+pub(crate) fn answer(mut reader: MessageReader<Query3dCommand>, physics: Res<Physics3d>, models: Query<(Entity, &SceneId), With<Declared<ModelNode>>>, mut outbox: ResMut<Outbox>) {
+    for raw in reader.read() {
+        let Some(id) = raw.0.get("id").and_then(serde_json::Value::as_u64) else {
+            log::warn!("query3d 没有 id（要是非负整数），回不了：{}", raw.0);
+            continue;
+        };
+        let result = serde_json::from_value::<Query3d>(raw.0.clone()).map_err(|e| e.to_string()).and_then(|q| run(&q, &physics, &models));
+        let reply = match result {
+            Ok(hits) => Query3dResult { id, hits, error: None },
+            Err(why) => {
+                log::warn!("query3d {id}：{why}");
+                Query3dResult { id, hits: Vec::new(), error: Some(why) }
+            }
+        };
+        outbox.send(QUERY3D_RESULT, &reply);
     }
+}
+
+/// 分组要在 0 … 31。
+fn group(g: i64) -> Result<u8, String> {
+    u8::try_from(g).ok().filter(|g| *g < 32).ok_or_else(|| format!("分组 {g} 超出 0 … 31"))
 }
 
 fn run(q: &Query3d, physics: &Physics3d, models: &Query<(Entity, &SceneId), With<Declared<ModelNode>>>) -> Result<Vec<Hit3d>, String> {
     let id = |e: Entity| models.get(e).ok().map(|(_, s)| s.0.clone());
-    let mut filter = QueryFilter::default().group(q.group);
+    let mut filter = QueryFilter::default().group(group(q.group)?);
     if let Some(name) = &q.exclude {
         let (e, _) = models.iter().find(|(_, s)| &s.0 == name).ok_or_else(|| format!("没有 id 为 {name:?} 的模型"))?;
         filter = filter.exclude(e);
@@ -111,7 +132,11 @@ fn run(q: &Query3d, physics: &Physics3d, models: &Query<(Entity, &SceneId), With
         filter = filter.with_sensors();
     }
     if let Some(only) = &q.only {
-        filter = filter.only(only.iter().filter(|&&g| g < 32).fold(0, |m, &g| m | 1 << g));
+        let mut mask = 0u32;
+        for &g in only {
+            mask |= 1 << group(g)?;
+        }
+        filter = filter.only(mask);
     }
     let from = Vec3::from(q.from);
     let dir = || q.dir.map(Vec3::from).ok_or("要写 dir");
@@ -198,11 +223,42 @@ mod tests {
     }
 
     #[test]
-    fn bad_queries_answer_empty() {
+    fn bad_queries_answer_empty_with_the_reason_right_away() {
         let mut app = app();
         frame(&mut app, Some(scene()));
-        assert!(ask(&mut app, json!({ "id": 1, "kind": "cast", "from": [0, 10, 0], "dir": [0, -1, 0] })).hits.is_empty(), "没写 shape");
-        assert!(ask(&mut app, json!({ "id": 2, "kind": "ray", "from": [0, 10, 0], "dir": [0, -1, 0], "exclude": "nobody" })).hits.is_empty());
-        assert!(serde_json::from_value::<Query3d>(json!({ "id": 3, "kind": "ray", "from": [0, 0, 0], "dirr": [0, 1, 0] })).is_err());
+        let bad = [
+            json!({ "id": 1, "kind": "cast", "from": [0, 10, 0], "dir": [0, -1, 0] }),
+            json!({ "id": 2, "kind": "ray", "from": [0, 10, 0], "dir": [0, -1, 0], "exclude": "nobody" }),
+            json!({ "id": 3, "kind": "ray", "from": [0, 0, 0], "dirr": [0, 1, 0] }),
+            json!({ "id": 4, "kind": "raycast", "from": [0, 0, 0], "dir": [0, 1, 0] }),
+            json!({ "id": 5, "kind": "ray", "from": [0, 0, 0], "dir": [0, 1, 0], "group": 40 }),
+            json!({ "id": 6, "kind": "ray", "from": [0, 0, 0], "dir": [0, 1, 0], "group": -1 }),
+            json!({ "id": 7, "kind": "ray", "from": [0, 0, 0], "dir": [0, 1, 0], "only": [0, 300] }),
+        ];
+        for q in bad {
+            let id = q["id"].as_u64().unwrap();
+            // 同一帧就回：不让 TSX 干等到超时
+            let r = ask(&mut app, q);
+            assert_eq!(r.id, id);
+            assert!(r.hits.is_empty() && r.error.as_deref().is_some_and(|e| !e.is_empty()), "查询 {id} 回了空结果和原因 {r:?}");
+        }
+        let ok = ask(&mut app, json!({ "id": 8, "kind": "ray", "from": [100, 100, 0], "dir": [0, -1, 0], "group": 31, "only": [0, 31] }));
+        assert_eq!(ok.error, None, "0 … 31 的分组都行");
+        // 没有 id 的回不了，丢掉
+        app.command("query3d", &json!({ "kind": "ray" }));
+        assert!(!frame(&mut app, None).iter().any(|(n, _)| n == "query3d"));
+    }
+
+    #[test]
+    fn queries_are_drawn_by_the_debug_view_in_the_same_frame() {
+        let mut app = app();
+        frame(&mut app, Some(scene()));
+        app.world_mut().resource_mut::<nge_physics3d::Physics3dDebug>().enabled = true;
+        frame(&mut app, None);
+        let lines = |app: &nge_ecs::App| app.world().resource::<nge_render3d::Gizmos3d>().depth_tested().len();
+        frame(&mut app, None);
+        let before = lines(&app);
+        ask(&mut app, json!({ "id": 1, "kind": "ray", "from": [0, 100, 0], "dir": [0, -1, 0] }));
+        assert!(lines(&app) > before, "回答查询的那一帧就画出射线 {before} → {}", lines(&app));
     }
 }

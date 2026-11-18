@@ -89,6 +89,11 @@ test("面板的提示：平时、等按键、有冲突", () => {
   input.capture({ player: 0, action: "jump", part: "keys", index: 0 });
   input.handleKey({ code: "KeyT", down: true, repeat: false });
   expect(remapStatus(input, t)).toBe("T 已经用在「跳 (P2)」上");
+  input.cancel();
+  // 进出试验场的 G 也是一个动作：绑到别处时一样提示冲突
+  input.capture({ player: 0, action: "jump", part: "keys", index: 0 });
+  input.handleKey({ code: "KeyG", down: true, repeat: false });
+  expect(remapStatus(input, t)).toBe("G 已经用在「试验场」上");
 });
 
 const JUMP_CHIPS = ["id:bind-jump-keys-0", "id:bind-jump-keys-1", "id:bind-jump-keys-2", "id:bind-jump-keys-3"];

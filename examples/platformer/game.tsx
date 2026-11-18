@@ -8,7 +8,7 @@ import { levelKey, otherLocale, strings } from "./strings";
 import { NEW_SAVE, nextSlot, SAVE_MIGRATIONS, SAVE_VERSION, saveDataOf, saveSummary, SLOTS } from "./savefile";
 import { hpBar, outOfHearts, padPlace, stickPlace, TITLE_HOLD_MS, titleBubble, zoomBy } from "./hud";
 import { boardOf, leaderOf, nameTags, netLabel, netNode, netSetting, playerName, remotePlayers, scoresUrl, submitUrl, type Leader } from "./online";
-import { labScene } from "./lab";
+import { labAction, labScene, levelAfterLab } from "./lab";
 import { campfireAt, finish, flagOn, HERO, JELLY_ZONE, jellyAt, LEVELS, TILE, TOWER_TRIGGER, towerAt, towerSpot, type Built, type Progress } from "./levels";
 
 /** Rust 发的事件：掉出关卡或被敌人撞到送回起点、按 R 重新开始、踩到敌人。 */
@@ -125,6 +125,7 @@ export function Game(props: GameProps = {}) {
   let flashEnd: ReturnType<typeof setTimeout> | undefined;
   let started = Date.now();
   let next: ReturnType<typeof setTimeout> | undefined;
+  let clearedBeforeLab = false;
   /** 换关后、新关卡建好（`levelStart`）之前：路上的事件是上一关的，不算。 */
   let switching = true;
   const now = () => levels[level()].built;
@@ -309,11 +310,14 @@ export function Game(props: GameProps = {}) {
   const toggleLab = () => {
     if (inLab()) {
       inLab.set(false);
-      return play(level());
+      return play(levelAfterLab(level(), clearedBeforeLab, levels.length));
     }
+    // 刚通关、正等着换下一关：出来时去下一关
+    clearedBeforeLab = next !== undefined;
     clearTimeout(next);
     next = undefined;
     switching = true;
+    remapping.set(false);
     inLab.set(true);
   };
 
@@ -331,8 +335,12 @@ export function Game(props: GameProps = {}) {
         onAction={(e: ActionEvent) => {
           input.handle(e);
           if (!e.down || e.player !== 0) return;
+          // 试验场的开关也是动作（controls.json 里的 lab，默认 G）：改键时和别的动作一样查冲突
+          const gate = labAction(e.action, inLab(), platform.desktop && trial === undefined);
+          if (gate === "toggle") return toggleLab();
+          if (gate === "ignore") return;
           if (e.action === "remap") return remapping() ? closeRemap() : remapping.set(true);
-          if (trial !== undefined || inLab()) return;
+          if (trial !== undefined) return;
           if (e.action === "slot") return pick(nextSlot(target));
           if (e.action === "lang") return chosenLang.set(otherLocale(lang.locale()));
           if (e.action === "net") return online.toggle();
@@ -378,7 +386,6 @@ export function Game(props: GameProps = {}) {
             if (e.down && e.code === "Escape") props.onExit?.();
             return;
           }
-          if (e.down && !e.repeat && e.code === "KeyG" && platform.desktop) return toggleLab();
           if (inLab()) return;
           // 换存档、语言、联网是动作（onAction）；Digit1 … Digit9：选已经解锁的关
           const n = /^Digit([1-9])$/.exec(e.code)?.[1];
@@ -426,7 +433,7 @@ export function Game(props: GameProps = {}) {
         }}
       />
       {platform.desktop ? null : <TouchPad game={() => game} />}
-      <Button testID="remap-open" class="absolute rounded bg-white/20 px-3 items-center justify-center active:bg-white/40" style={remapPlace(safeArea()).button} onPress={() => (remapping() ? closeRemap() : remapping.set(true))}>
+      <Button testID="remap-open" class="absolute rounded bg-white/20 px-3 items-center justify-center active:bg-white/40" style={remapPlace(safeArea()).button} onPress={() => (inLab() ? undefined : remapping() ? closeRemap() : remapping.set(true))}>
         <Text class="text-white text-sm">{t("remapOpen")}</Text>
       </Button>
       {remapping() ? <RemapPanel input={input} t={t} onClose={closeRemap} place={remapPlace(safeArea()).panel} /> : null}

@@ -6,7 +6,7 @@ use nge_render3d::Transform3d;
 
 use super::*;
 
-const VIEWPORT: Viewport = Viewport { size: [100.0, 100.0], pixels: [100, 100] };
+pub(crate) const VIEWPORT: Viewport = Viewport { size: [100.0, 100.0], pixels: [100, 100] };
 
 /// 按 point 用：重力 -981，一米 100。
 pub(crate) fn app() -> App {

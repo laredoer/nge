@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
 use bevy_ecs::prelude::*;
@@ -10,9 +10,10 @@ use rapier3d::prelude::{
     ColliderBuilder, ColliderHandle, ColliderSet, CollisionEvent, ContactPair, EventHandler, PhysicsWorld, QueryFilter as RapierFilter, Ray, RigidBodyBuilder,
     RigidBodyHandle, RigidBodySet, SoftBodySet, SoftBodyTearEvent, ActiveEvents,
 };
-use rapier3d::prelude::{ActiveCollisionTypes, Group, InteractionGroups, InteractionTestMode, SharedShape};
+use rapier3d::prelude::{ActiveCollisionTypes, Group, InteractionGroups, InteractionTestMode};
 
 use crate::character::{self, Mover};
+use crate::mesh::solid_hull;
 use crate::{Character3d, CharacterState3d, Collider, MeshCollider, Collision3d, Contact, Impulse, MAX_STEPS, QueryFilter, RayHit, RigidBody, STEP, Shape, Velocity};
 
 /// rapier 的世界，加上实体和刚体 / 碰撞体的对应关系。
@@ -30,6 +31,12 @@ pub struct Physics3d {
     /// 调试视图开着时记下这一帧打过的射线和形状投射（查询只拿 `&self`，所以放在锁里）。
     pub(crate) tracing: bool,
     pub(crate) traces: Mutex<Vec<Trace>>,
+    /// 有 `MeshCollider`、还在等模型生成碰撞体的实体 → 等了几秒。
+    pub(crate) waiting: HashMap<Entity, f32>,
+    /// 网格碰撞体生不出来的（模型或缩放改了再试）。
+    pub(crate) mesh_failed: HashSet<Entity>,
+    /// 已经 warn 过的（实体，哪种）：每种只说一次。
+    pub(crate) warnings: HashSet<(Entity, &'static str)>,
 }
 
 /// 一次射线或形状投射：从哪到哪（碰到了是到碰撞时的位置），碰到的点和法线。
@@ -60,7 +67,7 @@ impl Physics3d {
         world.gravity = vector(gravity);
         world.integration_parameters.dt = STEP;
         world.integration_parameters.length_unit = length_unit;
-        Self { world, entities: HashMap::new(), joints: HashMap::new(), ground: None, removed: HashMap::new(), accumulator: 0.0, tracing: false, traces: Mutex::new(Vec::new()) }
+        Self { world, entities: HashMap::new(), joints: HashMap::new(), ground: None, removed: HashMap::new(), accumulator: 0.0, tracing: false, traces: Mutex::new(Vec::new()), waiting: HashMap::new(), mesh_failed: HashSet::new(), warnings: HashSet::new() }
     }
 
     pub fn gravity(&self) -> Vec3 {
@@ -124,6 +131,21 @@ impl Physics3d {
     /// （刚体数，碰撞体数）。连到世界上的关节用的固定刚体不算。
     pub fn len(&self) -> (usize, usize) {
         (self.world.bodies.len() - usize::from(self.ground.is_some()), self.world.colliders.len())
+    }
+
+    /// 还在等模型生成碰撞体的 `MeshCollider` 个数（生不出来的不算）。游戏可以等它变成 0 再放角色，免得地面还没有先掉下去。
+    pub fn pending_meshes(&self) -> usize {
+        self.waiting.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn warned(&self, entity: Entity) -> bool {
+        self.warnings.iter().any(|(e, _)| *e == entity)
+    }
+
+    /// 物理里把这个实体当角色控制器（kinematic 刚体、有 `Character3d`）。
+    pub fn is_character(&self, entity: Entity) -> bool {
+        self.entities.get(&entity).is_some_and(|h| h.mover.is_some())
     }
 
     /// 这个关节实体已经连上了（两头都是刚体、参数没问题）。
@@ -202,7 +224,10 @@ pub(crate) fn remove(
     let gone: Vec<Entity> = bodies.read().chain(colliders.read()).collect();
     for entity in gone {
         match left.get(entity) {
-            Ok((false, false)) | Err(_) => drop(physics.forget(entity)),
+            Ok((false, false)) | Err(_) => {
+                physics.forget(entity);
+                physics.warnings.retain(|(e, _)| *e != entity);
+            }
             // 剩下的那个组件标成变了，`create` 在这一帧接着重建（中间会应用 commands）
             Ok(_) => {
                 rebuild.entity(entity).queue(|mut e: EntityWorldMut| {
@@ -236,26 +261,29 @@ pub(crate) fn create(mut physics: ResMut<Physics3d>, query: Query<(Entity, Optio
         let old = physics.forget(entity);
         // 重建时没有 Velocity 组件就沿用物理里原来的速度
         let velocity = velocity.copied().or(old.map(|h| h.velocity)).unwrap_or_default();
-        let handles = build(&mut physics.world, entity, kind, shape, (transform.translation, transform.rotation), velocity);
-        physics.entities.insert(entity, handles);
+        // 碰撞体生不出来的刚体也不建：和等模型的网格碰撞体一样，不然没有碰撞体的动态刚体会一直往下掉
+        if let Some(handles) = build(&mut physics.world, entity, kind, shape, (transform.translation, transform.rotation), velocity) {
+            physics.entities.insert(entity, handles);
+        }
     }
 }
 
-fn build(world: &mut PhysicsWorld, entity: Entity, kind: Option<RigidBody>, shape: Option<Collider>, at: (Vec3, Quat), velocity: Velocity) -> Handles {
+fn build(world: &mut PhysicsWorld, entity: Entity, kind: Option<RigidBody>, shape: Option<Collider>, at: (Vec3, Quat), velocity: Velocity) -> Option<Handles> {
     let data = u128::from(entity.to_bits());
-    let collider = shape.as_ref().and_then(|c| {
-        let builder = shape_builder(entity, &c.shape, matches!(kind, None | Some(RigidBody::Fixed)))?;
+    let builder = match &shape {
+        Some(c) => Some(shape_builder(entity, &c.shape, matches!(kind, None | Some(RigidBody::Fixed)))?),
+        None => None,
+    };
+    let collider = shape.as_ref().zip(builder).map(|(c, builder)| {
         let events = if c.events { ActiveEvents::COLLISION_EVENTS } else { ActiveEvents::empty() };
-        Some(
-            builder
-                .restitution(c.restitution)
-                .friction(c.friction)
-                .density(c.density.max(0.0))
-                .sensor(c.sensor)
-                .collision_groups(groups(c.group))
-                .active_events(events)
-                .user_data(data),
-        )
+        builder
+            .restitution(c.restitution)
+            .friction(c.friction)
+            .density(c.density.max(0.0))
+            .sensor(c.sensor)
+            .collision_groups(groups(c.group))
+            .active_events(events)
+            .user_data(data)
     });
     let body = kind.map(|kind| {
         let builder = match kind {
@@ -276,7 +304,7 @@ fn build(world: &mut PhysicsWorld, entity: Entity, kind: Option<RigidBody>, shap
     {
         body.set_additional_mass(1.0, true);
     }
-    Handles { body, collider, kind, shape, transform: at, velocity, mover: None }
+    Some(Handles { body, collider, kind, shape, transform: at, velocity, mover: None })
 }
 
 /// 碰撞分组换成 rapier 的掩码：组 g 属于第 g 位、不和第 g 位碰；不分组（0、超出范围）的属于第 0 位、和谁都碰。
@@ -299,19 +327,22 @@ fn shape_builder(entity: Entity, shape: &Shape, fixed: bool) -> Option<ColliderB
         }
         Shape::Ball(r) => Some(ColliderBuilder::ball(r.abs())),
         Shape::Capsule { half_height, radius } => Some(ColliderBuilder::capsule_y(half_height.abs(), radius.abs())),
-        Shape::Convex(p) => ColliderBuilder::convex_hull(&points(p)),
+        Shape::Convex(p) => solid_hull(p).map(ColliderBuilder::new),
+        // 生不出来的部件跳过，全都生不出来才算
         Shape::Hulls(parts) => {
-            let shapes: Option<Vec<_>> = parts.iter().map(|p| SharedShape::convex_hull(&points(p)).map(|s| (Pose::IDENTITY, s))).collect();
-            shapes.filter(|s| !s.is_empty()).map(ColliderBuilder::compound)
+            let shapes: Vec<_> = parts.iter().filter_map(|p| solid_hull(p).map(|s| (Pose::IDENTITY, s))).collect();
+            (!shapes.is_empty()).then(|| ColliderBuilder::compound(shapes))
         }
+        // 下标越界 parry 会 panic：先查
+        Shape::TriMesh(mesh) if mesh.1.iter().flatten().any(|&i| i as usize >= mesh.0.len()) => None,
         Shape::TriMesh(mesh) if fixed => ColliderBuilder::trimesh(points(&mesh.0), mesh.1.clone()).ok(),
         Shape::TriMesh(mesh) => {
             log::warn!("实体 {entity:?} 的三角网格碰撞体只能用在固定的上，换成凸包");
-            ColliderBuilder::convex_hull(&points(&mesh.0))
+            solid_hull(&mesh.0).map(ColliderBuilder::new)
         }
     };
     if built.is_none() {
-        log::warn!("实体 {entity:?} 的碰撞体生不出来（点太少或者都在一个平面上），不建碰撞体");
+        log::warn!("实体 {entity:?} 的碰撞体生不出来（点太少、都在一个平面上，或三角形的下标越界），刚体也不建");
     }
     built
 }
@@ -346,7 +377,11 @@ pub(crate) fn step(
         match (characters.get(*entity), h.mover.as_mut()) {
             (Ok(&c), Some(m)) => m.params = c,
             (Ok(&c), None) if h.kind == Some(RigidBody::Kinematic) => h.mover = Some(Mover { params: c, ..Default::default() }),
-            (Ok(_), None) => {}
+            (Ok(_), None) => {
+                if physics.warnings.insert((*entity, "character")) {
+                    log::warn!("实体 {entity:?} 的 Character3d 要和 RigidBody::Kinematic 一起用，这个刚体是 {:?}，不当角色", h.kind);
+                }
+            }
             (Err(_), _) => h.mover = None,
         }
         // 角色碰到固定、kinematic 的 sensor 也要发碰撞事件：rapier 默认只算有动态刚体的一对
@@ -440,7 +475,7 @@ fn push(world: &mut PhysicsWorld, h: &mut Handles, transform: &Transform3d, velo
             body.set_position(pose(at), true);
             // 角色瞬移：不再跟着原来脚下的东西走
             if let Some(m) = h.mover.as_mut() {
-                (m.ground, m.grounded) = (None, false);
+                (m.ground, m.grounded, m.ground_normal) = (None, false, Vec3::ZERO);
             }
         }
     }

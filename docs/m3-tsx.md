@@ -151,7 +151,7 @@ cargo run -p scene               # 自写 dev host，连 ws://127.0.0.1:8790/ws
 - **Rust 侧日志看不到**：nsh 的 DevLogger 只转发 `nsh*` 和 `js` 目标，以及 warn 以上级别的日志，引擎的 info / debug 日志在 dev host 里不显示。
 - **每次整体下发场景**：节点多、或者 TSX 每帧都改场景时，JSON 序列化和全量比较的开销会上来。到时候改成 TS 侧 diff、发增量补丁。
 - **改了节点就整体覆盖**：节点上任何字段一变，`Transform2d` / `Sprite` 都按声明重置，`spin` 转到的角度也会回到声明的 `rotation`。以后可以做成按字段覆盖。
-- **整份场景要么全收、要么全拒**：任何一个字段不合法（比如 TSX 算出 `NaN`，`JSON.stringify` 后变成 `null`；颜色写错；`frame` 为负），这一整份场景都会被拒绝，旧场景保留，只记一条 warn。未知字段（比如把 `rotation` 拼成 `rotate`）会被静默忽略。
+- **场景里写错一项，只丢那一项**（通用规则，`nge-scene` 的 `lenient.rs`）：`scene` 的每个列表（`sprites`、`models`、`joints`、`joints3d`、`post` 等）逐项解析，每个可选项（`camera`、`physics3d`、`lighting`、`background`、`timeScale` 等）单独解析；节点里嵌着的列表、可选项也一样（`lighting.lights`、`camera.bounds`）。解析不了的那一项（比如 TSX 算出 `NaN`，`JSON.stringify` 后变成 `null`；颜色写错；`frame` 为负；关节多了拼错的字段）warn 一次（带字段名和那一项的 id），跳过，可选项当没写，别的照常；整个字段不是数组时当空的。会超出范围的数收宽的类型再查范围（碰撞分组超出 0 … 31 时 warn，当不分组），不让整个节点失败。同一句 warn 只说一次（场景每次变化都重新解析）。节点上没有 `deny_unknown_fields` 的地方，未知字段（比如把 `rotation` 拼成 `rotate`）照旧静默忽略；关节、灯、后处理、相机范围这些拒绝未知字段的，只丢那一项。以前是一项写错整份场景被拒、旧场景保留。
 - **同 z 的重叠顺序不保证**：渲染时同 z 再按纹理分组，点击取查询顺序里的最后一个，两者在不同纹理时可能不一致。要确定上下关系就给不同的 z。
 - **TS 库没有测试**：`nsh test` 里不会注册原生组件，只能测 handler 的组合，暂时没写。
 - **点击只认按下**：拖动、长按、多指手势都没有封装，要自己用 `onTouch*` 或者在 Rust 里读 `Input`。

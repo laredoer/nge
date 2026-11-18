@@ -32,6 +32,8 @@ export interface Hit3d {
 export interface Query3dReply {
   id: number;
   hits: Hit3d[];
+  /** 查询本身写错了（分组超出 0 … 31、字段拼错等）时的原因；这时 hits 是空的。 */
+  error?: string;
 }
 
 export interface Queries3d {
@@ -54,15 +56,17 @@ export interface Queries3d {
 /** 引擎一直不回（command 丢了、没开 3D 物理）时多久按空结果结束（毫秒）。 */
 const WAIT_MS = 2000;
 
+/** 所有查询器共用的 id：几个查询器接同一个事件时，结果不会交错。 */
+let nextId = 1;
+
 /** `game` 拿游戏视图（`<GameView ref>`）；还没建好时查询直接是空结果。 */
 export function queries3d(game: () => NativeComponentRef | undefined, settings: { waitMs?: number } = {}): Queries3d {
-  let next = 1;
   const waiting = new Map<number, { resolve: (hits: Hit3d[]) => void; timer: ReturnType<typeof setTimeout> }>();
   const ask = (args: Record<string, unknown>) =>
     new Promise<Hit3d[]>((resolve) => {
       const view = game();
       if (view === undefined) return resolve([]);
-      const id = next++;
+      const id = nextId++;
       const timer = setTimeout(() => {
         if (waiting.delete(id)) resolve([]);
       }, settings.waitMs ?? WAIT_MS);
@@ -83,6 +87,7 @@ export function queries3d(game: () => NativeComponentRef | undefined, settings: 
       if (entry === undefined) return;
       waiting.delete(reply.id);
       clearTimeout(entry.timer);
+      if (reply.error !== undefined) console.warn(`query3d ${reply.id}: ${reply.error}`);
       entry.resolve(reply.hits);
     },
     pending: () => waiting.size,

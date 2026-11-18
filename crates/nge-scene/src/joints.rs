@@ -331,6 +331,14 @@ mod tests {
     }
 
     #[test]
+    fn a_misspelled_joint_only_drops_that_joint() {
+        let mut app = app();
+        frame(&mut app, Some(json!({ "sprites": [bob()], "joints": [{ "id": "typo", "b": "bob", "kind": "rope", "lenght": 3 }, { "id": "j", "b": "bob", "kind": "revolute", "anchorA": [0, 0] }] })));
+        assert!(joint(&mut app, "typo").is_none(), "写错的那个跳过");
+        assert!(joint(&mut app, "j").is_some(), "别的关节照常");
+    }
+
+    #[test]
     fn unknown_fields_and_kinds_are_rejected() {
         for bad in [json!({ "id": "j", "b": "x", "kind": "weld" }), json!({ "id": "j", "b": "x", "kind": "rope", "lenght": 3 })] {
             assert!(serde_json::from_value::<JointNode>(bad.clone()).is_err(), "{bad}");

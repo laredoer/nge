@@ -23,7 +23,7 @@ pub enum MaskedNode {
 pub struct LightingNode {
     /// 环境光，默认 "#ffffff"（不变暗）。
     pub ambient: Option<Color>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::lenient::lighting_lights")]
     pub lights: Vec<Light2dNode>,
 }
 
@@ -226,9 +226,14 @@ mod tests {
         assert_eq!(sprite_effects(&mut app, "a").1, Some(Masking::Write), "两个都写时当遮罩");
         frame(&mut app, Some(json!({ "sprites": [{ "id": "a", "w": 10 }] })));
         assert_eq!(sprite_effects(&mut app, "a"), (None, None, false), "去掉就回到原样");
-        frame(&mut app, Some(json!({ "sprites": [{ "id": "a", "w": 10, "masked": "inside" }] })));
-        frame(&mut app, Some(json!({ "sprites": [{ "id": "a", "w": 10, "masked": "middle", "unlit": true }] })));
-        assert_eq!(sprite_effects(&mut app, "a"), (None, Some(Masking::Inside), false), "写错的值整份场景解析失败，保持上一份");
+        frame(&mut app, Some(json!({ "sprites": [{ "id": "a", "w": 10, "masked": "inside" }, { "id": "b", "w": 10, "unlit": true }] })));
+        frame(&mut app, Some(json!({ "sprites": [{ "id": "a", "w": 10, "masked": "middle", "unlit": true }, { "id": "b", "w": 10, "unlit": true }] })));
+        assert!(sprite_ids(&mut app) == ["b"], "写错值的那个精灵跳过，别的照常");
+    }
+
+    fn sprite_ids(app: &mut nge_ecs::App) -> Vec<String> {
+        let world = app.world_mut();
+        world.query_filtered::<&SceneId, With<Declared<SpriteNode>>>().iter(world).map(|s| s.0.clone()).collect()
     }
 
     #[test]
@@ -331,10 +336,11 @@ mod tests {
     }
 
     #[test]
-    fn misspelled_light_fields_fail_the_scene() {
+    fn misspelled_light_fields_only_drop_that_light() {
         let mut app = app();
         frame(&mut app, Some(json!({ "lighting": { "lights": [{ "radius": 10 }] } })));
-        frame(&mut app, Some(json!({ "lighting": { "lights": [{ "radius": 20, "raduis": 3 }] } })));
-        assert_eq!(app.world().resource::<Lighting2d>().lights[0].radius, 10.0, "拼错的字段整份场景解析失败，保持上一份");
+        frame(&mut app, Some(json!({ "lighting": { "lights": [{ "radius": 20, "raduis": 3 }, { "radius": 30 }] } })));
+        let radii: Vec<f32> = app.world().resource::<Lighting2d>().lights.iter().map(|l| l.radius).collect();
+        assert_eq!(radii, [30.0], "拼错字段的那盏灯跳过，别的照常");
     }
 }

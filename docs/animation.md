@@ -20,7 +20,7 @@ TSX 里不写每帧逻辑，也能让精灵动起来：图集精灵按帧循环�
 - 有 `anim` 时引擎按时间换 `frame`，节点上的 `frame` 不起作用。
 - `loop: false` 时停在最后一帧，发一次 `animEnd { id }` 事件。
 - 节点别的字段变了（比如 `x`）不会让动画从头开始；`anim` 本身变了才从头开始。
-- `frames` 为空、`fps` 不是正数时不播，画 `frame`。`frames` 里有负数或小数时整份 `scene` 解析失败（和别的字段一样，只记 warn）。
+- `frames` 为空、`fps` 不是正数时不播，画 `frame`。`frames` 里有负数或小数时这个精灵解析失败、跳过（和别的字段一样，只记 warn（见 [m3-tsx.md](m3-tsx.md) 的「场景里写错一项」））。
 
 ### `tween` command
 

@@ -26,7 +26,7 @@ tilemaps: [{
 }]
 ```
 
-- `cols`、`grid`、`data`、`solid` 都要是整数（`cols` 不能是负数），不然整份 `scene` 解析失败（和别的字段一样，只记 warn）。
+- `cols`、`grid`、`data`、`solid` 都要是整数（`cols` 不能是负数），不然这张瓦片地图解析失败、跳过（和别的字段一样，只记 warn（见 [m3-tsx.md](m3-tsx.md) 的「场景里写错一项」））。
 - 帧号超出图集的格数时按格数取模（和精灵一样）；`solid` 里写负数不起作用。
 - 格子 `(列 c, 行 r)` 的中心在 `(x + (c + 0.5) × tile, y − (r + 0.5) × tile)`。
 - `data` 的长度不是 `cols` 的整数倍时，最后不满一行的格子不画，记 warn；`cols` 是 0、`tile` 不是正数时整张地图不画，记 warn。

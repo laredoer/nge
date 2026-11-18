@@ -43,18 +43,19 @@ impl Default for Lab {
 
 type Hero<'a> = (Entity, &'a SceneId, &'a mut Transform3d, &'a mut Velocity, &'a CharacterState3d);
 
-/// 键盘走、跳，掉下去回到起点。
-pub(crate) fn walk(time: Res<Time>, input: Res<Input>, mut lab: ResMut<Lab>, mut heroes: Query<Hero, Without<Camera3d>>) {
+/// 键盘走、跳，掉下去回到起点。台阶、斜坡这些网格碰撞体还没生成时角色停在起点（地面是盒子，第一帧就有）。
+pub(crate) fn walk(time: Res<Time>, input: Res<Input>, physics: Res<Physics3d>, mut lab: ResMut<Lab>, mut heroes: Query<Hero, Without<Camera3d>>) {
     let Some((entity, _, mut t, mut v, state)) = heroes.iter_mut().find(|(_, id, ..)| id.0 == LAB_HERO) else { return };
     if !(time.delta > 0.0) {
         return;
     }
     // 新的场景（重新进试验场）是新的实体：重新记起点
-    let spawn = match lab.spawn {
-        Some((e, at)) if e == entity => at,
-        _ => lab.spawn.insert((entity, t.translation)).1,
+    let (spawn, new) = match lab.spawn {
+        Some((e, at)) if e == entity => (at, false),
+        _ => (lab.spawn.insert((entity, t.translation)).1, true),
     };
-    if t.translation.y < FALL_LINE {
+    // 刚进场的这一帧物理还没数过要等的网格碰撞体：也先停着
+    if new || t.translation.y < FALL_LINE || physics.pending_meshes() > 0 {
         t.translation = spawn;
         *v = Velocity::default();
         return;
@@ -150,19 +151,49 @@ mod tests {
         t.translation = to;
     }
 
-    /// 进试验场，等模型加载完、碰撞体都生成、角色站稳（地面还没有时角色先掉下去，掉出去回到起点再站上来）。
+    /// 进试验场，等模型加载完、碰撞体都生成、角色站稳。地面是盒子，第一帧就有；网格碰撞体没生成完时角色停在起点：
+    /// 整个过程中角色一直没往下掉（不会掉出去再回到起点）。
     fn lab() -> App {
         let mut app = crate::build(nge_audio::AudioPlugin::mock());
         app.prop("scene", Some(&scene()));
+        let mut lowest = f32::INFINITY;
+        let mut waited = false;
         for _ in 0..600 {
             run(&mut app, 1);
+            if let Some(t) = find::<Transform3d>(&mut app, LAB_HERO) {
+                lowest = lowest.min(t.translation.y);
+            }
+            waited |= app.world().resource::<Physics3d>().pending_meshes() > 0;
             let ready = ["lab-floor", "lab-steps", "lab-ramps", "lab-door", "lab-rock"].iter().all(|id| find::<Collider>(&mut app, id).is_some());
             let standing = find::<CharacterState3d>(&mut app, LAB_HERO).is_some_and(|s| s.grounded) && (at(&mut app, LAB_HERO).translation.z - 300.0).abs() < 1.0;
-            if ready && standing {
+            if ready && standing && app.world().resource::<Physics3d>().pending_meshes() == 0 {
+                assert!(lowest > 20.0, "角色进场后一直没往下掉（最低 {lowest}）");
+                assert!(waited, "确实等过网格碰撞体");
                 return app;
             }
         }
         panic!("试验场没准备好：{:?}", find::<CharacterState3d>(&mut app, LAB_HERO));
+    }
+
+    #[test]
+    fn the_hero_stays_at_the_start_until_the_mesh_colliders_are_built() {
+        let mut app = crate::build(nge_audio::AudioPlugin::mock());
+        app.prop("scene", Some(&scene()));
+        key(&mut app, "KeyW", true);
+        let mut frozen = 0;
+        for _ in 0..600 {
+            run(&mut app, 1);
+            if app.world().resource::<Physics3d>().pending_meshes() == 0 && frozen > 0 {
+                break;
+            }
+            if let Some(t) = find::<Transform3d>(&mut app, LAB_HERO) {
+                frozen += 1;
+                assert!(t.translation.distance(Vec3::new(0.0, 25.0, 300.0)) < 0.5, "台阶、斜坡还没有碰撞体：按着 W 也不走 {}", t.translation);
+            }
+        }
+        assert!(frozen > 0, "等过网格碰撞体");
+        run(&mut app, 30);
+        assert!(at(&mut app, LAB_HERO).translation.z < 290.0, "都生成以后照常走");
     }
 
     #[test]
@@ -209,6 +240,27 @@ mod tests {
         run(&mut app, 60);
         let back = at(&mut app, LAB_HERO).translation;
         assert!(back.distance(Vec3::new(0.0, 24.0, 300.0)) < 5.0, "回到起点 {back}");
+        let state = find::<CharacterState3d>(&mut app, LAB_HERO).unwrap();
+        assert!(find::<Velocity>(&mut app, LAB_HERO).unwrap().linear.length() < 1.0 && state.grounded, "回到起点后速度清零、站在地上 {state:?}");
+    }
+
+    #[test]
+    fn leaving_and_coming_back_starts_fresh() {
+        let mut app = lab();
+        key(&mut app, "KeyW", true);
+        key(&mut app, "Space", true);
+        run(&mut app, 5);
+        key(&mut app, "KeyW", false);
+        key(&mut app, "Space", false);
+        assert!(find::<Velocity>(&mut app, LAB_HERO).unwrap().linear.length() > 100.0, "走着、跳着离开");
+        // 换到别的关卡再回来：实体整个重建，速度、着地状态、起点都是新的
+        app.prop("scene", Some(&json!({ "level": "elsewhere" })));
+        run(&mut app, 2);
+        app.prop("scene", Some(&scene()));
+        run(&mut app, 2);
+        let t = at(&mut app, LAB_HERO).translation;
+        assert!(t.distance(Vec3::new(0.0, 25.0, 300.0)) < 1.0, "从起点开始 {t}");
+        assert!(find::<Velocity>(&mut app, LAB_HERO).unwrap().linear.length() < 20.0, "没带着上次的速度");
     }
 
     #[test]
@@ -226,7 +278,12 @@ mod tests {
         run(&mut app, 1);
         key(&mut app, "KeyQ", false);
         assert!(!app.world().resource::<Physics3dDebug>().enabled);
-        run(&mut app, 60);
-        assert!(at(&mut app, LAB_PLATFORM).translation.distance(platform) > 10.0, "平台在挪");
+        // 平台按正弦来回挪：看这一秒里离开起点最远多远（只比最后一帧的话，可能正好挪回原处附近）
+        let mut farthest = 0.0f32;
+        for _ in 0..60 {
+            run(&mut app, 1);
+            farthest = farthest.max(at(&mut app, LAB_PLATFORM).translation.distance(platform));
+        }
+        assert!(farthest > 10.0, "平台在挪 {farthest}");
     }
 }

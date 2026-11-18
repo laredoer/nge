@@ -20,9 +20,15 @@
     {
       "id": "lab-floor",
       "model": "asset:/@platformer/lab-floor.glb",
+      "y": -10,
       "body": {
         "kind": "fixed",
-        "shape": "convex"
+        "shape": "box",
+        "size": [
+          1600,
+          20,
+          1600
+        ]
       }
     },
     {

@@ -22,7 +22,7 @@ pub(crate) const LENGTH_UNIT: f32 = 100.0;
 #[cfg(feature = "physics3d")]
 pub(crate) fn register(app: &mut nge_ecs::App) {
     use nge_ecs::{PostUpdate, PreUpdate};
-    use nge_physics3d::{Physics3dPlugin, Physics3dStepped};
+    use nge_physics3d::{Physics3dDebugDraw, Physics3dPlugin, Physics3dStepped};
     use nge_render2d::PointerWorld;
     if !app.is_plugin_added::<Physics3dPlugin>() {
         app.add_plugins(Physics3dPlugin { gravity: GRAVITY, length_unit: LENGTH_UNIT });
@@ -33,7 +33,7 @@ pub(crate) fn register(app: &mut nge_ecs::App) {
         .add_systems(PostUpdate, crate::joints3d::resolve.before(Physics3dStepped))
         .add_command(crate::query3d::QUERY3D)
         .add_event(crate::query3d::QUERY3D_RESULT)
-        .add_systems(PostUpdate, (collide, crate::query3d::answer).after(Physics3dStepped));
+        .add_systems(PostUpdate, (collide, crate::query3d::answer.before(Physics3dDebugDraw)).after(Physics3dStepped));
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
@@ -79,8 +79,8 @@ pub struct ModelBody {
     pub sensor: bool,
     pub velocity: [f32; 3],
     pub collide: bool,
-    /// 碰撞分组（1 … 31）：同一组的互相不碰撞；0 不分组。
-    pub group: u8,
+    /// 碰撞分组（1 … 31）：同一组的互相不碰撞；0 不分组。收宽的类型：超出范围的 warn 后当不分组，不让整个节点解析失败。
+    pub group: i64,
     /// `character`：能爬的最陡的坡（度）。
     pub slope: f32,
     /// `character`：自动迈上去的台阶最高多高，0 不自动上。
@@ -134,7 +134,7 @@ pub(crate) fn apply_body(entity: &mut EntityCommands, before: Option<&ModelNode>
         Body3dKind::Kinematic | Body3dKind::Character => RigidBody::Kinematic,
     };
     if body.kind == Body3dKind::Character {
-        entity.insert(Character3d { max_slope: body.slope.to_radians(), step: body.step, snap: body.snap, gravity_scale: 1.0 });
+        entity.insert(Character3d { max_slope: body.slope.to_radians(), step: body.step, snap: body.snap, gravity_scale: 1.0, ..Default::default() });
     } else {
         entity.remove::<Character3d>();
     }
@@ -172,7 +172,7 @@ fn collider(body: &ModelBody, scale: f32) -> Collider {
     c.density = body.density;
     c.sensor = body.sensor;
     c.events = body.collide;
-    c.group = body.group;
+    c.group = crate::lenient::group("3D 刚体", body.group);
     c
 }
 
@@ -330,6 +330,10 @@ mod tests {
         assert_eq!(get::<Collider>(&mut app, "hero").unwrap().group, 2);
         frame(&mut app, Some(hero("dynamic")));
         assert!(get::<nge_physics3d::Character3d>(&mut app, "hero").is_none(), "换成别的种类就去掉");
+        // 分组超出 0 … 31：模型照样有，当不分组
+        frame(&mut app, Some(json!({ "models": [model("hero", 0.0, 100.0, json!({ "group": 300 })), model("other", 50.0, 100.0, json!({ "group": 5 }))] })));
+        assert_eq!(get::<Collider>(&mut app, "hero").map(|c| c.group), Some(0));
+        assert_eq!(get::<Collider>(&mut app, "other").map(|c| c.group), Some(5));
     }
 
     #[test]

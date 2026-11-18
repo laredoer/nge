@@ -12,7 +12,8 @@
       "slot": { "kind": "button", "keys": ["KeyS"] },
       "lang": { "kind": "button", "keys": ["KeyL"] },
       "net": { "kind": "button", "keys": ["KeyN"] },
-      "remap": { "kind": "button", "keys": ["KeyK"] }
+      "remap": { "kind": "button", "keys": ["KeyK"] },
+      "lab": { "kind": "button", "keys": ["KeyG"] }
     },
     {
       "move": {

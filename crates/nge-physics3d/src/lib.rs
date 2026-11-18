@@ -195,6 +195,10 @@ pub struct Collision3d {
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Physics3dStepped;
 
+/// 调试视图把碰撞体和这一帧的查询画出来（PostUpdate，在 [`Physics3dStepped`] 之后）。要让查询在同一帧画出来，排在它前面。
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Physics3dDebugDraw;
+
 /// 固定步长。
 pub const STEP: f32 = 1.0 / 60.0;
 /// 一帧最多补几步：卡顿时宁可变慢，也不越补越多。
@@ -218,7 +222,7 @@ impl Plugin for Physics3dPlugin {
             .add_message::<Collision3d>()
             .init_resource::<Physics3dDebug>()
             .add_systems(PostUpdate, (mesh::build, world::remove, world::create, joint::sync, world::step).chain().in_set(Physics3dStepped))
-            .add_systems(PostUpdate, debug::draw.after(Physics3dStepped));
+            .add_systems(PostUpdate, debug::draw.after(Physics3dStepped).in_set(Physics3dDebugDraw));
     }
 }
 
