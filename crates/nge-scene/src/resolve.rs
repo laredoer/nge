@@ -65,6 +65,10 @@ impl SceneAssets<'_> {
         uri.map(|uri| self.server.load(&mut self.fonts, uri))
     }
 
+    pub fn cube(&mut self, cubes: &mut Assets<nge_assets::CubeImage>, uri: &str) -> nge_assets::Handle<nge_assets::CubeImage> {
+        self.server.load(cubes, uri)
+    }
+
     pub fn model(&mut self, uri: &str) -> nge_assets::Handle<Gltf> {
         self.server.load(&mut self.gltfs, uri)
     }

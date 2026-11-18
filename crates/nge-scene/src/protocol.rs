@@ -43,6 +43,15 @@ pub struct Scene {
     pub lights: Vec<LightNode>,
     #[serde(deserialize_with = "crate::lenient::ambient")]
     pub ambient: Option<AmbientNode>,
+    /// 天空和环境光照（见 docs/render3d-quality.md）。
+    #[serde(deserialize_with = "crate::lenient::sky")]
+    pub sky: Option<crate::quality3d::SkyNode>,
+    /// 雾。
+    #[serde(deserialize_with = "crate::lenient::fog")]
+    pub fog: Option<crate::quality3d::FogNode>,
+    /// 阴影的过滤、偏移、投影灯数和级联过渡。
+    #[serde(deserialize_with = "crate::lenient::shadows")]
+    pub shadows: Option<crate::quality3d::ShadowsNode>,
     #[serde(deserialize_with = "crate::lenient::physics")]
     pub physics: Option<PhysicsNode>,
     /// 3D 物理（见 docs/physics3d.md）。

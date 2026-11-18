@@ -1,17 +1,19 @@
 //! 3D 试验场（按 G 进出，场景在 lab.ts / lab.json，见 docs/gameplay3d.md）：WASD / 方向键走、空格跳、掉出去回到起点；
-//! 相机跟在角色后上方；平台按时间来回挪；调试视图开着时角色往下打一条射线、往前扫一个球。
+//! 相机跟在角色后上方；平台按时间来回挪；调试视图开着时角色往下打一条射线、往前扫一个球；C 开关级联染色（见 docs/render3d-quality.md）。
 
 use bevy_ecs::prelude::*;
 use nge_ecs::glam::{Quat, Vec3};
 use nge_ecs::{Input, Time};
 use nge_physics3d::{CharacterState3d, Physics3d, Physics3dDebug, QueryFilter, QueryShape, Velocity};
-use nge_render3d::{Camera3d, Transform3d};
+use nge_render3d::{Camera3d, Shadows, Transform3d};
 use nge_scene::SceneId;
 
 /// 试验场的角色和平台（lab.json 里的 id）。
 pub const LAB_HERO: &str = "lab-hero";
 pub const LAB_PLATFORM: &str = "lab-platform";
 
+/// 开关级联染色的键。
+const CASCADE_KEY: &str = "KeyC";
 /// 走的速度（point / s），起跳速度（重力 981 时跳 100 多高）。
 const SPEED: f32 = 220.0;
 const JUMP: f32 = 450.0;
@@ -104,6 +106,19 @@ pub(crate) fn probe(debug: Res<Physics3dDebug>, physics: Res<Physics3d>, lab: Re
     let me = QueryFilter::default().exclude(entity);
     physics.raycast(t.translation, Vec3::NEG_Y, PROBE_DOWN, me);
     physics.cast_shape(QueryShape::Ball(PROBE_BALL), t.translation, Quat::IDENTITY, lab.facing, PROBE_FORWARD, me);
+}
+
+/// 试验场里按 C 开关级联染色（近到远红、绿、蓝），离开试验场时关掉。
+pub(crate) fn cascade_colors(input: Res<Input>, mut shadows: ResMut<Shadows>, ids: Query<&SceneId>) {
+    if !ids.iter().any(|id| id.0 == LAB_HERO) {
+        if shadows.debug_cascades {
+            shadows.debug_cascades = false;
+        }
+        return;
+    }
+    if input.key_pressed(CASCADE_KEY) {
+        shadows.debug_cascades = !shadows.debug_cascades;
+    }
 }
 
 #[cfg(test)]
@@ -298,5 +313,26 @@ mod tests {
             farthest = farthest.max(at(&mut app, LAB_PLATFORM).translation.distance(platform));
         }
         assert!(farthest > 10.0, "平台在挪 {farthest}");
+    }
+
+    #[test]
+    fn c_toggles_cascade_colors_in_the_lab_only() {
+        let mut app = lab();
+        let press = |app: &mut App| {
+            key(app, "KeyC", true);
+            run(app, 1);
+            key(app, "KeyC", false);
+            run(app, 1);
+        };
+        press(&mut app);
+        assert!(app.world().resource::<Shadows>().debug_cascades, "按 C 打开");
+        press(&mut app);
+        assert!(!app.world().resource::<Shadows>().debug_cascades, "再按关掉");
+        press(&mut app);
+        app.prop("scene", Some(&json!({ "level": "elsewhere" })));
+        run(&mut app, 2);
+        assert!(!app.world().resource::<Shadows>().debug_cascades, "离开试验场时关掉");
+        press(&mut app);
+        assert!(!app.world().resource::<Shadows>().debug_cascades, "试验场外按 C 没反应");
     }
 }

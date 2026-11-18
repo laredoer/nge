@@ -4,13 +4,13 @@ use bevy_ecs::prelude::{Component, Resource};
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3, Vec4};
 
+use crate::fog::FogRaw;
+use crate::shadow_soft::{Candidate, MAX_LOCAL_LAYERS};
 use crate::shadow_views::MAX_CASCADES;
 
 pub const MAX_DIRECTIONAL_LIGHTS: usize = 4;
 pub const MAX_POINT_LIGHTS: usize = 8;
 pub const MAX_SPOT_LIGHTS: usize = 4;
-/// 聚光灯和点光源合用的阴影图层数：第 0 层聚光灯，1–6 层点光源的六面。
-pub(crate) const LOCAL_LAYERS: usize = 7;
 const MIN_OUTER_ANGLE: f32 = 1e-3;
 
 /// 平行光。`direction` 是光的传播方向（从光源指向场景），不需要归一化。
@@ -36,7 +36,7 @@ pub struct PointLight {
     pub color: Vec3,
     pub intensity: f32,
     pub range: f32,
-    /// 投六个方向的影子（见 [`Shadows`](crate::Shadows)）。只有第一盏开着的生效。
+    /// 投六个方向的影子（见 [`Shadows`](crate::Shadows)）：和聚光灯一起按 [`ShadowPriority`](crate::ShadowPriority) 挑，最多 `max_lights` 盏。
     pub shadows: bool,
 }
 
@@ -57,7 +57,7 @@ pub struct SpotLight {
     pub inner_angle: f32,
     /// 半角（弧度），限制在 (0, 89°]。
     pub outer_angle: f32,
-    /// 投影子（见 [`Shadows`](crate::Shadows)）。只有第一盏开着的生效。
+    /// 投影子（见 [`Shadows`](crate::Shadows)）：和点光源一起按 [`ShadowPriority`](crate::ShadowPriority) 挑，最多 `max_lights` 盏。
     pub shadows: bool,
 }
 
@@ -120,44 +120,69 @@ pub(crate) struct SpotRaw {
 #[derive(Debug, Clone, Copy, PartialEq, Pod, Zeroable)]
 pub(crate) struct Globals {
     pub view_proj: [[f32; 4]; 4],
+    /// 画天空时从屏幕反推视线。
+    pub inv_view_proj: [[f32; 4]; 4],
     /// 视点：w = 1 是相机位置，w = 0 是正交相机朝向相机的方向（[`Camera3d::eye`](crate::Camera3d::eye)）。
     pub eye: [f32; 4],
     pub ambient: [f32; 4],
     /// 方向光数量、点光源数量、投影子的方向光（第几盏 + 1，0 是没有）、聚光灯数量。
     pub counts: [u32; 4],
-    /// 投影子的聚光灯、点光源（第几盏 + 1，0 是没有），方向光阴影的段数。
+    /// 阴影过滤（0 PCF、1 泊松、2 PCSS）、级联调试色（1 开）、方向光阴影的段数、画天空（0 不画、1 程序天空、2 立方体）。
     pub casters: [u32; 4],
     pub dirs: [DirRaw; MAX_DIRECTIONAL_LIGHTS],
     pub points: [PointRaw; MAX_POINT_LIGHTS],
     pub spots: [SpotRaw; MAX_SPOT_LIGHTS],
     /// 方向光每段：世界 → 阴影图的裁剪空间。
     pub cascades: [[[f32; 4]; 4]; MAX_CASCADES],
-    /// 聚光灯、点光源六面：世界 → 阴影图的裁剪空间。
-    pub locals: [[[f32; 4]; 4]; LOCAL_LAYERS],
+    /// 聚光灯（1 层）、点光源（6 层：+X、-X、+Y、-Y、+Z、-Z）：世界 → 阴影图的裁剪空间。
+    pub locals: [[[f32; 4]; 4]; MAX_LOCAL_LAYERS],
     /// 相机前方：xyz 单位向量，w = -dot(前方, 相机位置)，片元在相机前方的距离 = dot(前方, 位置) + w。
     pub view_forward: [f32; 4],
     /// 每段的远端（相机前方的距离）。
     pub splits: [f32; 4],
     /// 每段法线方向往外推多少（世界单位）。
     pub cascade_offset: [f32; 4],
-    /// 方向光、聚光灯和点光源的阴影图一个像素在 uv 里多大；聚光灯、点光源的图一个像素在离灯 1 处的世界里多大。
+    /// 方向光、聚光灯和点光源的阴影图一个像素在 uv 里多大；w：点光源离灯 1 处往外推多少。
     pub shadow: [f32; 4],
+    /// 每盏聚光灯的阴影从第几层开始 + 1（0 是不投影）。
+    pub spot_layers: [u32; MAX_SPOT_LIGHTS],
+    /// 每盏点光源的阴影从第几层开始 + 1。
+    pub point_layers: [u32; MAX_POINT_LIGHTS],
+    /// 每盏聚光灯离灯 1 处往外推多少。
+    pub spot_offset: [f32; MAX_SPOT_LIGHTS],
+    /// 泊松盘半径（像素）、级联混合比例、深度 bias、PCSS 最大半影（像素）。
+    pub soft: [f32; 4],
+    /// PCSS：每段深度每差 1 半影宽几个像素。
+    pub pcss: [f32; 4],
+    /// 环境漫反射强度、镜面强度、预滤波最高一级、有没有环境光照（1 有）。
+    pub env: [f32; 4],
+    /// 天空的 SH9（辐射度，rgb）。
+    pub sh: [[f32; 4]; 9],
+    /// 程序天空：上、地平线、下（rgb）；指向太阳（xyz，w 是太阳盘半角）；太阳色（w：1 有太阳）。
+    pub sky: [[f32; 4]; 5],
+    pub fog: FogRaw,
 }
 
 impl Globals {
-    /// 超出上限的灯丢弃，返回值的第二项表示有没有丢。
+    /// 超出上限的灯丢弃，返回值的第二项表示有没有丢。开了阴影的聚光灯、点光源记进 `candidates`（再按优先级挑，见 `shadow_soft::pick`）。
+    #[allow(clippy::too_many_arguments)]
     pub fn new<'a>(
         view_proj: Mat4,
         eye: Vec4,
         ambient: AmbientLight,
         dirs: impl IntoIterator<Item = &'a DirectionalLight>,
-        points: impl IntoIterator<Item = (&'a PointLight, Vec3)>,
-        spots: impl IntoIterator<Item = (&'a SpotLight, Vec3, Vec3)>,
+        points: impl IntoIterator<Item = (&'a PointLight, Vec3, i32)>,
+        spots: impl IntoIterator<Item = (&'a SpotLight, Vec3, Vec3, i32)>,
+        candidates: &mut Vec<Candidate>,
     ) -> (Self, bool) {
         let mut g = Self::zeroed();
         g.view_proj = view_proj.to_cols_array_2d();
+        g.inv_view_proj = view_proj.inverse().to_cols_array_2d();
         g.eye = eye.into();
         g.ambient = (ambient.color * ambient.brightness).extend(0.0).into();
+        candidates.clear();
+        // 正交相机没有位置：同优先级按查询顺序
+        let distance = |p: Vec3| if eye.w == 0.0 { 0.0 } else { p.distance(eye.truncate()) };
         let mut dropped = false;
         let mut n = 0;
         for light in dirs {
@@ -174,7 +199,7 @@ impl Globals {
         }
         g.counts[0] = n as u32;
         n = 0;
-        for (light, position) in points {
+        for (light, position, priority) in points {
             if n == MAX_POINT_LIGHTS {
                 dropped = true;
                 break;
@@ -183,14 +208,14 @@ impl Globals {
                 position_range: position.extend(light.range).into(),
                 color: (light.color * light.intensity).extend(0.0).into(),
             };
-            if light.shadows && g.casters[1] == 0 {
-                g.casters[1] = n as u32 + 1;
+            if light.shadows {
+                candidates.push(Candidate { point: true, index: n, priority, distance: distance(position) });
             }
             n += 1;
         }
         g.counts[1] = n as u32;
         n = 0;
-        for (light, position, direction) in spots {
+        for (light, position, direction, priority) in spots {
             let Some(direction) = direction.try_normalize() else { continue };
             if n == MAX_SPOT_LIGHTS {
                 dropped = true;
@@ -202,8 +227,8 @@ impl Globals {
                 direction: direction.extend(outer.cos()).into(),
                 color: (light.color * light.intensity).extend(inner.cos()).into(),
             };
-            if light.shadows && g.casters[0] == 0 {
-                g.casters[0] = n as u32 + 1;
+            if light.shadows {
+                candidates.push(Candidate { point: false, index: n, priority, distance: distance(position) });
             }
             n += 1;
         }
@@ -221,7 +246,18 @@ mod tests {
         points: impl IntoIterator<Item = (&'a PointLight, Vec3)>,
         spots: impl IntoIterator<Item = (&'a SpotLight, Vec3, Vec3)>,
     ) -> (Globals, bool) {
-        Globals::new(Mat4::IDENTITY, Vec4::W, AmbientLight::default(), dirs, points, spots)
+        pack_with(dirs, points, spots, &mut Vec::new())
+    }
+
+    fn pack_with<'a>(
+        dirs: impl IntoIterator<Item = &'a DirectionalLight>,
+        points: impl IntoIterator<Item = (&'a PointLight, Vec3)>,
+        spots: impl IntoIterator<Item = (&'a SpotLight, Vec3, Vec3)>,
+        candidates: &mut Vec<Candidate>,
+    ) -> (Globals, bool) {
+        let points = points.into_iter().map(|(l, p)| (l, p, 0));
+        let spots = spots.into_iter().map(|(l, p, d)| (l, p, d, 0));
+        Globals::new(Mat4::IDENTITY, Vec4::W, AmbientLight::default(), dirs, points, spots, candidates)
     }
 
     #[test]
@@ -229,7 +265,7 @@ mod tests {
         let dir = DirectionalLight { direction: Vec3::new(0.0, -2.0, 0.0), color: Vec3::new(1.0, 0.5, 0.0), illuminance: 2.0, shadows: false };
         let point = PointLight { color: Vec3::ONE, intensity: 3.0, range: 7.0, shadows: false };
         let ambient = AmbientLight { color: Vec3::new(0.5, 0.5, 1.0), brightness: 0.2 };
-        let (g, dropped) = Globals::new(Mat4::IDENTITY, Vec4::new(1.0, 2.0, 3.0, 1.0), ambient, [&dir], [(&point, Vec3::X)], []);
+        let (g, dropped) = Globals::new(Mat4::IDENTITY, Vec4::new(1.0, 2.0, 3.0, 1.0), ambient, [&dir], [(&point, Vec3::X, 0)], [], &mut Vec::new());
         assert!(!dropped);
         assert_eq!(g.counts, [1, 1, 0, 0]);
         assert_eq!(g.eye, [1.0, 2.0, 3.0, 1.0]);
@@ -296,8 +332,9 @@ mod tests {
     #[test]
     fn layout_matches_shader() {
         let lights = 32 * MAX_DIRECTIONAL_LIGHTS + 32 * MAX_POINT_LIGHTS + 48 * MAX_SPOT_LIGHTS;
-        assert_eq!(size_of::<Globals>(), 64 + 16 * 4 + lights + 64 * (MAX_CASCADES + LOCAL_LAYERS) + 16 * 4);
-        assert_eq!(LOCAL_LAYERS, 7);
+        let shadows = 64 * (MAX_CASCADES + MAX_LOCAL_LAYERS) + 16 * 4 + 4 * (MAX_SPOT_LIGHTS + MAX_POINT_LIGHTS + MAX_SPOT_LIGHTS) + 16 * 2;
+        assert_eq!(size_of::<Globals>(), 64 * 2 + 16 * 4 + lights + shadows + 16 + 16 * 9 + 16 * 5 + size_of::<FogRaw>());
+        assert_eq!(size_of::<Globals>() % 16, 0);
     }
 
     #[test]
@@ -312,17 +349,25 @@ mod tests {
     }
 
     #[test]
-    fn first_shadowed_spot_and_point_cast() {
+    fn every_shadowed_spot_and_point_is_a_candidate() {
         let (spot, lit_spot) = (SpotLight::default(), SpotLight { shadows: true, ..Default::default() });
         let (point, lit_point) = (PointLight::default(), PointLight { shadows: true, ..Default::default() });
-        let (g, _) = pack(
+        let mut candidates = Vec::new();
+        let (g, _) = pack_with(
             [],
-            [(&point, Vec3::ZERO), (&point, Vec3::ZERO), (&lit_point, Vec3::ZERO), (&lit_point, Vec3::ZERO)],
-            [(&spot, Vec3::ZERO, Vec3::ZERO), (&spot, Vec3::ZERO, Vec3::NEG_Z), (&lit_spot, Vec3::ZERO, Vec3::NEG_Z), (&lit_spot, Vec3::ZERO, Vec3::NEG_Z)],
+            [(&point, Vec3::ZERO), (&lit_point, Vec3::X), (&lit_point, Vec3::Y)],
+            [(&spot, Vec3::ZERO, Vec3::ZERO), (&lit_spot, Vec3::ZERO, Vec3::ZERO), (&spot, Vec3::ZERO, Vec3::NEG_Z), (&lit_spot, Vec3::Z, Vec3::NEG_Z)],
+            &mut candidates,
         );
-        assert_eq!(g.casters[..2], [2, 3], "聚光灯第二盏（方向是 0 的不算）、点光源第三盏");
-        let (g, _) = pack([], [(&point, Vec3::ZERO)], [(&spot, Vec3::ZERO, Vec3::NEG_Z)]);
-        assert_eq!(g.casters[..2], [0, 0]);
+        let got: Vec<_> = candidates.iter().map(|c| (c.point, c.index)).collect();
+        assert_eq!(got, [(true, 1), (true, 2), (false, 1)], "方向是 0 的聚光灯不算，下标按打包以后的");
+        assert_eq!(g.counts[3], 2);
+        // 透视相机按到相机的距离，正交相机都是 0
+        let p = [(&lit_point, Vec3::new(3.0, 4.0, 0.0), 5)];
+        Globals::new(Mat4::IDENTITY, Vec4::W, AmbientLight::default(), [], p, [], &mut candidates);
+        assert_eq!((candidates[0].distance, candidates[0].priority), (5.0, 5));
+        Globals::new(Mat4::IDENTITY, Vec4::Z, AmbientLight::default(), [], p, [], &mut candidates);
+        assert_eq!(candidates[0].distance, 0.0);
         assert!(!PointLight::default().shadows);
     }
 }

@@ -54,3 +54,16 @@ test("刚通关、还没换关就进试验场：出来时去下一关；最后�
   expect(levelAfterLab(1, true, 3)).toBe(2);
   expect(levelAfterLab(2, true, 3)).toBe(0);
 });
+
+test("画质：程序天空、雾、PCSS 软阴影、三段级联带过渡；点光源和聚光灯都投影子", () => {
+  expect(scene.sky!.cube).toBe(undefined);
+  expect(scene.sky!.sun).toBe(undefined);
+  expect([scene.fog!.start, scene.fog!.end, scene.fog!.sky]).toEqual([700, 3000, 0.6]);
+  expect(scene.fog!.height!.density! > 0).toBe(true);
+  expect([scene.shadows!.filter, scene.shadows!.blend, scene.shadows!.maxLights]).toEqual(["pcss", 0.15, 2]);
+  expect(scene.camera3d!.shadowCascades).toBe(3);
+  const lights = scene.lights!;
+  expect(lights.filter((l) => l.shadows).map((l) => l.kind)).toEqual(["directional", "point", "spot"]);
+  expect(lights.find((l) => l.kind === "spot")!.shadowPriority).toBe(1);
+  expect(scene.ambient!.brightness).toBe(0.1);
+});

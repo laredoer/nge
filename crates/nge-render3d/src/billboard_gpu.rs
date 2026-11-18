@@ -11,6 +11,15 @@ use wgpu::util::DeviceExt;
 use crate::billboards::{Batch, BillboardVertex, Blend};
 
 const SHADER: &str = include_str!("billboards.wgsl");
+
+/// 和 billboards.wgsl 的 `View` 一一对应。
+#[repr(C)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+pub(crate) struct ViewRaw {
+    pub view_proj: [[f32; 4]; 4],
+    pub fog: crate::fog::FogRaw,
+    pub sh: [[f32; 4]; 9],
+}
 const INITIAL_VERTICES: u64 = 1024;
 
 pub(crate) struct BillboardGpu {
@@ -29,14 +38,14 @@ impl BillboardGpu {
             label: Some("billboard view"),
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
-                ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: NonZeroU64::new(64) },
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: NonZeroU64::new(size_of::<ViewRaw>() as u64) },
                 count: None,
             }],
         });
         let view = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("billboard view"),
-            contents: bytemuck::bytes_of(&Mat4::IDENTITY),
+            contents: bytemuck::bytes_of(&ViewRaw { view_proj: Mat4::IDENTITY.to_cols_array_2d(), ..bytemuck::Zeroable::zeroed() }),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
         let view_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -49,13 +58,13 @@ impl BillboardGpu {
             bind_group_layouts: &[Some(&view_layout), Some(texture_layout)],
             immediate_size: 0,
         });
-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("billboards"), source: wgpu::ShaderSource::Wgsl(SHADER.into()) });
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("billboards"), source: wgpu::ShaderSource::Wgsl(format!("{}{SHADER}", crate::fog::FOG_WGSL).into()) });
         let pipelines = [Blend::Alpha, Blend::Add].map(|blend| pipeline(gfx, &layout, &module, blend));
         Self { pipelines, view, view_group, vertices: vertex_buffer(device, INITIAL_VERTICES), capacity: INITIAL_VERTICES }
     }
 
-    /// 写这一帧的相机和顶点；容量不够时按两倍扩容。
-    pub fn prepare(&mut self, gfx: &Gfx, view_proj: Mat4, vertices: &[BillboardVertex]) {
+    /// 写这一帧的相机、雾和顶点；容量不够时按两倍扩容。
+    pub fn prepare(&mut self, gfx: &Gfx, view: &ViewRaw, vertices: &[BillboardVertex]) {
         if vertices.is_empty() {
             return;
         }
@@ -64,7 +73,7 @@ impl BillboardGpu {
             self.capacity = needed.next_power_of_two();
             self.vertices = vertex_buffer(&gfx.device, self.capacity);
         }
-        gfx.queue.write_buffer(&self.view, 0, bytemuck::bytes_of(&view_proj));
+        gfx.queue.write_buffer(&self.view, 0, bytemuck::bytes_of(view));
         gfx.queue.write_buffer(&self.vertices, 0, bytemuck::cast_slice(vertices));
     }
 
@@ -121,7 +130,7 @@ fn pipeline(gfx: &Gfx, layout: &wgpu::PipelineLayout, module: &wgpu::ShaderModul
         multisample: Default::default(),
         fragment: Some(wgpu::FragmentState {
             module,
-            entry_point: Some("fs"),
+            entry_point: Some(if blend == Blend::Add { "fs_add" } else { "fs" }),
             targets: &[Some(wgpu::ColorTargetState {
                 format: gfx.format,
                 blend: Some(if blend == Blend::Add { ADD } else { wgpu::BlendState::ALPHA_BLENDING }),

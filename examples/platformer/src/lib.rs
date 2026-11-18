@@ -371,7 +371,7 @@ fn build(audio: AudioPlugin) -> App {
         .add_systems(Update, (reset_on_level_start, control, control_guest, debug::debug_view, toggle_perf).chain())
         // 3D 试验场（按 G 进出）：走、平台在物理之前，相机在物理之后
         .init_resource::<lab::Lab>()
-        .add_systems(Update, (lab::walk, lab::move_platform, lab::probe).chain().after(debug::debug_view))
+        .add_systems(Update, (lab::walk, lab::move_platform, lab::probe, lab::cascade_colors).chain().after(debug::debug_view))
         .add_systems(PostUpdate, lab::follow.after(nge_physics3d::Physics3dStepped))
         .add_systems(PostUpdate, (animate_player.after(PhysicsStepped).before(nge_anim::Animated), anim_sounds.after(nge_anim::Animated)));
     app.world_mut().resource_mut::<Actions>().set_map(default_controls());

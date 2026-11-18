@@ -5,7 +5,7 @@ use glam::{EulerRot, Quat, Vec2, Vec3, Vec4};
 use nge_particles::ParticleEmitter;
 use nge_render2d::Transform2d;
 use nge_ecs::Interleave;
-use nge_render3d::{AmbientLight, Animator, Camera3d, DirectionalLight, GltfModel, Model3d, PointLight, Pose, Shadows, SpotLight, Transform3d};
+use nge_render3d::{AmbientLight, Animator, Camera3d, DirectionalLight, GltfModel, Model3d, PointLight, Pose, ShadowPriority, Shadows, SpotLight, Transform3d};
 use nge_text::{ScreenText, Text2d};
 
 use crate::attach::Attach;
@@ -160,7 +160,10 @@ pub(crate) fn sync_models(
 pub(crate) fn sync_lights(mut commands: Commands, scene: Res<Scene>, nodes: Query<(Entity, &Declared<LightNode>)>) {
     sync_list(&mut commands, &scene.lights, &nodes, |commands, entity, _, node| {
         let mut entity = commands.entity(entity);
-        entity.remove::<(DirectionalLight, PointLight, SpotLight, Transform3d)>();
+        entity.remove::<(DirectionalLight, PointLight, SpotLight, Transform3d, ShadowPriority)>();
+        if let Some(p) = node.shadow_priority {
+            entity.insert(ShadowPriority(p));
+        }
         match node.kind {
             LightKind::Directional => {
                 let d = DirectionalLight::default();

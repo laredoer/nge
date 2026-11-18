@@ -16,6 +16,7 @@ use crate::mesh::MAX_MORPH_TARGETS;
 use crate::morph::{MorphWeights, pack_weights};
 use crate::renderer::{Mesh3d, Model3d};
 use crate::shadow::CameraView;
+use crate::shadow_soft::{Candidate, ShadowPriority};
 
 /// 和着色器里的 `Draw` 一一对应。
 #[repr(C)]
@@ -73,9 +74,11 @@ type Item = (MeshId, MaterialId, Mat4, Option<(u32, u32)>, [f32; MAX_MORPH_TARGE
 #[derive(Default)]
 pub(crate) struct Scratch {
     dirs: Vec<DirectionalLight>,
-    points: Vec<(PointLight, Vec3)>,
-    spots: Vec<(SpotLight, Vec3, Vec3)>,
+    points: Vec<(PointLight, Vec3, i32)>,
+    spots: Vec<(SpotLight, Vec3, Vec3, i32)>,
     items: Vec<Item>,
+    /// 这一帧开了阴影的聚光灯、点光源（按优先级挑之前）。
+    pub candidates: Vec<Candidate>,
 }
 
 /// 没有相机实体时，按默认相机放在 (0, 0, 5) 看向原点。
@@ -89,15 +92,26 @@ pub(crate) fn globals(world: &mut World, size: Vec2, scratch: &mut Scratch) -> (
     let aspect = size.x / size.y.max(1.0);
     let view_proj = camera.view_proj(&eye, aspect);
     let ambient = *world.resource::<AmbientLight>();
-    let Scratch { dirs, points, spots, .. } = scratch;
+    let Scratch { dirs, points, spots, candidates, .. } = scratch;
+    let priority = |p: Option<&ShadowPriority>| p.map_or(0, |p| p.0);
     dirs.clear();
     dirs.extend(world.query::<&DirectionalLight>().iter(world).copied());
     points.clear();
-    points.extend(world.query::<(&PointLight, &Transform3d)>().iter(world).map(|(l, t)| (*l, t.translation)));
+    points.extend(world.query::<(&PointLight, &Transform3d, Option<&ShadowPriority>)>().iter(world).map(|(l, t, p)| (*l, t.translation, priority(p))));
     spots.clear();
-    spots.extend(world.query::<(&SpotLight, &Transform3d)>().iter(world).map(|(l, t)| (*l, t.translation, t.rotation * Vec3::NEG_Z)));
+    spots.extend(
+        world.query::<(&SpotLight, &Transform3d, Option<&ShadowPriority>)>().iter(world).map(|(l, t, p)| (*l, t.translation, t.rotation * Vec3::NEG_Z, priority(p))),
+    );
     let view = View { rotation: eye.rotation, eye: camera.eye(&eye) };
-    let globals = Globals::new(view_proj, camera.eye(&eye), ambient, dirs.iter(), points.iter().map(|(l, p)| (l, *p)), spots.iter().map(|(l, p, d)| (l, *p, *d)));
+    let globals = Globals::new(
+        view_proj,
+        camera.eye(&eye),
+        ambient,
+        dirs.iter(),
+        points.iter().map(|(l, p, k)| (l, *p, *k)),
+        spots.iter().map(|(l, p, d, k)| (l, *p, *d, *k)),
+        candidates,
+    );
     (globals, view, CameraView { camera, eye, aspect })
 }
 

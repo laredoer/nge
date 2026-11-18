@@ -102,6 +102,55 @@ fn u64_at(bytes: &[u8], at: usize) -> u64 {
 
 /// 读一个 KTX2 文件。
 pub fn parse(bytes: &[u8]) -> Result<Image, String> {
+    let (size, block, levels) = read(bytes, 1)?;
+    match block {
+        None => Image::from_rgba(size, levels.into_iter().next().expect("至少一级")),
+        Some((format, srgb)) => {
+            if !srgb {
+                log::warn!("KTX2 是 UNORM 的 {format:?}，按线性数据采样；颜色贴图请导出成 SRGB，不然会发白");
+            }
+            Ok(Image { size, rgba: Vec::new(), compressed: Some(Compressed { format, srgb, levels }), mipmaps: false })
+        }
+    }
+}
+
+/// 读一个 KTX2 立方体贴图（`faceCount = 6`）：只要第 0 级，6 个面按 +X、-X、+Y、-Y、+Z、-Z 解成 RGBA8（压缩的在 CPU 上解开）。
+pub fn parse_cube(bytes: &[u8]) -> Result<CubeImage, String> {
+    let (size, block, levels) = read(bytes, 6)?;
+    if size.x != size.y {
+        return Err(format!("KTX2 立方体贴图的面要是正方形，收到 {size}"));
+    }
+    let level = levels.into_iter().next().expect("至少一级");
+    let per_face = level.len() / 6;
+    let faces = (0..6)
+        .map(|f| {
+            let data = level[f * per_face..(f + 1) * per_face].to_vec();
+            match block {
+                None => Ok(data),
+                Some((format, srgb)) => Compressed { format, srgb, levels: vec![data] }.decode_rgba(size),
+            }
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok(CubeImage { size: size.x, faces: faces.try_into().expect("6 个面") })
+}
+
+/// 6 个面一样大的立方体贴图，RGBA8（按 sRGB 用），面的顺序 +X、-X、+Y、-Y、+Z、-Z。
+#[derive(Debug, Clone, PartialEq)]
+pub struct CubeImage {
+    pub size: u32,
+    pub faces: [Vec<u8>; 6],
+}
+
+impl crate::Asset for CubeImage {
+    fn decode(bytes: Vec<u8>, _ctx: &crate::LoadContext) -> Result<Self, String> {
+        parse_cube(&bytes)
+    }
+}
+
+/// 读头和每一级（立方体的每级里 `faces` 个面连着放）。
+type Levels = (UVec2, Option<(BlockFormat, bool)>, Vec<Vec<u8>>);
+
+fn read(bytes: &[u8], want_faces: u32) -> Result<Levels, String> {
     if bytes.len() < HEADER || bytes[..12] != MAGIC {
         return Err("不是 KTX2 文件".into());
     }
@@ -116,8 +165,12 @@ pub fn parse(bytes: &[u8]) -> Result<Image, String> {
     if layers != 0 {
         return Err(format!("KTX2 是数组贴图（layerCount {layers}），不支持"));
     }
-    if faces != 1 {
-        return Err(format!("KTX2 是立方体贴图（faceCount {faces}），不支持"));
+    if faces != want_faces {
+        return Err(if want_faces == 1 {
+            format!("KTX2 是立方体贴图（faceCount {faces}），不能当普通贴图用；天空用 Sky 的立方体贴图")
+        } else {
+            format!("KTX2 不是立方体贴图（faceCount {faces}，要 6）")
+        });
     }
     let size = UVec2::new(width, height);
     if size.min_element() == 0 || size.max_element() > MAX_TEXTURE_SIDE {
@@ -145,13 +198,8 @@ pub fn parse(bytes: &[u8]) -> Result<Image, String> {
         .map(|level| {
             let at = HEADER + level * LEVEL_INDEX;
             let (offset, length) = (u64_at(bytes, at), u64_at(bytes, at + 8));
-            let need = match format {
-                Some(f) => f.level_bytes(level_size(size, level)),
-                None => {
-                    let s = level_size(size, level);
-                    (s.x * s.y * 4) as usize
-                }
-            };
+            let s = level_size(size, level);
+            let need = format.map_or((s.x * s.y * 4) as usize, |f| f.level_bytes(s)) * want_faces as usize;
             if length != need as u64 {
                 return Err(format!("KTX2 第 {level} 级有 {length} 字节，应该是 {need}"));
             }
@@ -159,15 +207,25 @@ pub fn parse(bytes: &[u8]) -> Result<Image, String> {
             Ok(bytes[offset as usize..end as usize].to_vec())
         })
         .collect::<Result<Vec<_>, String>>()?;
-    match block {
-        None => Image::from_rgba(size, levels.into_iter().next().expect("至少一级")),
-        Some((format, srgb)) => {
-            if !srgb {
-                log::warn!("KTX2 是 UNORM 的 {format:?}，按线性数据采样；颜色贴图请导出成 SRGB，不然会发白");
-            }
-            Ok(Image { size, rgba: Vec::new(), compressed: Some(Compressed { format, srgb, levels }), mipmaps: false })
-        }
+    Ok((size, block, levels))
+}
+
+/// 写一个 RGBA8（sRGB）、只有一级的 KTX2 立方体贴图（工具和测试用）。面的长度不对时 panic。
+pub fn write_cube(size: u32, faces: &[Vec<u8>; 6]) -> Vec<u8> {
+    let mut out = write(None, true, UVec2::splat(size), &[faces.concat()[..(size * size * 4) as usize].to_vec()]);
+    for f in faces {
+        assert_eq!(f.len(), (size * size * 4) as usize, "面的长度不对");
     }
+    // faceCount = 6，第 0 级的长度换成 6 个面的
+    out[36..40].copy_from_slice(&6u32.to_le_bytes());
+    let data = faces.concat();
+    let at = HEADER;
+    let offset = u64_at(&out, at) as usize;
+    out.truncate(offset);
+    out.extend(&data);
+    out[at + 8..at + 16].copy_from_slice(&(data.len() as u64).to_le_bytes());
+    out[at + 16..at + 24].copy_from_slice(&(data.len() as u64).to_le_bytes());
+    out
 }
 
 /// 写一个引擎能读的 KTX2（工具和测试用）。每级数据按规范对齐、从最小的一级往大排；
@@ -297,6 +355,29 @@ mod tests {
     }
 
     #[test]
+    fn cube_maps_round_trip_and_split_into_faces() {
+        let faces: [Vec<u8>; 6] = std::array::from_fn(|f| (0..2 * 2 * 4).map(|i| (f * 16 + i) as u8).collect());
+        let bytes = write_cube(2, &faces);
+        let cube = parse_cube(&bytes).unwrap();
+        assert_eq!((cube.size, &cube.faces), (2, &faces));
+        assert!(parse(&bytes).unwrap_err().contains("立方体"), "普通贴图不收立方体");
+        let mut wide = bytes.clone();
+        header_patch(&mut wide, 20, 4);
+        assert!(parse_cube(&wide).is_err(), "面要是正方形");
+        // 压缩的面在 CPU 上解开
+        let block = astc_solid([0xFFFF, 0, 0, 0xFFFF]);
+        let mut astc = write(Some(BlockFormat::Astc4x4), true, UVec2::splat(4), &[block.repeat(6)[..16].to_vec()]);
+        header_patch(&mut astc, 36, 6);
+        let at = u64_at(&astc, HEADER) as usize;
+        astc.truncate(at);
+        astc.extend(block.repeat(6));
+        astc[HEADER + 8..HEADER + 16].copy_from_slice(&96u64.to_le_bytes());
+        let cube = parse_cube(&astc).unwrap();
+        assert_eq!(cube.size, 4);
+        assert!(cube.faces.iter().all(|f| f.len() == 64 && f[..4] == [255, 0, 0, 255]), "{:?}", &cube.faces[0][..4]);
+    }
+
+    #[test]
     fn rgba8_becomes_a_plain_image() {
         let size = UVec2::new(2, 1);
         let image = parse(&write(None, true, size, &[vec![1, 2, 3, 4, 5, 6, 7, 8], vec![9, 9, 9, 9]])).unwrap();
@@ -324,6 +405,7 @@ mod tests {
         assert!(patched(28, 1).contains("3D"));
         assert!(patched(32, 2).contains("数组"));
         assert!(patched(36, 6).contains("立方体"));
+        assert!(parse_cube(&good).unwrap_err().contains("不是立方体"));
         assert!(patched(12, 999).contains("999"));
         assert!(patched(20, 0).contains("尺寸"));
         assert!(patched(20, MAX_TEXTURE_SIDE + 1).contains("尺寸"));

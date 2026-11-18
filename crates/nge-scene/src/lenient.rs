@@ -2,6 +2,7 @@
 //!
 //! 通用规则：`Scene` 的每个列表逐项解析、每个可选项单独解析，写错的那一项 warn 后跳过（可选项当没写）；
 //! 节点里嵌着的列表、可选项也一样。会超出范围的数（碰撞分组）收宽的类型再查范围，超出的 warn 后按默认处理。
+//! `sky`、`fog`、`shadows`（见 docs/render3d-quality.md）和灯的 `shadowPriority` 再细一层：逐字段解析，写错的字段 warn 后当没写，别的字段照用。
 
 use std::collections::HashSet;
 use std::sync::Mutex;
@@ -98,8 +99,29 @@ lenient!(
     tile_animated => "tilemaps.animated", tile_materials => "tilemaps.materials", instances => "instances";
     background => "background", camera => "camera", camera3d => "camera3d", ambient => "ambient", physics => "physics",
     physics3d => "physics3d", lighting => "lighting", audio => "audio", time_scale => "timeScale", perf => "perf",
-    net => "net", bounds => "camera.bounds", behavior => "sprites.behavior", transition => "transition"
+    net => "net", bounds => "camera.bounds", behavior => "sprites.behavior", transition => "transition",
+    sky => "sky", fog => "fog", shadows => "shadows", shadow_priority => "lights.shadowPriority"
 );
+
+/// 逐字段解析的对象：`get` 一个字段，写错的 warn 后当没写。
+pub(crate) struct Fields {
+    name: &'static str,
+    map: serde_json::Map<String, Value>,
+}
+
+impl Fields {
+    /// 不是对象时报错（整项当没写）。
+    pub(crate) fn new(name: &'static str, value: Value) -> Result<Self, String> {
+        match value {
+            Value::Object(map) => Ok(Self { name, map }),
+            other => Err(format!("要是对象，收到 {other}")),
+        }
+    }
+
+    pub(crate) fn get<T: DeserializeOwned>(&mut self, key: &str) -> Option<T> {
+        optional(&format!("{}.{key}", self.name), self.map.remove(key).unwrap_or(Value::Null))
+    }
+}
 
 /// 着色器表：值不是字符串的那一个跳过。
 pub(crate) fn shaders<'de, D: Deserializer<'de>>(d: D) -> Result<std::collections::HashMap<String, String>, D::Error> {

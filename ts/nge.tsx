@@ -585,8 +585,70 @@ export interface LightNode {
   angle?: number;
   /** 聚光灯内锥的半角（度），默认外锥的 80%；里面全亮，和外锥之间平滑过渡。 */
   innerAngle?: number;
-  /** 投影子：方向光、聚光灯、点光源各只算第一盏开着的，见 docs/3d-more.md、docs/render3d-more.md。 */
+  /** 投影子，见 docs/3d-more.md、docs/render3d-more.md；聚光灯、点光源最多 `shadows.maxLights` 盏投（见 docs/render3d-quality.md）。 */
   shadows?: boolean;
+  /** 投影子的聚光灯、点光源超过上限时先挑大的，一样大挑离相机近的；没挑上的照常照明。 */
+  shadowPriority?: number;
+}
+
+/** 天空和环境光照（见 docs/render3d-quality.md）。写了 `cube` 用立方体贴图，否则是程序天空。 */
+export interface SkyNode {
+  /** 一张 KTX2 立方体贴图，或者 +X、-X、+Y、-Y、+Z、-Z 六张图（从里面朝那个方向看到的画面）。 */
+  cube?: string | [string, string, string, string, string, string];
+  top?: string;
+  horizon?: string;
+  ground?: string;
+  /** 阳光照射的方向（和方向光一样）；不写跟第一盏方向光，[0, 0, 0] 是没有太阳。 */
+  sun?: [number, number, number];
+  sunColor?: string;
+  /** 太阳盘的半角（度），默认 1.5。 */
+  sunSize?: number;
+  /** 环境漫反射、镜面反射强度，默认 1。 */
+  diffuse?: number;
+  specular?: number;
+  /** 画天空，默认 true；false 时只拿来照明。 */
+  background?: boolean;
+}
+
+/** 雾。不写 `mode` 时，写了 `start` / `end` 是线性、写了 `density` 是指数。 */
+export interface FogNode {
+  mode?: "none" | "linear" | "exp" | "exp2";
+  /** 线性雾：`start` 以内没有雾，到 `end` 最浓；默认 0、100。 */
+  start?: number;
+  end?: number;
+  /** 指数雾的密度，默认 0.02。 */
+  density?: number;
+  color?: string;
+  /** 0–1：雾色往视线方向的天空色混多少。 */
+  sky?: number;
+  /** 高度雾：越低越浓，`density × e^(-falloff × (高度 - base))`。 */
+  height?: { base?: number; falloff?: number; density?: number };
+  /** 最浓多少（0–1），默认 1。 */
+  max?: number;
+}
+
+/** 阴影的过滤和投影灯数；分几段、覆盖多远在 `camera3d` 里写。 */
+export interface ShadowsNode {
+  /** 默认 "pcf"（3×3）；"poisson" 泊松盘；"pcss" 方向光按挡板远近变虚（聚光灯、点光源按泊松盘）。 */
+  filter?: "pcf" | "poisson" | "pcss";
+  /** 泊松盘半径（阴影图像素），默认 1.5。 */
+  softness?: number;
+  /** PCSS 的太阳角直径（度），默认 1，最大 10；越大半影越宽。 */
+  sunSize?: number;
+  /** 深度偏移（光空间深度），默认 0。 */
+  bias?: number;
+  /** 法线偏移（阴影图像素），默认 1.5。 */
+  normalBias?: number;
+  /** 聚光灯、点光源最多几盏投影子，默认 2，最多 4。 */
+  maxLights?: number;
+  /** 级联交界的过渡带占一段的多少（0–0.5），默认 0.1。 */
+  blend?: number;
+  /** 按级联染色：红、绿、蓝、黄。 */
+  debugCascades?: boolean;
+  /** 方向光阴影图的边长，默认 2048。 */
+  size?: number;
+  /** 聚光灯、点光源阴影图的边长，默认 512。 */
+  localSize?: number;
 }
 
 /**
@@ -652,6 +714,9 @@ export interface Scene {
   camera3d?: Camera3dNode;
   lights?: LightNode[];
   ambient?: { color?: string; brightness?: number };
+  sky?: SkyNode;
+  fog?: FogNode;
+  shadows?: ShadowsNode;
   /** 重力（point / s²），默认 [0, -981]。 */
   physics?: { gravity?: [number, number] };
   /** 3D 重力，默认 [0, -981, 0]。 */

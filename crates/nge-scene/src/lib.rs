@@ -28,6 +28,7 @@ mod physics3d;
 mod prefab;
 mod preload;
 mod protocol;
+mod quality3d;
 #[cfg_attr(not(feature = "physics3d"), allow(dead_code))]
 mod query3d;
 mod resolve;
@@ -171,6 +172,7 @@ impl Plugin for ScenePlugin {
             particles3d::sync_emitters3d,
             sync_nodes::sync_lights,
             sync_nodes::sync_camera3d,
+            quality3d::sync_quality3d,
             physics::sync_gravity,
             joints::sync_joints,
             audio::sync_audio,

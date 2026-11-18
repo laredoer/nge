@@ -1,5 +1,5 @@
-//! 阴影：方向光（一张图框住所有物体，或按相机视锥分段的级联）、一盏聚光灯、一盏点光源的六面。
-//! 每层画一遍只写深度，主 pass 里 3×3 PCF 采样（见 docs/3d-more.md、docs/render3d-more.md）。
+//! 阴影：方向光（一张图框住所有物体，或按相机视锥分段的级联）、几盏聚光灯、点光源的六面。
+//! 每层画一遍只写深度，主 pass 里按 `filter` 采样：3×3 PCF、泊松盘、PCSS（见 docs/3d-more.md、docs/render3d-more.md、docs/render3d-quality.md）。
 
 use std::num::NonZeroU64;
 
@@ -9,7 +9,8 @@ use glam::{Mat4, Vec3};
 use nge_core::{Gfx, wgpu};
 
 use crate::camera::{Camera3d, Transform3d};
-use crate::light::{Globals, LOCAL_LAYERS};
+use crate::light::Globals;
+use crate::shadow_soft::{Candidate, MAX_LOCAL_LAYERS, depth_range, pick};
 use crate::shadow_views::{MAX_CASCADES, cascade_matrix, intersects, light_view, point_matrices, slice_corners, splits, spot_matrix};
 
 /// 阴影的设置。
@@ -26,11 +27,52 @@ pub struct Shadows {
     pub distance: f32,
     /// 聚光灯、点光源阴影图边长（像素），会被限制在 [64, 4096]。
     pub local_size: u32,
+    /// 影子边缘怎么过滤。
+    pub filter: ShadowFilter,
+    /// 泊松盘的半径（阴影图像素），限制在 [0.5, 16]。
+    pub softness: f32,
+    /// PCSS：太阳的角直径（度），越大半影越宽，限制在 [0, 10]。
+    pub sun_size: f32,
+    /// 比较前从片元深度里减掉多少（阴影图的 0–1 深度），治阴影痘；太大影子会和物体脱开（漏光）。
+    pub bias: f32,
+    /// 沿法线往外推几个阴影图像素，限制在 [0, 8]。
+    pub normal_bias: f32,
+    /// 聚光灯、点光源最多几盏投影子（按 [`ShadowPriority`](crate::ShadowPriority) 挑），限制在 [0, 4]；多的照常照明。
+    pub max_lights: u32,
+    /// 相邻级联交界前多长一段（占这一段的比例）里混合，限制在 [0, 0.5]；最后一段在末尾淡出。
+    pub blend: f32,
+    /// 按级联给画面染色：红、绿、蓝、黄。
+    pub debug_cascades: bool,
+}
+
+/// 影子边缘的过滤。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ShadowFilter {
+    /// 3×3 PCF。
+    #[default]
+    Pcf,
+    /// 16 点的采样盘，每个像素转一个角度。
+    Poisson,
+    /// 方向光按遮挡距离算半影宽（PCSS）；聚光灯、点光源按 `Poisson`。
+    Pcss,
 }
 
 impl Default for Shadows {
     fn default() -> Self {
-        Self { size: 2048, cascades: 1, distance: 50.0, local_size: 512 }
+        Self {
+            size: 2048,
+            cascades: 1,
+            distance: 50.0,
+            local_size: 512,
+            filter: ShadowFilter::Pcf,
+            softness: 1.5,
+            sun_size: 1.0,
+            bias: 0.0,
+            normal_bias: NORMAL_OFFSET,
+            max_lights: 2,
+            blend: 0.1,
+            debug_cascades: false,
+        }
     }
 }
 
@@ -50,13 +92,45 @@ impl Shadows {
     pub(crate) fn clamped_local_size(&self) -> u32 {
         self.local_size.clamp(64, 4096)
     }
+
+    /// 算坏了的数（NaN、无穷）按默认值，其余限制在范围里。
+    fn finite(v: f32, default: f32, lo: f32, hi: f32) -> f32 {
+        if v.is_finite() { v.clamp(lo, hi) } else { default }
+    }
+
+    pub(crate) fn clamped_softness(&self) -> f32 {
+        Self::finite(self.softness, 1.5, 0.5, MAX_PENUMBRA)
+    }
+
+    pub(crate) fn clamped_normal_bias(&self) -> f32 {
+        Self::finite(self.normal_bias, NORMAL_OFFSET, 0.0, 8.0)
+    }
+
+    pub(crate) fn clamped_bias(&self) -> f32 {
+        Self::finite(self.bias, 0.0, -0.1, 0.1)
+    }
+
+    pub(crate) fn clamped_blend(&self) -> f32 {
+        Self::finite(self.blend, 0.1, 0.0, 0.5)
+    }
+
+    pub(crate) fn clamped_max_lights(&self) -> usize {
+        (self.max_lights as usize).min(crate::shadow_soft::MAX_SHADOWED_LOCAL)
+    }
+
+    /// PCSS：太阳角直径的 tan。
+    pub(crate) fn sun_tan(&self) -> f32 {
+        Self::finite(self.sun_size, 1.0, 0.0, 10.0).to_radians().tan()
+    }
 }
 
 pub(crate) const SHADOW_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
-/// 光矩阵的槽位：方向光 4 段，接着聚光灯 1 个、点光源 6 面。
-const SLOTS: usize = MAX_CASCADES + LOCAL_LAYERS;
-/// 法线方向往外推几个像素，斜面上不长阴影痘。
+/// 光矩阵的槽位：方向光 4 段，接着聚光灯、点光源的各层。
+const SLOTS: usize = MAX_CASCADES + MAX_LOCAL_LAYERS;
+/// 法线方向往外推几个像素（默认），斜面上不长阴影痘。
 const NORMAL_OFFSET: f32 = 1.5;
+/// PCSS 半影、泊松盘半径最大多少像素。
+pub(crate) const MAX_PENUMBRA: f32 = 16.0;
 
 /// 光的方向 + 所有物体的世界包围盒 → 光的正交矩阵（世界 → 裁剪空间，深度 0–1）和一个阴影图像素在世界里多大。
 /// 没有物体、方向是 0 时是 `None`。
@@ -188,7 +262,7 @@ pub(crate) struct ShadowGpu {
     pub sampler: wgpu::Sampler,
     /// 方向光：`size × size × 段数`。
     pub dir: ShadowMap,
-    /// 聚光灯和点光源：`local_size × local_size × 7`。
+    /// 聚光灯和点光源：`local_size × local_size × 这一帧用到的层数`。
     pub local: ShadowMap,
     passes: Vec<Pass>,
     /// 这一帧方向光每段的结果，每帧清空复用。
@@ -268,19 +342,23 @@ impl ShadowGpu {
             bytes: Vec::new(),
             sampler,
             dir: ShadowMap::new(gfx, "shadow map", 1, 1),
-            local: ShadowMap::new(gfx, "local shadow map", 1, LOCAL_LAYERS as u32),
+            local: ShadowMap::new(gfx, "local shadow map", 1, 1),
             passes: Vec::new(),
             cascades: Vec::new(),
         }
     }
 
     /// 算出这一帧每层的光矩阵写进 `globals`，记下要画的层；拟合不了（没有东西、灯的参数坏了）的灯关掉阴影。
-    /// 返回阴影图有没有重建（主 pass 的 bind group 要跟着换）。
-    pub fn prepare(&mut self, gfx: &Gfx, globals: &mut Globals, view: &CameraView, casters: &[Caster], settings: Shadows) -> bool {
+    /// 聚光灯、点光源从 `candidates` 里按优先级挑最多 `max_lights` 盏。返回阴影图有没有重建（主 pass 的 bind group 要跟着换）。
+    pub fn prepare(&mut self, gfx: &Gfx, globals: &mut Globals, view: &CameraView, casters: &[Caster], candidates: &[Candidate], settings: Shadows) -> bool {
         self.passes.clear();
         let mut rebuilt = false;
         let forward = view.eye.rotation * Vec3::NEG_Z;
         globals.view_forward = forward.extend(-forward.dot(view.eye.translation)).into();
+        globals.casters[0] = settings.filter as u32;
+        globals.casters[1] = u32::from(settings.debug_cascades);
+        globals.soft = [settings.clamped_softness(), settings.clamped_blend(), settings.clamped_bias(), MAX_PENUMBRA];
+        let normal_bias = settings.clamped_normal_bias();
 
         let index = globals.counts[2] as usize;
         let mut cascades = std::mem::take(&mut self.cascades);
@@ -296,7 +374,9 @@ impl ShadowGpu {
             for (i, (m, texel, end)) in cascades.iter().enumerate() {
                 globals.cascades[i] = m.to_cols_array_2d();
                 globals.splits[i] = *end;
-                globals.cascade_offset[i] = texel * NORMAL_OFFSET;
+                globals.cascade_offset[i] = texel * normal_bias;
+                // PCSS：深度差 × 深度范围 = 世界里的距离，× tan(太阳角直径) = 半影宽，再换成像素
+                globals.pcss[i] = depth_range(*m) * settings.sun_tan() / texel;
                 self.passes.push(Pass { local: false, layer: i, slot: i, view_proj: *m });
             }
             globals.casters[2] = cascades.len() as u32;
@@ -305,37 +385,34 @@ impl ShadowGpu {
         self.cascades = cascades;
 
         let local_size = settings.clamped_local_size();
-        // 透视的图一个像素在世界里多大 = 到灯的（沿视线的）距离 × 2 tan(半张角) / 边长
-        let spot = (globals.casters[0] as usize).checked_sub(1).filter(|_| !casters.is_empty()).and_then(|i| {
-            let s = globals.spots[i];
-            let outer = s.direction[3].clamp(-1.0, 1.0).acos();
-            spot_matrix(Vec3::from_slice(&s.position_range[..3]), Vec3::from_slice(&s.direction[..3]), outer, s.position_range[3]).map(|m| (m, outer))
-        });
-        match spot {
-            Some((m, outer)) => {
-                globals.locals[0] = m.to_cols_array_2d();
-                globals.shadow[2] = 2.0 * outer.tan() / local_size as f32 * NORMAL_OFFSET;
-                self.passes.push(Pass { local: true, layer: 0, slot: MAX_CASCADES, view_proj: m });
-            }
-            None => globals.casters[0] = 0,
-        }
-        let point = (globals.casters[1] as usize).checked_sub(1).filter(|_| !casters.is_empty()).and_then(|i| {
-            let p = globals.points[i];
-            point_matrices(Vec3::from_slice(&p.position_range[..3]), p.position_range[3])
-        });
-        match point {
-            Some(faces) => {
-                for (i, m) in faces.into_iter().enumerate() {
-                    globals.locals[1 + i] = m.to_cols_array_2d();
-                    self.passes.push(Pass { local: true, layer: 1 + i, slot: MAX_CASCADES + 1 + i, view_proj: m });
+        let mut layers = 0;
+        if !casters.is_empty() {
+            for (c, first) in pick(candidates, settings.clamped_max_lights()) {
+                let light = candidates[c];
+                if light.point {
+                    let p = globals.points[light.index];
+                    let Some(faces) = point_matrices(Vec3::from_slice(&p.position_range[..3]), p.position_range[3]) else { continue };
+                    for (i, m) in faces.into_iter().enumerate() {
+                        self.local_layer(globals, first + i, m);
+                    }
+                    globals.point_layers[light.index] = first as u32 + 1;
+                    layers = layers.max(first + 6);
+                } else {
+                    let s = globals.spots[light.index];
+                    let outer = s.direction[3].clamp(-1.0, 1.0).acos();
+                    let Some(m) = spot_matrix(Vec3::from_slice(&s.position_range[..3]), Vec3::from_slice(&s.direction[..3]), outer, s.position_range[3]) else { continue };
+                    self.local_layer(globals, first, m);
+                    // 透视的图一个像素在世界里多大 = 到灯的（沿视线的）距离 × 2 tan(半张角) / 边长
+                    globals.spot_offset[light.index] = 2.0 * outer.tan() / local_size as f32 * normal_bias;
+                    globals.spot_layers[light.index] = first as u32 + 1;
+                    layers = layers.max(first + 1);
                 }
-                globals.shadow[3] = 2.0 / local_size as f32 * NORMAL_OFFSET;
             }
-            None => globals.casters[1] = 0,
         }
-        if globals.casters[0] != 0 || globals.casters[1] != 0 {
-            rebuilt |= self.local.resize(gfx, "local shadow map", local_size, LOCAL_LAYERS as u32);
+        if layers > 0 {
+            rebuilt |= self.local.resize(gfx, "local shadow map", local_size, layers as u32);
             globals.shadow[1] = 1.0 / local_size as f32;
+            globals.shadow[3] = 2.0 / local_size as f32 * normal_bias;
         }
 
         if !self.passes.is_empty() {
@@ -348,6 +425,12 @@ impl ShadowGpu {
             gfx.queue.write_buffer(&self.light, 0, &self.bytes);
         }
         rebuilt
+    }
+
+    /// 局部光阴影图的第 `layer` 层用矩阵 `m`。
+    fn local_layer(&mut self, globals: &mut Globals, layer: usize, m: Mat4) {
+        globals.locals[layer] = m.to_cols_array_2d();
+        self.passes.push(Pass { local: true, layer, slot: MAX_CASCADES + layer, view_proj: m });
     }
 
     /// 每层画一遍（半透明的不在 `casters` 里），只画包围盒和这一层视野相交的。`bind` 绑定第 `i` 个 draw 并提交。
@@ -408,11 +491,17 @@ mod tests {
     fn settings_are_clamped() {
         let d = Shadows::default();
         assert_eq!((d.size, d.cascades, d.distance, d.local_size), (2048, 1, 50.0, 512));
-        let low = Shadows { size: 1, cascades: 0, distance: -3.0, local_size: 2 };
+        let low = Shadows { size: 1, cascades: 0, distance: -3.0, local_size: 2, ..d };
         assert_eq!((low.clamped_size(), low.clamped_cascades(), low.clamped_distance(), low.clamped_local_size()), (64, 1, 50.0, 64));
-        let high = Shadows { size: 100_000, cascades: 9, distance: 300.0, local_size: 100_000 };
+        let high = Shadows { size: 100_000, cascades: 9, distance: 300.0, local_size: 100_000, ..d };
         assert_eq!((high.clamped_size(), high.clamped_cascades(), high.clamped_distance(), high.clamped_local_size()), (4096, 4, 300.0, 4096));
         assert_eq!(Shadows { distance: f32::NAN, ..d }.clamped_distance(), 50.0);
+        assert_eq!((d.filter, d.softness, d.normal_bias, d.max_lights, d.blend, d.debug_cascades), (ShadowFilter::Pcf, 1.5, 1.5, 2, 0.1, false));
+        let wild = Shadows { softness: 99.0, normal_bias: -1.0, bias: 3.0, blend: 2.0, max_lights: 9, sun_size: 90.0, ..d };
+        assert_eq!((wild.clamped_softness(), wild.clamped_normal_bias(), wild.clamped_bias(), wild.clamped_blend(), wild.clamped_max_lights()), (16.0, 0.0, 0.1, 0.5, 4));
+        assert!((wild.sun_tan() - 10f32.to_radians().tan()).abs() < 1e-6);
+        let nan = Shadows { softness: f32::NAN, normal_bias: f32::INFINITY, bias: f32::NAN, blend: f32::NAN, sun_size: f32::NAN, ..d };
+        assert_eq!((nan.clamped_softness(), nan.clamped_normal_bias(), nan.clamped_bias(), nan.clamped_blend()), (1.5, 1.5, 0.0, 0.1), "算坏了的按默认");
     }
 
     /// 正交相机每段的横截面都是整屏，分段没用：按一段画，框住所有物体。

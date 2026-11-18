@@ -7,17 +7,22 @@ mod billboard_gpu;
 mod billboards;
 mod camera;
 mod collect;
+mod fog;
 mod gizmos;
 mod gltf_load;
 mod gltf_morph;
 mod graph_pose;
+mod ibl;
 mod light;
 mod line_gpu;
 mod mesh;
 mod morph;
 mod renderer;
 mod shadow;
+mod shadow_soft;
 mod shadow_views;
+mod sky;
+mod sky_gpu;
 
 pub use animation::{Animation, Channel, Interpolation, Node, Property, Skeleton, Skin, Trs};
 pub use animator::{Animator, Fade, Pose};
@@ -32,7 +37,11 @@ pub use light::{AmbientLight, DirectionalLight, MAX_DIRECTIONAL_LIGHTS, MAX_POIN
 pub use mesh::{Influence, MAX_MORPH_TARGETS, Mesh, MorphTarget, Vertex};
 pub use morph::MorphWeights;
 pub use renderer::{Mesh3d, Model3d, Render3dPlugin};
-pub use shadow::Shadows;
+pub use fog::{Fog, FogMode, HeightFog};
+pub use nge_assets::CubeImage;
+pub use shadow::{ShadowFilter, Shadows};
+pub use shadow_soft::ShadowPriority;
+pub use sky::{Sky, SkyGradient, SkySource};
 
 pub mod prelude {
     pub use crate::{

@@ -240,6 +240,9 @@ pub struct LightNode {
     /// 投影子（见 docs/3d-more.md、docs/render3d-more.md）。
     #[serde(default)]
     pub shadows: bool,
+    /// 投影子的灯超过 `shadows.maxLights` 时先挑大的（见 docs/render3d-quality.md）。
+    #[serde(default, rename = "shadowPriority", deserialize_with = "crate::lenient::shadow_priority")]
+    pub shadow_priority: Option<i32>,
 }
 
 fn down() -> [f32; 3] {

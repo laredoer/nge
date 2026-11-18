@@ -20,7 +20,10 @@ use crate::gltf_load::{Gltf, GltfModels, resolve_gltf_models};
 use crate::light::{AmbientLight, Globals};
 use crate::mesh::{Influence, Vertex};
 use crate::morph::MorphBuffer;
+use crate::fog::{FOG_WGSL, Fog};
 use crate::shadow::{Caster, ShadowGpu, Shadows};
+use crate::sky::Sky;
+use crate::sky_gpu::SkyGpu;
 
 const SHADER: &str = include_str!("shader.wgsl");
 /// 和精灵共用（混排时精灵读它，遮罩写它的模板）。
@@ -59,6 +62,8 @@ impl Plugin for Render3dPlugin {
             .add_systems(PreUpdate, crate::gizmos::clear_gizmos);
         // 一插上状态机就有 Pose：第一帧就按状态机的姿势画（见 docs/anim-graph.md）
         app.world_mut().register_required_components::<nge_anim::AnimGraph, crate::animator::Pose>();
+        // 天空、雾（见 docs/render3d-quality.md）
+        app.init_asset::<nge_assets::CubeImage>().init_resource::<Sky>().init_resource::<Fog>();
         app.insert_resource(Assets3d::default()).init_resource::<AmbientLight>().init_resource::<Shadows>().add_renderer(MeshRenderer::default());
     }
 }
@@ -82,6 +87,7 @@ struct Gpu {
     globals_layout: wgpu::BindGroupLayout,
     globals_group: wgpu::BindGroup,
     shadow: ShadowGpu,
+    sky: SkyGpu,
     draw_layout: wgpu::BindGroupLayout,
     draws: wgpu::Buffer,
     draws_group: wgpu::BindGroup,
@@ -150,7 +156,6 @@ impl Renderer for MeshRenderer {
         for id in std::iter::once(ImageId::WHITE).chain(textures) {
             gpu.cache_texture(gfx, images, id);
         }
-        gpu.billboards.prepare(gfx, view_proj, &self.billboard_vertices);
         gpu.lines.prepare(gfx, view_proj, world.resource::<Gizmos3d>());
         gpu.write_draws(gfx, &self.draws, &mut self.bytes, &self.joints);
         // 半透明的不投影子；一个算坏了的包围盒不该让整个场景的影子消失
@@ -161,9 +166,15 @@ impl Renderer for MeshRenderer {
                 self.casters.push(Caster { index, skinned: d.joints.is_some(), bounds });
             }
         }
-        if gpu.shadow.prepare(gfx, &mut globals.0, &camera, &self.casters, *world.resource::<Shadows>()) {
-            gpu.globals_group = globals_group(&gfx.device, &gpu.globals_layout, &gpu.globals, &gpu.shadow);
+        let mut rebuilt = gpu.shadow.prepare(gfx, &mut globals.0, &camera, &self.casters, &self.scratch.candidates, *world.resource::<Shadows>());
+        rebuilt |= gpu.sky.prepare(gfx, world.resource::<Sky>(), world.resource::<Assets<Image>>(), world.resource::<Assets<nge_assets::CubeImage>>(), &mut globals.0);
+        if rebuilt {
+            gpu.globals_group = globals_group(&gfx.device, &gpu.globals_layout, &gpu.globals, &gpu.shadow, &gpu.sky);
         }
+        let forward = camera.eye.rotation * Vec3::NEG_Z;
+        globals.0.fog = world.resource::<Fog>().raw(camera.eye.translation, camera.camera.ortho_height().is_none(), forward, gpu.sky.has_sky());
+        let billboard_view = crate::billboard_gpu::ViewRaw { view_proj: globals.0.view_proj, fog: globals.0.fog, sh: globals.0.sh };
+        gpu.billboards.prepare(gfx, &billboard_view, &self.billboard_vertices);
         gfx.queue.write_buffer(&gpu.globals, 0, bytemuck::bytes_of(&globals.0));
         let g = &*gpu;
         let shadow_draws = g.shadow.draw(encoder, &self.casters, |pass, i| {
@@ -207,7 +218,12 @@ impl Renderer for MeshRenderer {
             ..Default::default()
         });
         pass.set_bind_group(0, &gpu.globals_group, &[]);
+        // 不透明的、天空、半透明的：天空只盖住深度还是 1 的地方，半透明的叠在天空上
+        let opaque = self.draws.iter().take_while(|d| !d.blend).count();
         for (i, draw) in self.draws.iter().enumerate() {
+            if i == opaque {
+                gpu.sky.draw(&mut pass, &globals.0);
+            }
             let mesh = &gpu.meshes[draw.mesh.0 as usize];
             let texture = gpu.texture(draw.texture);
             pass.set_pipeline(&gpu.pipelines[draw.pipeline]);
@@ -215,6 +231,9 @@ impl Renderer for MeshRenderer {
             pass.set_bind_group(2, texture, &[]);
             mesh.bind(&mut pass, draw);
             pass.draw_indexed(0..mesh.count, 0, 0..1);
+        }
+        if opaque == self.draws.len() {
+            gpu.sky.draw(&mut pass, &globals.0);
         }
         // 透明的方片和带子画在所有网格后面
         gpu.billboards.draw(&mut pass, &self.billboard_batches, |id| gpu.texture(id));
@@ -261,6 +280,12 @@ impl Gpu {
             ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Depth, view_dimension: wgpu::TextureViewDimension::D2Array, multisampled: false },
             count: None,
         };
+        let cube = |binding| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: true }, view_dimension: wgpu::TextureViewDimension::Cube, multisampled: false },
+            count: None,
+        };
         let globals_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("mesh globals"),
             entries: &[
@@ -273,6 +298,20 @@ impl Gpu {
                     count: None,
                 },
                 shadow_map(3),
+                cube(4),
+                cube(5),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: true }, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 7,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
             ],
         });
         let draw_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -322,7 +361,7 @@ impl Gpu {
         });
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("meshes"),
-            source: wgpu::ShaderSource::Wgsl(SHADER.into()),
+            source: wgpu::ShaderSource::Wgsl(shader_source().into()),
         });
         let culls = [Some(wgpu::Face::Back), Some(wgpu::Face::Front), None];
         let pipelines = [false, true]
@@ -338,7 +377,8 @@ impl Gpu {
             mapped_at_creation: false,
         });
         let shadow = ShadowGpu::new(gfx, &draw_layout);
-        let globals_group = globals_group(device, &globals_layout, &globals, &shadow);
+        let sky = SkyGpu::new(gfx, &globals_layout, &module);
+        let globals_group = globals_group(device, &globals_layout, &globals, &shadow, &sky);
         let align = u64::from(device.limits().min_uniform_buffer_offset_alignment);
         let stride = (size_of::<DrawRaw>() as u64).div_ceil(align) * align;
         let joints = joint_buffer(device, INITIAL_JOINTS);
@@ -360,6 +400,7 @@ impl Gpu {
             globals_layout,
             globals_group,
             shadow,
+            sky,
             draw_layout,
             draws,
             draws_group,
@@ -485,8 +526,13 @@ impl Gpu {
     }
 }
 
-/// 主 pass 的全局 bind group：uniform 加两张阴影图。阴影图换了要重建。
-fn globals_group(device: &wgpu::Device, layout: &wgpu::BindGroupLayout, globals: &wgpu::Buffer, shadow: &ShadowGpu) -> wgpu::BindGroup {
+/// 着色器源码：前面拼上雾，采样盘换成 Rust 算的。
+fn shader_source() -> String {
+    format!("{FOG_WGSL}{SHADER}").replace("POISSON_DISK", &crate::shadow_soft::disk_wgsl())
+}
+
+/// 主 pass 的全局 bind group：uniform、两张阴影图、环境和天空立方体、BRDF LUT。阴影图、天空换了要重建。
+fn globals_group(device: &wgpu::Device, layout: &wgpu::BindGroupLayout, globals: &wgpu::Buffer, shadow: &ShadowGpu, sky: &SkyGpu) -> wgpu::BindGroup {
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("mesh globals"),
         layout,
@@ -495,6 +541,10 @@ fn globals_group(device: &wgpu::Device, layout: &wgpu::BindGroupLayout, globals:
             wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&shadow.dir.array) },
             wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&shadow.sampler) },
             wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&shadow.local.array) },
+            wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&sky.env_view) },
+            wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&sky.sky_view) },
+            wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&sky.lut_view) },
+            wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::Sampler(&sky.sampler) },
         ],
     })
 }

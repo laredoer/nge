@@ -1195,6 +1195,9 @@ fn cascades_shadow_near_and_far_casters_but_not_past_the_distance() {
     }
 }
 
+#[path = "offscreen/quality.rs"]
+mod quality;
+
 #[path = "offscreen/morph.rs"]
 mod morph;
 
