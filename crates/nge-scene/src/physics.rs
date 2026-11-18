@@ -50,6 +50,8 @@ pub struct BodyNode {
     pub friction: f32,
     pub density: f32,
     pub sensor: bool,
+    /// 单向平台：只挡从上面（转过的话按刚体自己的上方）来的（见 docs/gameplay2d.md）。
+    pub one_way: bool,
     pub velocity: [f32; 2],
     /// 度 / 秒。
     pub angular_velocity: f32,
@@ -78,6 +80,7 @@ impl Default for BodyNode {
             friction: 0.5,
             density: 1.0,
             sensor: false,
+            one_way: false,
             velocity: [0.0; 2],
             angular_velocity: 0.0,
             collide: false,
@@ -160,6 +163,7 @@ fn collider(body: &BodyNode, size: Option<Vec2>, scale: f32) -> Option<Collider>
     c.friction = body.friction;
     c.density = body.density;
     c.sensor = body.sensor;
+    c.one_way = body.one_way;
     c.events = body.collide;
     c.group = crate::lenient::group("2D 刚体", body.group);
     Some(c)

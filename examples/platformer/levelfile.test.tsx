@@ -2,7 +2,8 @@
 import { expect, test } from "nsh/test";
 import { checkTypes, formatLevel, parseLevel, type Entity, type LevelFile } from "../../ts/level";
 import { TILESET, TYPES } from "./catalog";
-import { build, fileLevel, fromFile, LEVELS, MEADOW, TILE, toFile, type Built } from "./levels";
+import stairs from "../editor/levels/stairs.json";
+import { build, fileLevel, fromFile, LEVELS, MEADOW, TILE, toFile, WALKER, walkerBehavior, type Built } from "./levels";
 
 const near = (a: number, b: number) => Math.abs(a - b) < 0.01;
 const round = (v: number) => Math.round(v * 100) / 100;
@@ -45,20 +46,30 @@ test("草原导出再转回来，和代码生成的关卡逐项一样", () => {
   sameBuilt(fromOk(toFile(MEADOW)), build(MEADOW));
 });
 
-test("第二关石阶从文件读：72 列、16 个金币、3 个敌人、2 个幽灵、2 块移动平台、铁链和箱子", () => {
+test("第二关石阶从文件读：72 列、16 个金币、2 个敌人、1 个走地怪、2 个幽灵、2 块移动平台、铁链和箱子", () => {
   const stairs = LEVELS[1];
   expect(stairs.name).toBe("石阶");
   expect(stairs.night).toBeFalsy();
   const b = stairs.built;
   expect(b.right).toBe(72 * TILE);
-  expect([b.coins.length, b.enemies.length, b.ghosts.length, b.lifts.length]).toEqual([16, 3, 2, 2]);
+  expect([b.coins.length, b.enemies.length, b.walkers.length, b.ghosts.length, b.lifts.length]).toEqual([16, 2, 1, 2, 2]);
   expect(b.swing.sprites.length).toBeGreaterThan(0);
   expect([b.crate.body.x, b.goal.x]).toEqual([66.5 * TILE, 68 * TILE]);
   // 敌人的 id 还是 enemy- 开头（Rust 按这个认）
-  for (const e of [...b.enemies, ...b.ghosts]) expect(e.id.startsWith("enemy-")).toBe(true);
+  for (const e of [...b.enemies, ...b.ghosts, ...b.walkers]) expect(e.id.startsWith("enemy-")).toBe(true);
+  expect(b.walkers[0]).toEqual({ id: "enemy-walker-0", x: 1200, y: 12, patrol: 3 });
   expect(b.tilemaps[0].friction).toBe(0);
   // 相机的上边和以前一样
   expect(LEVELS.map((l) => l.built.top)).toEqual([448, 448, 448]);
+});
+
+test("第二关有单向木板、斜坡、水和火把：规则从图集抄过来，转成瓦片地图时带上", () => {
+  const map = LEVELS[1].built.tilemaps[0];
+  expect([map.oneWay, map.slopes, map.animated]).toEqual([TILESET.oneWay, TILESET.slopes, TILESET.animated]);
+  const count = (frame: number) => map.data.filter((f) => f === frame).length;
+  expect([count(3), count(4), count(6), count(7), count(10), count(13)]).toEqual([8, 3, 2, 2, 3, 3]);
+  // 用到的帧号都在图集里
+  for (const f of map.data) expect(f < TILESET.grid[0] * TILESET.grid[1]).toBe(true);
 });
 
 const minimal = (entities: Entity[]): LevelFile => ({
@@ -68,6 +79,47 @@ const minimal = (entities: Entity[]): LevelFile => ({
   night: false,
   tiles: [{ id: "level", texture: TILESET.texture, grid: TILESET.grid, tile: 32, cols: 10, rows: 2, x: 0, y: 32, solid: TILESET.solid, data: [Array(10).fill(-1), Array(10).fill(1)] }],
   entities: [{ id: "c", type: "crate", x: 100, y: 20 }, { id: "g", type: "goal", x: 280, y: 40 }, ...entities],
+});
+
+test("走地怪的行为树：看见角色就追、3 秒最多喊一次，看不见了在出生点和右边几格之间巡逻", () => {
+  const b = walkerBehavior(1200, 12, 3);
+  expect([b.speed, b.jump]).toEqual([WALKER.speed, WALKER.jump]);
+  expect(b.tree).toEqual({
+    type: "selector",
+    reactive: true,
+    children: [
+      {
+        type: "sequence",
+        reactive: true,
+        children: [
+          { type: "see", target: "player", range: WALKER.sight },
+          { type: "invert", child: { type: "cooldown", seconds: 3, child: { type: "invert", child: { type: "emit", name: "spotted" } } } },
+          { type: "chase", target: "player" },
+        ],
+      },
+      {
+        type: "repeat",
+        child: { type: "sequence", reactive: false, children: [{ type: "goto", x: 1200, y: 12 }, { type: "wait", seconds: 0.6 }, { type: "goto", x: 1296, y: 12 }, { type: "wait", seconds: 0.6 }] },
+      },
+    ],
+  });
+  // 每次生成的一样：TSX 每帧声明同一棵树，Rust 那边不重置
+  expect(walkerBehavior(1200, 12, 3)).toEqual(b);
+  // 走地怪跳得比角色高（640）：够得着三格高的平台
+  expect((WALKER.jump * WALKER.jump) / 3600 / TILE).toBeGreaterThan(3 / 0.85);
+});
+
+test("走地怪在第二关的地面上；关卡文件写成文本再读回来，走地怪和瓦片规则都还在", () => {
+  const w = LEVELS[1].built.walkers[0];
+  const map = LEVELS[1].built.tilemaps[0];
+  const col = Math.floor((w.x - (map.x ?? 0)) / map.tile);
+  expect(map.data[14 * map.cols + col]).toBe(1);
+  const parsed = parseLevel(stairs);
+  if (!parsed.ok) throw new Error(parsed.errors.join("；"));
+  const again = fromFile(JSON.parse(formatLevel(parsed.level)));
+  if (!again.ok) throw new Error(again.errors.join("；"));
+  expect(again.built.walkers).toEqual(LEVELS[1].built.walkers);
+  expect(again.built.tilemaps).toEqual(LEVELS[1].built.tilemaps);
 });
 
 test("实体按类型转：出生点、移动平台（宽、往上走）、斜坡、灯、模型；没写的瓦片摩擦按 0", () => {

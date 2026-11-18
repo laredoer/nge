@@ -20,6 +20,7 @@ export const TYPES: Record<string, EntityType> = {
   coin: { label: "金币", size: [14, 14], color: "#ffd93d", props: [] },
   enemy: { label: "敌人", size: [24, 24], color: "#9b59b6", props: [{ key: "patrol", label: "巡逻格数", kind: "number", min: 1, max: 20, default: 3 }] },
   ghost: { label: "幽灵", size: [22, 22], color: "#c8d2ff", props: [] },
+  walker: { label: "走地怪", size: [24, 24], color: "#d35f5f", props: [{ key: "patrol", label: "巡逻格数", kind: "number", min: 1, max: 20, default: 3 }] },
   lift: {
     label: "移动平台",
     size: [64, 16],
@@ -66,16 +67,41 @@ export const TYPES: Record<string, EntityType> = {
 /** 物件库里的顺序。 */
 export const TYPE_ORDER = Object.keys(TYPES);
 
-/** 瓦片图集：和 levels.ts 的 TILE、tiles.png 一致。 */
+/** 瓦片图集：和 levels.ts 的 TILE、tiles.png（tools/make_tiles.py）一致。 */
 export const TILESET = {
   texture: "asset:/@platformer/tiles.png",
-  grid: [3, 1] as [number, number],
+  grid: [16, 1] as [number, number],
   tile: 32,
   solid: [0, 1, 2],
+  /** 单向木板：从下面跳得上去，按下加跳穿下去。 */
+  oneWay: [3],
+  /** 45° 上坡、下坡，22.5° 上坡（两格一组）、下坡（见 docs/gameplay2d.md）。 */
+  slopes: [
+    { frame: 4, left: 0, right: 1 },
+    { frame: 5, left: 1, right: 0 },
+    { frame: 6, left: 0, right: 0.5 },
+    { frame: 7, left: 0.5, right: 1 },
+    { frame: 8, left: 1, right: 0.5 },
+    { frame: 9, left: 0.5, right: 0 },
+  ],
+  /** 水（10 → 11 → 12）、火把（13 ↔ 14）：只是画面，不挡人。 */
+  animated: [
+    { frame: 10, frames: [10, 11, 12], fps: 4 },
+    { frame: 13, frames: [13, 14], fps: 6 },
+  ],
   frames: [
     { frame: 0, label: "石块", color: "#7d7f86" },
     { frame: 1, label: "草地", color: "#5fae4f" },
     { frame: 2, label: "木板", color: "#b0804a" },
+    { frame: 3, label: "单向板", color: "#c89a5c" },
+    { frame: 4, label: "上坡", color: "#7a5638" },
+    { frame: 5, label: "下坡", color: "#7a5638" },
+    { frame: 6, label: "缓坡上1", color: "#7a5638" },
+    { frame: 7, label: "缓坡上2", color: "#7a5638" },
+    { frame: 8, label: "缓坡下1", color: "#7a5638" },
+    { frame: 9, label: "缓坡下2", color: "#7a5638" },
+    { frame: 10, label: "水", color: "#3c82d2" },
+    { frame: 13, label: "火把", color: "#f07828" },
   ],
 };
 

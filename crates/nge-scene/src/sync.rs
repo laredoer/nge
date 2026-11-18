@@ -122,6 +122,7 @@ pub(crate) fn sync_sprites(
         };
         crate::effects::apply_sprite(&mut entity, node, &mut assets);
         crate::ai::apply_chase(&mut entity, before, node);
+        crate::behavior::apply_behavior(&mut entity, before, node);
         // 状态机管帧时不用 anim（见 docs/anim-graph.md）
         let graph = crate::anim_graph::apply_graph(&mut entity, &node.id, before.map(|b| (&b.anim_graph, &b.anim_params)), &node.anim_graph, &node.anim_params, &mut graphs);
         if graph {

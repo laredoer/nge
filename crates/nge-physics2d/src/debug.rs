@@ -48,6 +48,13 @@ pub(crate) fn draw(
         };
         match shape {
             Shape::Rect(size) => gizmos.rect_outline(center, size, rotation, WIDTH, color),
+            Shape::Slope { .. } => {
+                let turn = Vec2::from_angle(rotation);
+                let corners = shape.slope_corners().expect("是斜坡").map(|p| center + turn.rotate(p));
+                for i in 0..4 {
+                    gizmos.line(corners[i], corners[(i + 1) % 4], WIDTH, color);
+                }
+            }
             Shape::Circle(r) => {
                 gizmos.circle(center, r.abs(), WIDTH, color);
                 // 一条半径看得出转了多少

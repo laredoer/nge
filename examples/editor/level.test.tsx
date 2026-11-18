@@ -128,6 +128,37 @@ test("新建的空关卡：一层全空的瓦片，读回来合法", () => {
   expect(parseLevel(formatLevel(level))).toEqual({ ok: true, level });
 });
 
+test("瓦片层的单向平台、斜坡、动画瓦片、材质：可选，读回来一样，转成瓦片地图时带上（docs/gameplay2d.md）", () => {
+  const rules = {
+    oneWay: [2],
+    slopes: [{ frame: 1, left: 0, right: 0.5 }],
+    animated: [{ frame: 0, frames: [0, 1], fps: 4 }],
+    materials: [{ frame: 1, friction: 0.05 }, { frame: 0, restitution: 0.5 }],
+  };
+  const level = sample();
+  level.tiles[0] = { ...level.tiles[0], ...rules };
+  expect(parseLevel(formatLevel(level))).toEqual({ ok: true, level });
+  expect(toTilemap(level.tiles[0])).toEqual({ id: "level", texture: "asset:/@g/tiles.png", grid: [3, 1], tile: 32, cols: 3, x: 0, y: 32, solid: [0, 1], ...rules, data: [-1, 2, -1, 1, 1, 0] });
+  // 新建关卡时从图集抄
+  const empty = emptyLevel({ name: "", cols: 2, rows: 1, tile: 32, texture: "t", grid: [3, 1], solid: [0], ...rules });
+  expect(empty.tiles[0].slopes).toEqual(rules.slopes);
+  expect(parseLevel(formatLevel(empty))).toEqual({ ok: true, level: empty });
+});
+
+test("瓦片规则写错了报出哪一项：帧号超出图集、坡高不在 0 … 1、两头都是 0、动画没有帧、fps 不是正数、材质是负数", () => {
+  const bad = (rules: object) => {
+    const level = sample();
+    return errorsOf({ ...level, tiles: [{ ...level.tiles[0], ...rules }] });
+  };
+  expect(bad({ oneWay: [3] })).toEqual(["tiles[0].oneWay[0] 要是 0 到 2 的整数"]);
+  expect(bad({ slopes: [{ frame: 1, left: 0, right: 2 }] })).toEqual(["tiles[0].slopes[0].right 要是 0 到 1 的数"]);
+  expect(bad({ slopes: [{ frame: 1, left: 0, right: 0 }] })).toEqual(["tiles[0].slopes[0] 的 left、right 不能都是 0"]);
+  expect(bad({ animated: [{ frame: 0, frames: [], fps: 4 }] })).toEqual(["tiles[0].animated[0].frames 不能是空的"]);
+  expect(bad({ animated: [{ frame: 0, frames: [1], fps: 0 }] })[0]).toContain("tiles[0].animated[0].fps");
+  expect(bad({ materials: [{ frame: 0, friction: -1 }] })).toEqual(["tiles[0].materials[0].friction 要是不小于 0 的数"]);
+  expect(bad({ slopes: "坡" })).toEqual(["tiles[0].slopes 要是数组"]);
+});
+
 test("瓦片层转成引擎的瓦片地图：data 摊平成一维", () => {
   const map = toTilemap(sample().tiles[0]);
   expect(map).toEqual({ id: "level", texture: "asset:/@g/tiles.png", grid: [3, 1], tile: 32, cols: 3, x: 0, y: 32, solid: [0, 1], data: [-1, 2, -1, 1, 1, 0] });

@@ -61,6 +61,7 @@ pub(crate) fn tap(
     camera2d: Query<&Camera2d>,
     models: Query<(&SceneId, &Transform3d, &Model3d), With<Tappable>>,
     camera: Query<(&Camera3d, &Transform3d), With<SceneCamera>>,
+    maps: Query<(&SceneId, &crate::tilemap::TileTap)>,
     mut outbox: ResMut<Outbox>,
 ) {
     for p in input.pointers_pressed() {
@@ -76,7 +77,7 @@ pub(crate) fn tap(
                 .map(|(id, ..)| id)
         };
         if let Some(id) = top_sprite(false) {
-            outbox.send(TAP, &Tap { id: id.0.clone(), x: p.world.x, y: p.world.y, point: None });
+            outbox.send(TAP, &Tap { id: id.0.clone(), x: p.world.x, y: p.world.y, ..Tap::default() });
             continue;
         }
         let ray = view_proj(&camera, &screen).and_then(|vp| Ray::through(vp, screen.size, p.screen));
@@ -87,10 +88,14 @@ pub(crate) fn tap(
                 .min_by(|a, b| a.1.total_cmp(&b.1))
                 .map(|(id, t)| (id, ray.at(t).to_array()))
         });
+        // 写了 tap 的瓦片地图：z 大的先，报点中的格子
+        let tile = maps.iter().filter_map(|(id, m)| Some((id, m.z, m.at(p.world, &cam2d)?))).max_by(|a, b| a.1.total_cmp(&b.1));
         if let Some((id, point)) = hit {
-            outbox.send(TAP, &Tap { id: id.0.clone(), x: p.world.x, y: p.world.y, point: Some(point) });
+            outbox.send(TAP, &Tap { id: id.0.clone(), x: p.world.x, y: p.world.y, point: Some(point), ..Tap::default() });
+        } else if let Some((id, _, (cell, frame))) = tile {
+            outbox.send(TAP, &Tap { id: id.0.clone(), x: p.world.x, y: p.world.y, cell: Some(cell), frame: Some(frame), ..Tap::default() });
         } else if let Some(id) = top_sprite(true) {
-            outbox.send(TAP, &Tap { id: id.0.clone(), x: p.world.x, y: p.world.y, point: None });
+            outbox.send(TAP, &Tap { id: id.0.clone(), x: p.world.x, y: p.world.y, ..Tap::default() });
         }
     }
 }
@@ -279,7 +284,7 @@ mod tests {
         app.command("touch", &json!({ "phase": "start", "id": 1, "x": 50, "y": 50 }));
         let events = frame(&mut app, None);
         let taps: Vec<Tap> = events.iter().filter(|(n, _)| n == "tap").map(|(_, d)| TAP.decode(d).unwrap()).collect();
-        assert_eq!(taps, [Tap { id: "high".into(), x: 0.0, y: 0.0, point: None }]);
+        assert_eq!(taps, [Tap { id: "high".into(), x: 0.0, y: 0.0, ..Tap::default() }]);
 
         app.command("touch", &json!({ "phase": "end", "id": 1, "x": 50, "y": 50 }));
         app.command("touch", &json!({ "phase": "start", "id": 2, "x": 0, "y": 0 }));
@@ -299,7 +304,7 @@ mod tests {
         ] })));
         // 屏幕 y=20 在中心上方 30 point
         app.command("touch", &json!({ "phase": "start", "id": 1, "x": 50, "y": 20 }));
-        assert_eq!(taps(&frame(&mut app, None)), [Tap { id: "up".into(), x: 0.0, y: 30.0, point: None }]);
+        assert_eq!(taps(&frame(&mut app, None)), [Tap { id: "up".into(), x: 0.0, y: 30.0, ..Tap::default() }]);
     }
 
     #[test]
@@ -309,7 +314,7 @@ mod tests {
         // 相机和点击同一帧到达：zoom 2 时屏幕右移 20 point = 世界右移 10
         app.prop("scene", Some(&json!({ "camera": { "x": 100, "zoom": 2 }, "sprites": [{ "id": "a", "w": 10, "x": 110, "tap": true }] })));
         app.command("touch", &json!({ "phase": "start", "id": 1, "x": 70, "y": 50 }));
-        assert_eq!(taps(&frame(&mut app, None)), [Tap { id: "a".into(), x: 110.0, y: 0.0, point: None }]);
+        assert_eq!(taps(&frame(&mut app, None)), [Tap { id: "a".into(), x: 110.0, y: 0.0, ..Tap::default() }]);
     }
 
     /// 场景里放一个已经展开的立方体模型（边长 2）。

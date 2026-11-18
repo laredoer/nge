@@ -10,6 +10,7 @@ mod anim_graph;
 mod attach;
 mod audio;
 mod behave;
+mod behavior;
 mod camera;
 #[cfg(not(all(feature = "physics3d", feature = "ai", feature = "net")))]
 mod disabled;
@@ -30,7 +31,10 @@ mod query3d;
 mod resolve;
 mod sync;
 mod sync_nodes;
+mod tile_slopes;
 mod tilemap;
+#[cfg(test)]
+mod tilemap_tests;
 mod world_ui;
 
 use std::collections::HashMap;
@@ -45,6 +49,7 @@ use nge_render3d::{Assets3d, Camera3d, Transform3d};
 use nge_text::TextPlugin;
 
 pub use ai::{CHASE, ChaseEvent, ChaseNode};
+pub use behavior::{BEHAVIOR, BLACKBOARD, BehaviorEvent, BehaviorNode, BlackboardSet, BtNode};
 pub use world_ui::{BarNode, BubbleNode, TYPED, Typed};
 pub use anim_graph::{ANIM_EVENT, ANIM_SET, AnimEventOut, AnimParams, AnimSet, sprite_frame};
 pub use anim::{ANIM_END, AnimEnd, AnimNode, Ease, FrameAnimation, TWEEN, TWEEN_END, Tween, TweenCommand, TweenEnd, TweenProps, Tweens};
@@ -138,6 +143,8 @@ impl Plugin for ScenePlugin {
         physics3d::register(app);
         #[cfg(feature = "ai")]
         ai::register(app);
+        #[cfg(feature = "ai")]
+        behavior::register(app);
         #[cfg(feature = "net")]
         net::register(app);
         #[cfg(not(all(feature = "physics3d", feature = "ai", feature = "net")))]

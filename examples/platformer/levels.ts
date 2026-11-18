@@ -1,5 +1,5 @@
 // 平台跳跃的关卡数据，以及按数据生成地图、金币、移动平台、敌人。
-import type { AnimGraphDef, Emitter3dNode, JointNode, LightNode, ModelNode, SpriteNode, TilemapNode, TrailNode, Tween } from "../../ts/nge";
+import { bt, type AnimGraphDef, type BehaviorNode, type Emitter3dNode, type JointNode, type LightNode, type ModelNode, type SpriteNode, type TilemapNode, type TrailNode, type Tween } from "../../ts/nge";
 import { checkTypes, LEVEL_FORMAT, LEVEL_VERSION, parseLevel, toTilemap, type Entity, type LevelFile } from "../../ts/level";
 import { tiled, type TiledMap } from "../../ts/tiled";
 import { propOf, sizeOf, TILESET, TYPES } from "./catalog";
@@ -80,6 +80,8 @@ export interface Built {
   enemies: { id: string; x: number; y: number; to: { x: number } }[];
   /** 幽灵：id 以 enemy- 开头（踩它、碰它和别的敌人一样），会飞，追角色。 */
   ghosts: { id: string; x: number; y: number }[];
+  /** 走地面的敌人：行为树巡逻，看见角色就沿地面追（跳上平台、落下来），追丢了回去巡逻（见 docs/gameplay2d.md）。 */
+  walkers: { id: string; x: number; y: number; patrol: number }[];
   /** 斜坡：转过角度的固定刚体。 */
   ramps: SpriteNode[];
   /** 一摞 3D 箱子摆在哪（x），没有是 null；见 `towerAt`。 */
@@ -124,7 +126,7 @@ export function build(level: Level): Built {
   const tilemap: TilemapNode = {
     id: "level",
     texture: "asset:/@platformer/tiles.png",
-    grid: [3, 1],
+    grid: [16, 1],
     tile: TILE,
     cols,
     x: 0,
@@ -149,11 +151,32 @@ export function build(level: Level): Built {
   const ramps = (level.ramps ?? []).map(([a, b], i) => rampOf(`ramp-${i}`, a, b));
   const tower = level.tower === undefined ? null : (level.tower + 0.5) * TILE;
   const jelly = level.jelly === undefined ? null : (level.jelly + 0.5) * TILE;
-  return { tilemaps: [tilemap], coins, lifts, enemies, ghosts, ramps, tower, jelly, crate: crateAt(level.crate * TILE, 56), swing, goal: goalAt((cols - 4) * TILE, 40), right: cols * TILE, top: (ROWS - 1) * TILE, ...EXTRAS };
+  return { tilemaps: [tilemap], coins, lifts, enemies, ghosts, walkers: [], ramps, tower, jelly, crate: crateAt(level.crate * TILE, 56), swing, goal: goalAt((cols - 4) * TILE, 40), right: cols * TILE, top: (ROWS - 1) * TILE, ...EXTRAS };
 }
 
 /** 地面上的敌人的 y（中心）。 */
 const ENEMY_Y = 12;
+
+/** 走地面的敌人：比角色慢，跳得比角色高一点（够得着三格高的平台），看得见 8 格。 */
+export const WALKER = { speed: 110, jump: 720, sight: 8 * TILE };
+
+/**
+ * 走地面的敌人的行为树：看见角色（没墙挡着）就追，第一次看见时发 `spotted`（3 秒最多一次）；
+ * 看不见了回到出生点，在出生点和右边 `patrol` 格之间来回走，两头各停一下。
+ */
+export function walkerBehavior(x: number, y: number, patrol: number): BehaviorNode {
+  return {
+    speed: WALKER.speed,
+    jump: WALKER.jump,
+    tree: bt.selector(
+      [
+        bt.sequence([bt.see("player", WALKER.sight), bt.invert(bt.cooldown(3, bt.invert(bt.emit("spotted")))), bt.chase("player")], true),
+        bt.repeat(bt.sequence([bt.goto(x, y), bt.wait(0.6), bt.goto(x + patrol * TILE, y), bt.wait(0.6)])),
+      ],
+      true,
+    ),
+  };
+}
 
 /** 厚 16 的斜坡，顶面从 `a` 到 `b`。 */
 export function rampOf(id: string, [ax, ay]: number[], [bx, by]: number[]): SpriteNode {
@@ -362,6 +385,7 @@ export function fromTiled(map: TiledMap): Built {
     }),
     enemies: of("enemy").map((o, i) => ({ id: `enemy-${i}`, x: o.x, y: ENEMY_Y, to: { x: o.x + num(o, "patrol", 3) * TILE } })),
     ghosts: of("ghost").map((o, i) => ({ id: `enemy-ghost-${i}`, x: o.x, y: o.y })),
+    walkers: of("walker").map((o, i) => ({ id: `enemy-walker-${i}`, x: o.x, y: o.y, patrol: num(o, "patrol", 3) })),
     ramps: [],
     tower: null,
     jelly: null,
@@ -422,6 +446,7 @@ export function fromFile(file: unknown): { ok: true; built: Built; name: string;
     lifts,
     enemies: of("enemy").map((e, i) => ({ id: `enemy-${i}`, x: e.x, y: e.y, to: { x: e.x + propOf<number>(e, "patrol") * TILE } })),
     ghosts: of("ghost").map((e, i) => ({ id: `enemy-ghost-${i}`, x: e.x, y: e.y })),
+    walkers: of("walker").map((e, i) => ({ id: `enemy-walker-${i}`, x: e.x, y: e.y, patrol: propOf<number>(e, "patrol") })),
     ramps,
     tower: tower === undefined ? null : tower.x,
     jelly: jelly === undefined ? null : jelly.x,
@@ -454,6 +479,7 @@ export function toFile(level: Level): LevelFile {
     }),
     ...b.enemies.map((e) => at("enemy", e.x, e.y, { props: { patrol: (e.to.x - e.x) / TILE } })),
     ...b.ghosts.map((g) => at("ghost", g.x, g.y)),
+    ...b.walkers.map((w) => at("walker", w.x, w.y, { props: { patrol: w.patrol } })),
     ...(level.ramps ?? []).map(([[ax, ay], [bx, by]]) => {
       const [left, right] = ax <= bx ? [[ax, ay], [bx, by]] : [[bx, by], [ax, ay]];
       return at("ramp", (ax + bx) / 2, (ay + by) / 2, { w: right[0] - left[0], h: Math.abs(by - ay), props: { down: right[1] < left[1] } });
@@ -480,7 +506,7 @@ function fallbackLevel(): Built {
   const cols = 20;
   const data = Array.from({ length: ROWS * cols }, (_, i) => (i >= (ROWS - 1) * cols ? TILESET.frames[1].frame : -1));
   const tilemaps: TilemapNode[] = [{ id: "level", texture: TILESET.texture, grid: TILESET.grid, tile: TILE, cols, x: 0, y: (ROWS - 1) * TILE, data, solid: TILESET.solid, friction: 0 }];
-  return { tilemaps, coins: [], lifts: [], enemies: [], ghosts: [], ramps: [], tower: null, jelly: null, crate: crateAt(10 * TILE, 56), swing: NO_SWING, goal: goalAt((cols - 4) * TILE, 40), right: cols * TILE, top: (ROWS - 1) * TILE, ...EXTRAS };
+  return { tilemaps, coins: [], lifts: [], enemies: [], ghosts: [], walkers: [], ramps: [], tower: null, jelly: null, crate: crateAt(10 * TILE, 56), swing: NO_SWING, goal: goalAt((cols - 4) * TILE, 40), right: cols * TILE, top: (ROWS - 1) * TILE, ...EXTRAS };
 }
 
 /** 游戏里的一关：关卡文件读不了时（编辑器存了个没做完的）不崩，换成一段平地并报错。 */

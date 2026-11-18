@@ -34,7 +34,33 @@ export interface TileLayer {
   data: number[][];
   friction?: number;
   z?: number;
+  /** 单向平台、斜坡、动画瓦片、每种瓦片的材质的帧号（同 `TilemapNode`，见 docs/gameplay2d.md）。 */
+  oneWay?: number[];
+  slopes?: TileSlope[];
+  animated?: TileAnimation[];
+  materials?: TileMaterial[];
 }
+
+export interface TileSlope {
+  frame: number;
+  left: number;
+  right: number;
+}
+
+export interface TileAnimation {
+  frame: number;
+  frames: number[];
+  fps: number;
+}
+
+export interface TileMaterial {
+  frame: number;
+  friction?: number;
+  restitution?: number;
+}
+
+/** 瓦片层里按帧号的规则（新建关卡时从图集抄过来）。 */
+export type TileRules = Pick<TileLayer, "oneWay" | "slopes" | "animated" | "materials">;
 
 /** 实体：(x, y) 是中心的世界坐标；`w` / `h` 不写用类型的默认尺寸。 */
 export interface Entity {
@@ -166,7 +192,43 @@ function layerOf(raw: unknown, path: string, errors: Errors): TileLayer {
   };
   if (o.friction !== undefined) layer.friction = positiveOrZero(o.friction, `${path}.friction`, errors);
   if (o.z !== undefined) layer.z = coord(o.z, `${path}.z`, errors);
+  Object.assign(layer, rulesOf(o, path, frames, errors));
   return layer;
+}
+
+/** 单向平台、斜坡、动画瓦片、材质：可选，写了就逐项查。 */
+function rulesOf(o: Record<string, unknown>, path: string, frames: number, errors: Errors): TileRules {
+  const frame = (v: unknown, p: string) => int(v, p, errors, 0, frames - 1);
+  const items = (key: string) => list(o[key], `${path}.${key}`, errors).map((raw, i) => [isObject(raw) ? raw : (errors.add(`${path}.${key}[${i}] 要是对象`), {}), `${path}.${key}[${i}]`] as const);
+  const height = (v: unknown, p: string) => {
+    if (!finite(v) || v < 0 || v > 1) errors.add(`${p} 要是 0 到 1 的数`);
+    return finite(v) ? v : 0;
+  };
+  const rules: TileRules = {};
+  if (o.oneWay !== undefined) rules.oneWay = list(o.oneWay, `${path}.oneWay`, errors).map((f, i) => frame(f, `${path}.oneWay[${i}]`));
+  if (o.slopes !== undefined) {
+    rules.slopes = items("slopes").map(([s, p]) => {
+      const slope = { frame: frame(s.frame, `${p}.frame`), left: height(s.left, `${p}.left`), right: height(s.right, `${p}.right`) };
+      if (slope.left === 0 && slope.right === 0) errors.add(`${p} 的 left、right 不能都是 0`);
+      return slope;
+    });
+  }
+  if (o.animated !== undefined) {
+    rules.animated = items("animated").map(([a, p]) => {
+      const seq = list(a.frames, `${p}.frames`, errors).map((f, i) => frame(f, `${p}.frames[${i}]`));
+      if (seq.length === 0) errors.add(`${p}.frames 不能是空的`);
+      return { frame: frame(a.frame, `${p}.frame`), frames: seq, fps: positive(a.fps, `${p}.fps`, errors) };
+    });
+  }
+  if (o.materials !== undefined) {
+    rules.materials = items("materials").map(([m, p]) => {
+      const material: TileMaterial = { frame: frame(m.frame, `${p}.frame`) };
+      if (m.friction !== undefined) material.friction = positiveOrZero(m.friction, `${p}.friction`, errors);
+      if (m.restitution !== undefined) material.restitution = positiveOrZero(m.restitution, `${p}.restitution`, errors);
+      return material;
+    });
+  }
+  return rules;
 }
 
 function flag(v: unknown, path: string, errors: Errors): boolean {
@@ -344,13 +406,15 @@ export function formatLevel(level: LevelFile): string {
 }
 
 /** 新建关卡：一层全空的瓦片，底行的底边在 y = 0 往下一格（底行的顶边在 y = 0）。 */
-export function emptyLevel(o: { name: string; cols: number; rows: number; tile: number; texture: string; grid: [number, number]; solid: number[] }): LevelFile {
+export function emptyLevel(o: { name: string; cols: number; rows: number; tile: number; texture: string; grid: [number, number]; solid: number[] } & TileRules): LevelFile {
+  const rules: TileRules = {};
+  for (const key of ["oneWay", "slopes", "animated", "materials"] as const) if (o[key] !== undefined) Object.assign(rules, { [key]: o[key] });
   return {
     format: LEVEL_FORMAT,
     version: LEVEL_VERSION,
     name: o.name,
     night: false,
-    tiles: [{ id: "level", texture: o.texture, grid: o.grid, tile: o.tile, cols: o.cols, rows: o.rows, x: 0, y: (o.rows - 1) * o.tile, solid: o.solid, data: Array.from({ length: o.rows }, () => Array(o.cols).fill(-1)) }],
+    tiles: [{ id: "level", texture: o.texture, grid: o.grid, tile: o.tile, cols: o.cols, rows: o.rows, x: 0, y: (o.rows - 1) * o.tile, solid: o.solid, ...rules, data: Array.from({ length: o.rows }, () => Array(o.cols).fill(-1)) }],
     entities: [],
   };
 }

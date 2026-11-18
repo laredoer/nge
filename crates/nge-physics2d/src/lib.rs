@@ -4,6 +4,7 @@
 mod character;
 mod debug;
 mod joint;
+mod oneway;
 mod world;
 
 pub use character::{CONTACT_GAP, Character};
@@ -30,6 +31,19 @@ pub enum Shape {
     Rect(Vec2),
     /// 半径。
     Circle(f32),
+    /// 斜坡（瓦片地图的斜坡格）：宽高 `size` 的格子里，底边平、两边竖直，顶边从左边高 `left` 到右边高 `right`（都是格高的几分之几，0 … 1）。
+    Slope { size: Vec2, left: f32, right: f32 },
+}
+
+impl Shape {
+    /// 斜坡的四个角（以中心为原点，逆时针）；别的形状是 `None`。
+    pub fn slope_corners(&self) -> Option<[Vec2; 4]> {
+        let Shape::Slope { size, left, right } = *self else { return None };
+        let size = size.abs();
+        let h = size / 2.0;
+        let top = |f: f32| -h.y + f.clamp(0.0, 1.0) * size.y;
+        Some([Vec2::new(-h.x, -h.y), Vec2::new(h.x, -h.y), Vec2::new(h.x, top(right)), Vec2::new(-h.x, top(left))])
+    }
 }
 
 /// 碰撞体。没有 [`RigidBody`] 的实体当成固定碰撞体。
@@ -45,6 +59,8 @@ pub struct Collider {
     pub events: bool,
     /// 碰撞分组（1 … 31）：同一组的互相不碰撞（两个玩家的角色互相穿过），和别的照常碰；0 是不分组。
     pub group: u8,
+    /// 单向平台：只挡从上面（碰撞体自己的 +y 方向）来的，从下面、侧面穿过去（见 docs/gameplay2d.md）。
+    pub one_way: bool,
 }
 
 impl Collider {
@@ -56,8 +72,13 @@ impl Collider {
         Self::new(Shape::Circle(radius))
     }
 
+    /// 斜坡：见 [`Shape::Slope`]。
+    pub fn slope(size: Vec2, left: f32, right: f32) -> Self {
+        Self::new(Shape::Slope { size, left, right })
+    }
+
     fn new(shape: Shape) -> Self {
-        Self { shape, restitution: 0.0, friction: 0.5, density: 1.0, sensor: false, events: false, group: 0 }
+        Self { shape, restitution: 0.0, friction: 0.5, density: 1.0, sensor: false, events: false, group: 0, one_way: false }
     }
 }
 
@@ -162,3 +183,7 @@ mod tests;
 mod joint_tests;
 #[cfg(test)]
 mod character_tests;
+#[cfg(test)]
+mod oneway_tests;
+#[cfg(test)]
+mod slope_tests;

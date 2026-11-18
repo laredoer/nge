@@ -38,6 +38,103 @@ pub struct TilemapNode {
     pub collide: bool,
     /// 视差，加在每个瓦片上；碰撞体不跟着挪（见 docs/parallax.md）。
     pub parallax: Option<ParallaxNode>,
+    /// 哪些帧号是单向平台（从下面能跳上去，见 docs/gameplay2d.md）。
+    #[serde(default)]
+    pub one_way: Vec<i32>,
+    /// 斜坡瓦片；写错的那一条丢掉。
+    #[serde(default, deserialize_with = "crate::lenient::tile_slopes")]
+    pub slopes: Vec<SlopeTile>,
+    /// 动画瓦片：这个帧号的格子按帧序列循环。
+    #[serde(default, deserialize_with = "crate::lenient::tile_animated")]
+    pub animated: Vec<AnimatedTile>,
+    /// 每种瓦片的摩擦、弹性（冰面），没写的用地图的。
+    #[serde(default, deserialize_with = "crate::lenient::tile_materials")]
+    pub materials: Vec<TileMaterial>,
+    /// 点地图时发 `tap`，带点中的格子。
+    #[serde(default)]
+    pub tap: bool,
+}
+
+/// 斜坡瓦片：底边平、两边竖直，顶边从左边高 `left` 到右边高 `right`（格高的几分之几，0 … 1）。
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+pub struct SlopeTile {
+    pub frame: i32,
+    pub left: f32,
+    pub right: f32,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct AnimatedTile {
+    pub frame: i32,
+    pub frames: Vec<u32>,
+    pub fps: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+pub struct TileMaterial {
+    pub frame: i32,
+    pub friction: Option<f32>,
+    pub restitution: Option<f32>,
+}
+
+/// 一格是什么：同一个帧号写在几处时斜坡优先，然后单向平台，最后实心。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum TileKind {
+    Empty,
+    Solid,
+    OneWay,
+    Slope(f32, f32),
+}
+
+impl TilemapNode {
+    fn kind(&self, frame: i32) -> TileKind {
+        if frame < 0 {
+            return TileKind::Empty;
+        }
+        if let Some(s) = self.slopes.iter().find(|s| s.frame == frame) {
+            return TileKind::Slope(s.left, s.right);
+        }
+        if self.one_way.contains(&frame) {
+            TileKind::OneWay
+        } else if self.solid.contains(&frame) {
+            TileKind::Solid
+        } else {
+            TileKind::Empty
+        }
+    }
+
+    /// 这种瓦片的（摩擦，弹性）。
+    fn material(&self, frame: i32) -> (f32, f32) {
+        let m = self.materials.iter().find(|m| m.frame == frame);
+        let pick = |v: Option<f32>, fallback: f32| v.filter(|v| v.is_finite()).unwrap_or(fallback);
+        (pick(m.and_then(|m| m.friction), self.friction), pick(m.and_then(|m| m.restitution), self.restitution))
+    }
+}
+
+/// 点地图用：地图在哪、每格是什么帧（只给 `tap` 的地图挂）。
+#[derive(Component, Debug, Clone, PartialEq)]
+pub(crate) struct TileTap {
+    pub origin: Vec2,
+    pub tile: f32,
+    pub cols: usize,
+    pub data: Vec<i32>,
+    pub z: f32,
+    pub parallax: Option<nge_render2d::Parallax>,
+}
+
+impl TileTap {
+    /// 画面上的世界坐标 `p` 落在哪一格（列，行）和那一格的帧号；地图外是 `None`。
+    pub fn at(&self, p: Vec2, camera: &nge_render2d::Camera2d) -> Option<([i32; 2], i32)> {
+        let origin = nge_render2d::drawn(&Transform2d::from_xy(self.origin.x, self.origin.y), None, self.parallax.as_ref(), camera).translation;
+        let local = Vec2::new(p.x - origin.x, origin.y - p.y) / self.tile;
+        let (c, r) = (local.x.floor(), local.y.floor());
+        let rows = self.data.len() / self.cols.max(1);
+        if !(c >= 0.0 && r >= 0.0 && (c as usize) < self.cols && (r as usize) < rows) {
+            return None;
+        }
+        let (c, r) = (c as usize, r as usize);
+        Some(([c as i32, r as i32], self.data[r * self.cols + c]))
+    }
 }
 
 fn default_friction() -> f32 {
@@ -100,7 +197,7 @@ pub(crate) fn merge(solid: &[bool], cols: usize) -> Vec<Run> {
 
 pub(crate) fn sync_tilemaps(mut commands: Commands, scene: Res<Scene>, mut assets: SceneAssets, nodes: Query<(Entity, &Declared<TilemapNode>)>) {
     sync_list(&mut commands, &scene.tilemaps, &nodes, |commands, map, _, node| {
-        commands.entity(map).despawn_related::<Children>().remove::<nge_ai::NavGrid>();
+        commands.entity(map).despawn_related::<Children>().remove::<(nge_ai::NavGrid, nge_ai::GroundMap, TileTap)>();
         if node.cols == 0 || !(node.tile > 0.0 && node.tile.is_finite()) {
             log::warn!("瓦片地图 {:?} 的 cols 是 0 或 tile 不是正数，不画", node.id);
             return;
@@ -119,6 +216,17 @@ pub(crate) fn sync_tilemaps(mut commands: Commands, scene: Res<Scene>, mut asset
         let tile = node.tile;
         let center = |c: f32, r: f32| origin + Vec2::new(c * tile, -r * tile);
         let data = &node.data[..rows * cols];
+        let animations: HashMap<i32, crate::anim::FrameAnimation> = node
+            .animated
+            .iter()
+            .filter_map(|a| match crate::anim::FrameAnimation::new(a.frames.clone(), a.fps, true) {
+                Some(anim) => Some((a.frame, anim)),
+                None => {
+                    crate::lenient::warn_once(format!("瓦片地图 {:?} 的动画瓦片 {} 要有帧、fps 要是正数，不动", node.id, a.frame));
+                    None
+                }
+            })
+            .collect();
         for (i, &value) in data.iter().enumerate() {
             let Ok(frame) = u32::try_from(value) else { continue };
             let image = match image {
@@ -131,21 +239,83 @@ pub(crate) fn sync_tilemaps(mut commands: Commands, scene: Res<Scene>, mut asset
             if let Some(p) = parallax {
                 tile.insert(p);
             }
+            // 动画瓦片：每格挂一个帧动画，同时生成的一起换帧；只换这些格子，不重建地图
+            if let Some(anim) = animations.get(&value) {
+                tile.insert(anim.clone());
+            }
         }
-        // 负数都是空格，写进 solid 也不算实心
-        let solid: Vec<bool> = data.iter().map(|v| *v >= 0 && node.solid.contains(v)).collect();
-        if parallax.is_some_and(|p| p.0 != Vec2::ONE) && solid.contains(&true) {
+        let mut kinds: Vec<TileKind> = data.iter().map(|&v| node.kind(v)).collect();
+        for (k, v) in kinds.iter_mut().zip(data) {
+            let TileKind::Slope(left, right) = *k else { continue };
+            if !(left.is_finite() && right.is_finite() && (0.0..=1.0).contains(&left) && (0.0..=1.0).contains(&right) && left.max(right) > 0.0) {
+                crate::lenient::warn_once(format!("瓦片地图 {:?} 的斜坡帧 {v} 左右的高要是 0 … 1、不能都是 0，当空格", node.id));
+                *k = TileKind::Empty;
+            }
+        }
+        let solid = kinds.contains(&TileKind::Solid) || kinds.iter().any(|k| matches!(k, TileKind::Slope(..)));
+        if parallax.is_some_and(|p| p.0 != Vec2::ONE) && kinds.iter().any(|k| *k != TileKind::Empty) {
             log::warn!("瓦片地图 {:?} 设了视差又有实心格子：碰撞体在声明的位置，和画面对不上", node.id);
         }
-        // 导航网格只给有实心格子、不带视差的地图：纯装饰的层不该让追击的角色以为一路畅通
-        if solid.contains(&true) && parallax.is_none_or(|p| p.0 == Vec2::ONE) {
-            commands.entity(map).insert(nge_ai::NavGrid { grid: nge_ai::Grid::new(cols, solid.clone()), origin, tile });
+        // 导航网格只给有实心格子、不带视差的地图：纯装饰的层不该让追击的角色以为一路畅通。会飞的从单向平台穿过去，斜坡挡住
+        if solid && parallax.is_none_or(|p| p.0 == Vec2::ONE) {
+            let blocked = kinds.iter().map(|k| matches!(k, TileKind::Solid | TileKind::Slope(..))).collect();
+            commands.entity(map).insert(nge_ai::NavGrid { grid: nge_ai::Grid::new(cols, blocked), origin, tile });
         }
-        for run in merge(&solid, cols) {
-            let size = Vec2::new(run.w as f32, run.h as f32) * tile;
-            let at = center(run.col as f32 + run.w as f32 / 2.0, run.row as f32 + run.h as f32 / 2.0);
-            let collider = Collider { restitution: node.restitution, friction: node.friction, events: node.collide, ..Collider::rect(size) };
+        // 走地面的寻路用的地形（见 docs/gameplay2d.md）：同样只给不带视差的地图
+        if kinds.iter().any(|k| *k != TileKind::Empty) && parallax.is_none_or(|p| p.0 == Vec2::ONE) {
+            let ground = kinds
+                .iter()
+                .map(|k| match *k {
+                    TileKind::Empty => nge_ai::Ground::Empty,
+                    TileKind::Solid => nge_ai::Ground::Solid,
+                    TileKind::OneWay => nge_ai::Ground::OneWay,
+                    TileKind::Slope(left, right) => nge_ai::Ground::Slope { left, right },
+                })
+                .collect();
+            commands.entity(map).insert(nge_ai::GroundMap { terrain: nge_ai::Terrain::new(cols, ground), origin, tile });
+        }
+        if node.tap {
+            let tap = TileTap { origin, tile, cols, data: data.to_vec(), z: node.z, parallax };
+            commands.entity(map).insert(tap);
+        } else {
+            commands.entity(map).remove::<TileTap>();
+        }
+        let mut spawn = |at: Vec2, collider: Collider| {
             commands.spawn((collider, Transform2d::from_xy(at.x, at.y), TileSolid, ChildOf(map)));
+        };
+        // 斜坡：一条直线上连着的并成一块，盖住的实心格子不再单独合并（坡和坡、坡和下面的方块相接处没有棱角，见 docs/gameplay2d.md）
+        let (pieces, covered) = crate::tile_slopes::slope_pieces(&kinds, cols);
+        for p in pieces {
+            let (friction, restitution) = node.material(data[p.first]);
+            let size = Vec2::new(p.w as f32, p.h) * tile;
+            let collider = Collider { restitution, friction, events: node.collide, ..Collider::slope(size, p.left, p.right) };
+            let bottom = origin.y - (p.bottom + 1) as f32 * tile;
+            spawn(Vec2::new(origin.x + (p.col as f32 + p.w as f32 / 2.0) * tile, bottom + size.y / 2.0), collider);
+        }
+        let kinds: Vec<TileKind> = kinds.iter().zip(&covered).map(|(&k, &c)| if c { TileKind::Empty } else { k }).collect();
+        // 实心格子按材质分开合并：材质一样的才并成一块
+        let mut materials: Vec<(f32, f32)> = Vec::new();
+        for (&v, k) in data.iter().zip(&kinds) {
+            let m = node.material(v);
+            if matches!(k, TileKind::Solid | TileKind::OneWay) && !materials.contains(&m) {
+                materials.push(m);
+            }
+        }
+        for &(friction, restitution) in &materials {
+            let base = Collider { restitution, friction, events: node.collide, ..Collider::rect(Vec2::ZERO) };
+            let mask = |kind: TileKind| -> Vec<bool> { data.iter().zip(&kinds).map(|(&v, &k)| k == kind && node.material(v) == (friction, restitution)).collect() };
+            for run in merge(&mask(TileKind::Solid), cols) {
+                let size = Vec2::new(run.w as f32, run.h as f32) * tile;
+                spawn(center(run.col as f32 + run.w as f32 / 2.0, run.row as f32 + run.h as f32 / 2.0), Collider { shape: Collider::rect(size).shape, ..base });
+            }
+            // 单向平台一行一块：上下两行不并成厚的
+            let one_way = mask(TileKind::OneWay);
+            for row in 0..rows {
+                for run in merge(&one_way[row * cols..(row + 1) * cols], cols) {
+                    let size = Vec2::new(run.w as f32, 1.0) * tile;
+                    spawn(center(run.col as f32 + run.w as f32 / 2.0, row as f32 + 0.5), Collider { shape: Collider::rect(size).shape, one_way: true, ..base });
+                }
+            }
         }
     });
 }

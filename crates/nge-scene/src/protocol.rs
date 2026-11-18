@@ -173,6 +173,9 @@ pub struct SpriteNode {
     pub occluder: Option<crate::effects::OccluderNode>,
     /// 追某个节点（见 docs/ai.md）。
     pub chase: Option<crate::ai::ChaseNode>,
+    /// 行为树（见 docs/gameplay2d.md）。写错时只丢这一项。
+    #[serde(default, deserialize_with = "crate::lenient::behavior")]
+    pub behavior: Option<crate::behavior::BehaviorNode>,
 }
 
 /// `repeat`：`"x"`、`"y"` 或 `"xy"`。
@@ -218,13 +221,18 @@ fn one() -> f32 {
 }
 
 /// 点中了可点击的精灵或模型。x / y 是指针的 2D 世界坐标；点中模型时 `point` 是 3D 命中点。
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Tap {
     pub id: String,
     pub x: f32,
     pub y: f32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub point: Option<[f32; 3]>,
+    /// 点中瓦片地图时：（列，行）和那一格的帧号（见 docs/gameplay2d.md）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cell: Option<[i32; 2]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub frame: Option<i32>,
 }
 
 /// `"#rrggbb"` / `"#rrggbbaa"`（sRGB），解析后存线性 RGBA。

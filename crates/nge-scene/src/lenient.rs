@@ -94,10 +94,11 @@ macro_rules! lenient {
 lenient!(
     sprites => "sprites", tilemaps => "tilemaps", texts => "texts", emitters => "emitters", models => "models",
     emitters3d => "emitters3d", lights => "lights", bars => "bars", bubbles => "bubbles", joints => "joints",
-    joints3d => "joints3d", post => "post", lighting_lights => "lighting.lights";
+    joints3d => "joints3d", post => "post", lighting_lights => "lighting.lights", tile_slopes => "tilemaps.slopes",
+    tile_animated => "tilemaps.animated", tile_materials => "tilemaps.materials";
     background => "background", camera => "camera", camera3d => "camera3d", ambient => "ambient", physics => "physics",
     physics3d => "physics3d", lighting => "lighting", audio => "audio", time_scale => "timeScale", perf => "perf",
-    net => "net", bounds => "camera.bounds"
+    net => "net", bounds => "camera.bounds", behavior => "sprites.behavior"
 );
 
 /// 着色器表：值不是字符串的那一个跳过。

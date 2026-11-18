@@ -27,6 +27,13 @@
       "GamepadA"
      ]
     },
+    "down": {
+     "kind": "button",
+     "keys": [
+      "ArrowDown",
+      "GamepadDown"
+     ]
+    },
     "restart": {
      "kind": "button",
      "keys": [
@@ -119,6 +126,13 @@
       "GamepadA"
      ]
     },
+    "down": {
+     "kind": "button",
+     "keys": [
+      "ArrowDown",
+      "GamepadDown"
+     ]
+    },
     "restart": {
      "kind": "button",
      "keys": [
@@ -209,6 +223,13 @@
       "ArrowUp",
       "KeyW",
       "GamepadA"
+     ]
+    },
+    "down": {
+     "kind": "button",
+     "keys": [
+      "ArrowDown",
+      "GamepadDown"
      ]
     },
     "restart": {

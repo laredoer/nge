@@ -71,6 +71,8 @@ const FALL_LINE: f32 = -400.0;
 /// 动作名（绑定在 controls.json 里，TSX 的改键面板能改）。
 const MOVE: &str = "move";
 const JUMP_ACTION: &str = "jump";
+/// 按着它再跳：站在单向平台上时穿下去（见 docs/gameplay2d.md）。
+const DOWN_ACTION: &str = "down";
 const RESTART_ACTION: &str = "restart";
 /// 在空中超过这么久，落地时手柄轻震一下。
 const LAND_RUMBLE_AIR: f32 = 0.2;
@@ -161,7 +163,7 @@ fn move_toward(from: f32, to: f32, step: f32) -> f32 {
 fn control(
     time: Res<Time>,
     actions: Res<Actions>,
-    physics: Res<Physics>,
+    mut physics: ResMut<Physics>,
     mut ctl: ResMut<Controller>,
     mut players: Query<(Entity, &SceneId, &mut Transform2d, &mut Velocity)>,
     names: Query<&SceneId>,
@@ -204,7 +206,11 @@ fn control(
     let mut velocity = v.linear;
     velocity.x = move_toward(velocity.x, actions.value(MOVE) * SPEED, accel * dt);
     let holding = actions.down(JUMP_ACTION);
-    if ctl.jump_pressed <= BUFFER && ctl.airborne <= COYOTE {
+    // 按着下再跳：站在单向平台上就穿下去，不跳
+    if ctl.jump_pressed <= BUFFER && grounded && actions.down(DOWN_ACTION) && physics.drop_through(entity) {
+        ctl.jump_pressed = f32::INFINITY;
+        ctl.airborne = f32::INFINITY;
+    } else if ctl.jump_pressed <= BUFFER && ctl.airborne <= COYOTE {
         // 缓冲里的跳到落地时键已经松开了：直接按短跳
         velocity.y = if holding { JUMP } else { JUMP * 0.5 };
         ctl.jump_pressed = f32::INFINITY;
@@ -422,7 +428,7 @@ mod tests {
         let data: Vec<i32> = (0..40).map(|c| if pit.is_some_and(|(a, b)| (a..=b).contains(&c)) { -1 } else { 1 }).collect();
         json!({
             "physics": { "gravity": [0, -1800] },
-            "tilemaps": [{ "id": "level", "texture": "asset:/@platformer/tiles.png", "grid": [3, 1], "tile": 32, "cols": 40, "x": -640, "y": 0, "data": data, "solid": [1], "friction": 0 }],
+            "tilemaps": [{ "id": "level", "texture": "asset:/@platformer/tiles.png", "grid": [16, 1], "tile": 32, "cols": 40, "x": -640, "y": 0, "data": data, "solid": [1], "friction": 0 }],
             "sprites": [{ "id": PLAYER, "w": 24, "h": 32, "y": 16, "body": { "kind": "character", "friction": 0 } }],
         })
     }
@@ -1186,6 +1192,62 @@ mod tests {
             highest = highest.max(player(&mut app).0.y);
         }
         assert!(highest > 96.0 + 15.0, "走到坡顶 {highest}");
+    }
+
+    /// 地面（顶边 y = 0）上方第 18 … 22 列（x = -64 … 96）是单向木板（帧 3，顶边 y = 64）。
+    fn with_plank(mut scene: Value) -> Value {
+        let mut data = vec![-1; 40 * 4];
+        for c in 18..23 {
+            data[40 + c] = 3;
+        }
+        for c in 0..40 {
+            data[3 * 40 + c] = 1;
+        }
+        scene["tilemaps"] = json!([{ "id": "level", "texture": "asset:/@platformer/tiles.png", "grid": [16, 1], "tile": 32, "cols": 40, "x": -640, "y": 96, "data": data, "solid": [1], "oneWay": [3], "friction": 0 }]);
+        scene
+    }
+
+    #[test]
+    fn jumps_up_through_planks_and_drops_through_with_down_and_jump() {
+        let mut app = app();
+        app.prop("scene", Some(&with_plank(level(None))));
+        run(&mut app, 20);
+        assert!((player(&mut app).0.y - 16.0).abs() < 1.0, "站在地上");
+        key(&mut app, "Space", true);
+        run(&mut app, 60);
+        key(&mut app, "Space", false);
+        run(&mut app, 30);
+        assert!((player(&mut app).0.y - 80.0).abs() < 1.0, "从下面跳上木板、站住 {}", player(&mut app).0);
+        // 只按下：不动
+        key(&mut app, "ArrowDown", true);
+        run(&mut app, 10);
+        assert!((player(&mut app).0.y - 80.0).abs() < 1.0, "只按下不穿");
+        key(&mut app, "Space", true);
+        run(&mut app, 40);
+        key(&mut app, "Space", false);
+        key(&mut app, "ArrowDown", false);
+        run(&mut app, 2);
+        assert!((player(&mut app).0.y - 16.0).abs() < 1.0, "按下加跳穿下去 {}", player(&mut app).0);
+        // 在地上按下加跳：照常跳
+        key(&mut app, "ArrowDown", true);
+        key(&mut app, "Space", true);
+        run(&mut app, 3);
+        assert!(player(&mut app).1.y > 300.0, "地上不是单向平台，照常跳");
+    }
+
+    /// 单向木板上的走地怪：沿地面寻路下来，撞到角色，角色回到起点。
+    #[test]
+    fn a_walker_comes_down_from_its_plank_and_knocks_you_back() {
+        let mut app = app();
+        let mut scene = with_plank(level(None));
+        let walker = json!({ "id": format!("{ENEMY}walker-0"), "x": 64, "y": 76, "w": 24, "h": 24, "body": { "kind": "character", "friction": 0 },
+            "behavior": { "speed": 110, "jump": 720, "tree": { "type": "sequence", "reactive": true, "children": [
+                { "type": "see", "target": PLAYER, "range": 400 }, { "type": "chase", "target": PLAYER }] } } });
+        scene["sprites"].as_array_mut().unwrap().push(walker);
+        scene["sprites"][0]["x"] = json!(-300);
+        app.prop("scene", Some(&scene));
+        let respawn = (0..400).find(|_| !named(&run(&mut app, 1), "respawn").is_empty());
+        assert!(respawn.is_some(), "走地怪下来撞到了角色");
     }
 
     /// 右上方的幽灵：角色走近了才追，飞过来撞到角色，角色回到起点。

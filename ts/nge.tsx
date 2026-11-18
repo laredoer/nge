@@ -71,6 +71,71 @@ export interface SpriteNode {
    * 自己离出发点超过 `leash`、找不到路就回出发点。直接挪位置，配 `kinematic` 刚体。见 docs/ai.md。
    */
   chase?: ChaseNode;
+  /**
+   * 行为树（见 docs/gameplay2d.md）：每帧跑一遍，叶子可以按地面寻路追目标（走、跳上平台、落下、从单向平台穿下去）。
+   * 要配 `body: { kind: "character" }`。树变了才重建，每帧声明同一棵树不会重置。写错时只丢 `behavior`，精灵照样有。
+   */
+  behavior?: BehaviorNode;
+}
+
+/** `behavior`：树、黑板的初值、走多快（像素 / 秒，默认 120）、起跳速度（像素 / 秒，默认 0 不会跳）。 */
+export interface BehaviorNode {
+  tree: BtNode;
+  blackboard?: Record<string, BlackboardValue>;
+  speed?: number;
+  jump?: number;
+}
+
+/** 黑板上的值：布尔、数、字符串、点 `[x, y]`。 */
+export type BlackboardValue = boolean | number | string | [number, number];
+
+/**
+ * 行为树的节点。`sequence` 一个一个跑、有失败就失败；`selector` 一个一个试、有成就成；
+ * `reactive` 的每帧从第一个重新查（条件变了能打断后面在跑的）。`parallel` 成了 `succeed` 个就成；
+ * `repeat` 成了再跑（`times` 次，不写一直跑）；`cooldown` 孩子跑完后 `seconds` 秒内直接失败；`wait` 等几秒。
+ * 叶子：`see` 在 `range` 以内且没墙挡着；`near` 在 `range` 以内；`check` 黑板上的值是真的；`set` 写黑板（`null` 删掉）；
+ * `chase` / `goto` / `home` 沿地面走过去（到了成、走不到败、路上在跑）；`emit` 发 `behavior` 事件。
+ */
+export type BtNode =
+  | { type: "sequence" | "selector"; children: BtNode[]; reactive?: boolean }
+  | { type: "parallel"; succeed: number; children: BtNode[] }
+  | { type: "invert"; child: BtNode }
+  | { type: "repeat"; times?: number; child: BtNode }
+  | { type: "cooldown"; seconds: number; child: BtNode }
+  | { type: "wait"; seconds: number }
+  | { type: "see" | "near"; target: string; range: number }
+  | { type: "check"; key: string }
+  | { type: "set"; key: string; value: BlackboardValue | null }
+  | { type: "chase"; target: string }
+  | { type: "goto"; x: number; y: number }
+  | { type: "home" }
+  | { type: "emit"; name: string };
+
+/** 拼行为树的小函数：`bt.selector([bt.sequence([bt.see("hero", 200), bt.chase("hero")], true), bt.home()], true)`。 */
+export const bt = {
+  sequence: (children: BtNode[], reactive = false): BtNode => ({ type: "sequence", children, reactive }),
+  selector: (children: BtNode[], reactive = false): BtNode => ({ type: "selector", children, reactive }),
+  parallel: (succeed: number, children: BtNode[]): BtNode => ({ type: "parallel", succeed, children }),
+  invert: (child: BtNode): BtNode => ({ type: "invert", child }),
+  repeat: (child: BtNode, times?: number): BtNode => (times === undefined ? { type: "repeat", child } : { type: "repeat", times, child }),
+  cooldown: (seconds: number, child: BtNode): BtNode => ({ type: "cooldown", seconds, child }),
+  wait: (seconds: number): BtNode => ({ type: "wait", seconds }),
+  see: (target: string, range: number): BtNode => ({ type: "see", target, range }),
+  near: (target: string, range: number): BtNode => ({ type: "near", target, range }),
+  check: (key: string): BtNode => ({ type: "check", key }),
+  set: (key: string, value: BlackboardValue | null): BtNode => ({ type: "set", key, value }),
+  chase: (target: string): BtNode => ({ type: "chase", target }),
+  goto: (x: number, y: number): BtNode => ({ type: "goto", x, y }),
+  home: (): BtNode => ({ type: "home" }),
+  emit: (name: string): BtNode => ({ type: "emit", name }),
+};
+
+/** 行为树里的 `emit`：哪个节点、什么名字、当时在哪。 */
+export interface BehaviorEvent {
+  id: string;
+  name: string;
+  x: number;
+  y: number;
 }
 
 export interface ChaseNode {
@@ -157,6 +222,8 @@ export interface BodyNode {
   density?: number;
   /** 只检测重叠，不碰撞。 */
   sensor?: boolean;
+  /** 单向平台：只挡从上面来的，从下面、侧面穿过去；角色按「下」加跳穿下去（见 docs/gameplay2d.md）。 */
+  oneWay?: boolean;
   /** 初速度（point / s）。 */
   velocity?: [number, number];
   /** 初角速度（度 / s）。 */
@@ -558,6 +625,16 @@ export interface TilemapNode {
   collide?: boolean;
   /** 视差，加在每个瓦片上（同精灵的 `parallax`）；碰撞体不跟着挪，别和 `solid` 一起用。 */
   parallax?: number | [number, number];
+  /** 单向平台的帧号：从下面跳得上去，站得住，角色按「下」加跳（`dropThrough`）穿下去。同一行连着的并成一块。见 docs/gameplay2d.md。 */
+  oneWay?: number[];
+  /** 斜坡的帧号：顶边左右两头的高（格高的 0 … 1），45° 上坡是 `{ left: 0, right: 1 }`，22.5° 两格一组 `0 → 0.5`、`0.5 → 1`。 */
+  slopes?: { frame: number; left: number; right: number }[];
+  /** 动画瓦片：这个帧号的格子按 `frames` 循环换帧（水、火把），只换这些格子，不重建地图。 */
+  animated?: { frame: number; frames: number[]; fps: number }[];
+  /** 每种瓦片自己的摩擦、弹性（比如冰面），不写的用地图的。 */
+  materials?: { frame: number; friction?: number; restitution?: number }[];
+  /** 点得到：`tap` 事件带上点中的格子 `cell: [列, 行]` 和那格的帧号 `frame`。 */
+  tap?: boolean;
 }
 
 export interface Scene {
@@ -632,6 +709,10 @@ export interface Tap {
   x: number;
   y: number;
   point?: [number, number, number];
+  /** 点中瓦片地图（开了 `tap`）的哪一格：`[列, 行]`。 */
+  cell?: [number, number];
+  /** 那一格的帧号（空格是负数）。 */
+  frame?: number;
 }
 
 /** `burst` 的参数：炸一团粒子，死完自动删除。 */
@@ -781,6 +862,11 @@ export interface AnimEvent {
 }
 
 /** 设节点 `id` 的状态机参数、发 trigger（一个名字或数组）。 */
+/** 往某个节点的行为树黑板上写，`value` 是 `null` 时删掉（见 docs/gameplay2d.md）。 */
+export function blackboard(game: NativeComponentRef | undefined, args: { id: string; key: string; value: BlackboardValue | null }) {
+  game?.command("blackboard", args);
+}
+
 export function animSet(game: NativeComponentRef | undefined, args: { id: string; params?: AnimParams; trigger?: string | string[] }) {
   game?.command("animSet", args);
 }
@@ -957,6 +1043,8 @@ interface BuiltinEvents {
   /** 换关（场景的 `level` 换了值）后新关卡的实体建好了：要对新关卡发的命令（补间等）在这里发。 */
   levelStart: { level: string };
   chase: ChaseEvent;
+  /** 行为树里的 `emit`（见 docs/gameplay2d.md）。 */
+  behavior: BehaviorEvent;
   /** 气泡的字打完了。 */
   typed: { id: string };
   fps: FrameStats;
@@ -977,14 +1065,14 @@ export type GameViewProps<P, E> = NativeComponentProps<Partial<BuiltinProps> & P
 
 /**
  * 生成游戏视图组件。`props` / `events` 是游戏自己的通道名（Rust 侧 `add_prop` / `add_state` / `add_event`），
- * 类型由泛型给出；内置 prop `scene` / `actions`、事件 `tap` / `collide` / `animEnd` / `animEvent` / `tweenEnd` / `key` / `action` / `pad` / `levelStart` / `chase` / `typed` / `fps` / `error` / `ready` / `net` / `http` / `query3d`，触摸自动转成引擎的 `touch` command。
+ * 类型由泛型给出；内置 prop `scene` / `actions`、事件 `tap` / `collide` / `animEnd` / `animEvent` / `tweenEnd` / `key` / `action` / `pad` / `levelStart` / `chase` / `behavior` / `typed` / `fps` / `error` / `ready` / `net` / `http` / `query3d`，触摸自动转成引擎的 `touch` command。
  */
 export function gameView<P extends object = {}, E extends object = {}>(
   spec: { props?: readonly (keyof P & string)[]; events?: readonly (keyof E & string)[] } = {},
 ) {
   const Native = nativeComponent<BuiltinProps & P, BuiltinEvents & E>("nge.game", {
     props: [...new Set(["scene", "captureKeys", "actions", "screenOrientation", ...(spec.props ?? [])])] as (keyof (BuiltinProps & P) & string)[],
-    events: [...new Set(["tap", "collide", "animEnd", "animEvent", "tweenEnd", "key", "action", "pad", "levelStart", "chase", "typed", "fps", "error", "ready", "net", "http", "query3d", ...(spec.events ?? [])])] as (keyof (BuiltinEvents & E) & string)[],
+    events: [...new Set(["tap", "collide", "animEnd", "animEvent", "tweenEnd", "key", "action", "pad", "levelStart", "chase", "behavior", "typed", "fps", "error", "ready", "net", "http", "query3d", ...(spec.events ?? [])])] as (keyof (BuiltinEvents & E) & string)[],
   });
 
   return (props: GameViewProps<P, E>) => {

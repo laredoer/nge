@@ -7,7 +7,7 @@ use nge_ecs::Time;
 use nge_render2d::{DrawAt, Transform2d};
 use rapier2d::math::{Pose, Rotation, Vector};
 use rapier2d::prelude::{
-    ActiveCollisionTypes, ActiveEvents, ColliderBuilder, ColliderHandle, ColliderSet, CollisionEvent, ContactPair, EventHandler, PhysicsWorld, RigidBodyBuilder,
+    ActiveCollisionTypes, ActiveEvents, ActiveHooks, ColliderBuilder, ColliderHandle, ColliderSet, CollisionEvent, ContactPair, EventHandler, PhysicsWorld, RigidBodyBuilder,
     RigidBodyHandle, RigidBodySet, SoftBodySet, SoftBodyTearEvent,
 };
 use rapier2d::prelude::{Cuboid, Group, InteractionGroups, InteractionTestMode, QueryFilter as RapierFilter, Ray};
@@ -27,6 +27,8 @@ pub struct Physics {
     pub(crate) ground: Option<RigidBodyHandle>,
     /// 刚删掉的碰撞体：rapier 下一步才发它们的停止接触，那时已经查不到 user_data 了。
     removed: HashMap<ColliderHandle, Entity>,
+    /// 正在从单向平台上往下穿的（见 `oneway.rs`）。
+    pub(crate) dropping: crate::oneway::Dropping,
     accumulator: f32,
 }
 
@@ -52,7 +54,7 @@ impl Physics {
         world.gravity = vector(gravity);
         world.integration_parameters.dt = STEP;
         world.integration_parameters.length_unit = pixels_per_meter;
-        Self { world, entities: HashMap::new(), joints: HashMap::new(), ground: None, removed: HashMap::new(), accumulator: 0.0 }
+        Self { world, entities: HashMap::new(), joints: HashMap::new(), ground: None, removed: HashMap::new(), dropping: Default::default(), accumulator: 0.0 }
     }
 
     pub fn gravity(&self) -> Vec2 {
@@ -290,20 +292,31 @@ pub(crate) fn groups(group: u8) -> InteractionGroups {
 
 fn build(world: &mut PhysicsWorld, entity: Entity, kind: Option<RigidBody>, shape: Option<Collider>, at: (Vec2, f32), velocity: Velocity) -> Handles {
     let data = u128::from(entity.to_bits());
-    let collider = shape.map(|c| {
+    let collider = shape.and_then(|c| {
         let builder = match c.shape {
             Shape::Rect(size) => ColliderBuilder::cuboid(size.x.abs() / 2.0, size.y.abs() / 2.0),
             Shape::Circle(r) => ColliderBuilder::ball(r.abs()),
+            Shape::Slope { size, left, right } => {
+                let corners = c.shape.slope_corners().expect("是斜坡").map(vector);
+                // 两边都是 0、大小是 0、不是有限数：生不出来，不建碰撞体
+                let ok = corners.iter().all(|p| p.is_finite()) && left.max(right) > 0.0 && size.x != 0.0 && size.y != 0.0;
+                let built = ok.then(|| ColliderBuilder::convex_hull(&corners)).flatten();
+                if built.is_none() {
+                    log::warn!("斜坡碰撞体 {:?} 生不出来（两边都是 0 或者不是有限数），不建", c.shape);
+                }
+                built?
+            }
         };
         let events = if c.events { ActiveEvents::COLLISION_EVENTS } else { ActiveEvents::empty() };
-        builder
+        Some(builder
             .restitution(c.restitution)
             .friction(c.friction)
             .density(c.density.max(0.0))
             .sensor(c.sensor)
             .collision_groups(groups(c.group))
             .active_events(events)
-            .user_data(data)
+            .active_hooks(if c.one_way { ActiveHooks::MODIFY_SOLVER_CONTACTS } else { ActiveHooks::empty() })
+            .user_data(data))
     });
     let body = kind.map(|kind| {
         let builder = match kind {
@@ -411,8 +424,10 @@ pub(crate) fn step(
             }
         }
         character::advance(physics, STEP);
-        physics.world.step_with_events(&(), &events);
+        let hooks = crate::oneway::Hooks { dropping: &physics.dropping };
+        physics.world.step_with_events(&hooks, &events);
     }
+    physics.forget_drops();
     character::touch(physics);
     for (entity, mut transform, velocity, ..) in &mut query {
         let Some(h) = physics.entities.get_mut(&entity) else { continue };

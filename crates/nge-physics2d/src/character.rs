@@ -7,7 +7,7 @@ use rapier2d::control::{CharacterAutostep, CharacterLength, KinematicCharacterCo
 use rapier2d::parry::query::contact;
 use rapier2d::prelude::QueryFilter as RapierFilter;
 
-use crate::Contact;
+use crate::{Contact, oneway};
 use crate::world::{Physics, vec2, vector};
 
 /// 贴着多近（point）算接触。
@@ -81,15 +81,18 @@ pub(crate) fn advance(physics: &mut Physics, dt: f32) {
         let ctl = controller(&mover.params);
         // 同一个碰撞分组的不挡路
         let filter = RapierFilter::default().exclude_sensors().exclude_rigid_body(body).groups(groups);
+        let dropping = &physics.dropping;
+        // 单向平台：角色整个在它上面、又没在往下穿时才挡（按这一步开始时的位置算）
+        let solid = |h: rapier2d::prelude::ColliderHandle, c: &rapier2d::prelude::Collider| oneway::blocks(dropping, collider, &*shape, &pose, h, c);
         let mut hits = Vec::new();
         // 先走自己的这段：脚下的东西这一步还没挪，相对它走
-        let out = ctl.move_shape(dt, &world.query_pipeline_with_filter(filter), &*shape, &pose, vector(v * dt), |hit| hits.push(hit));
+        let out = ctl.move_shape(dt, &world.query_pipeline_with_filter(filter.predicate(&solid)), &*shape, &pose, vector(v * dt), |hit| hits.push(hit));
         // 再从走到的地方跟着脚下的东西走，查碰撞时不算它（它还在旧位置，往下走的平台会挡住角色）
         let mut moved = pose;
         moved.translation += out.translation;
         if carry != Vec2::ZERO {
             let ground = mover.ground;
-            let not_ground = |_: rapier2d::prelude::ColliderHandle, c: &rapier2d::prelude::Collider| c.parent() != ground;
+            let not_ground = |h: rapier2d::prelude::ColliderHandle, c: &rapier2d::prelude::Collider| c.parent() != ground && solid(h, c);
             let ride = KinematicCharacterController { autostep: None, snap_to_ground: None, ..ctl };
             let query = world.query_pipeline_with_filter(filter.predicate(&not_ground));
             let carried = ride.move_shape(dt, &query, &*shape, &moved, vector(carry), |hit| hits.push(hit));
@@ -128,7 +131,9 @@ pub(crate) fn touch(physics: &mut Physics) {
         let (Some(body), Some(collider)) = (h.body, h.collider) else { continue };
         let Some(col) = physics.world.colliders.get(collider) else { continue };
         let (pose, shape) = (*col.position(), col.shared_shape().clone());
-        let filter = RapierFilter::default().exclude_sensors().exclude_rigid_body(body).groups(col.collision_groups());
+        let dropping = &physics.dropping;
+        let solid = |h: rapier2d::prelude::ColliderHandle, c: &rapier2d::prelude::Collider| oneway::blocks(dropping, collider, &*shape, &pose, h, c);
+        let filter = RapierFilter::default().exclude_sensors().exclude_rigid_body(body).groups(col.collision_groups()).predicate(&solid);
         let queries = physics.world.query_pipeline_with_filter(filter);
         let aabb = shape.compute_aabb(&pose).loosened(CONTACT_GAP);
         let touching: Vec<Contact> = queries

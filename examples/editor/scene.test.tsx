@@ -10,14 +10,14 @@ const input = (level: LevelFile, over: Partial<SceneInput> = {}): SceneInput => 
 
 const everyType = (): LevelFile => {
   const level = toFile(MEADOW);
-  return { ...level, entities: [...level.entities, ...TYPE_ORDER.filter((t) => t === "light" || t === "model").map((type, i) => ({ id: `x${i}`, type, x: 100, y: 100 }))] };
+  return { ...level, entities: [...level.entities, ...TYPE_ORDER.filter((t) => t === "light" || t === "model" || t === "walker").map((type) => ({ id: `x-${type}`, type, x: 100, y: 100 }))] };
 };
 
 test("编辑时什么都不动：时间缩放 0，没有刚体、关节、角色，瓦片不建碰撞体", () => {
   const scene = editorScene(input(everyType()));
   expect(scene.timeScale).toBe(0);
   expect(scene.joints ?? []).toEqual([]);
-  expect((scene.sprites ?? []).filter((s) => s.body !== undefined || s.chase !== undefined)).toEqual([]);
+  expect((scene.sprites ?? []).filter((s) => s.body !== undefined || s.chase !== undefined || s.behavior !== undefined)).toEqual([]);
   expect((scene.models ?? []).filter((m) => m.body !== undefined || m.attach !== undefined)).toEqual([]);
   expect((scene.sprites ?? []).some((s) => s.id === "player")).toBe(false);
   expect(scene.tilemaps!.every((t) => (t.solid ?? []).length === 0)).toBe(true);
@@ -31,7 +31,7 @@ test("每种实体都画得出来，节点 id 不重复", () => {
   for (const e of level.entities) expect(ids.some((id) => id === `ed:${e.id}` || id.startsWith(`ed:${e.id}:`))).toBe(true);
   for (const type of TYPE_ORDER) expect(level.entities.some((e) => e.type === type)).toBe(true);
   // 灯也进了 3D 灯
-  expect(scene.lights!.some((l) => l.id === "ed:x0")).toBe(true);
+  expect(scene.lights!.some((l) => l.id === "ed:x-light")).toBe(true);
 });
 
 test("选中的画蓝色描边，贴着包围盒，线宽跟着缩放", () => {

@@ -48,7 +48,7 @@ function tilemapOf(t: TileLayer): TilemapNode {
   let node = tilemaps.get(t);
   if (node === undefined) {
     // 瓦片不要碰撞体：编辑时用不上
-    node = { ...toTilemap(t), solid: [] };
+    node = { ...toTilemap(t), solid: [], oneWay: [], slopes: [] };
     tilemaps.set(t, node);
   }
   return node;
