@@ -43,11 +43,13 @@ pub struct TransitionNode {
     pub min: f32,
     /// 另外要等的资源。
     pub preload: Vec<String>,
+    /// 资源最多等几秒：到了还没加载完的记成失败，照样换关。
+    pub timeout: f32,
 }
 
 impl Default for TransitionNode {
     fn default() -> Self {
-        Self { kind: TransitionKind::Fade, color: None, out: 0.3, into: 0.3, min: 0.0, preload: Vec::new() }
+        Self { kind: TransitionKind::Fade, color: None, out: 0.3, into: 0.3, min: 0.0, preload: Vec::new(), timeout: 10.0 }
     }
 }
 
@@ -79,6 +81,8 @@ pub struct SceneTransition {
     /// 已经交给同步的关卡；`None` 是还没见过场景。
     applied: Option<Option<String>>,
     loading: Option<Preloading>,
+    /// 正在加载的那一关：盖着的时候又换了一关，重开加载组。
+    target: Option<String>,
     reported: Option<(usize, usize, usize)>,
     /// 上一次看到的场景改动；和它不一样说明场景又变了。
     seen: Option<Tick>,
@@ -101,8 +105,9 @@ impl SceneTransition {
     }
 }
 
-/// 场景变了、又没在过场里按住：同步系统的运行条件。
-pub(crate) fn scene_ready(scene: Res<Scene>, transition: Res<SceneTransition>) -> bool {
+/// 场景变了、又没在过场里按住：同步系统的运行条件，代替 `resource_changed::<Scene>`。
+/// 自己写的、按 `Scene` 同步的 Rust 系统也要用它，不然过场按住新场景时会提前同步（见 docs/scene-flow.md）。
+pub fn scene_ready(scene: Res<Scene>, transition: Res<SceneTransition>) -> bool {
     scene.is_changed() && !transition.holding()
 }
 
@@ -128,8 +133,8 @@ fn on_scene(world: &mut World, t: &mut SceneTransition) {
         let scene = world.resource::<Scene>();
         (scene.level.clone(), scene.transition.clone())
     };
-    let Some(applied) = t.applied.clone() else {
-        // 第一次见到场景：不盖，直接从盖满揭开
+    let Some(Some(applied)) = t.applied.clone() else {
+        // 第一次声明关卡（之前没有场景，或者场景里没写 level）：不盖，直接从盖满揭开
         t.applied = Some(level.clone());
         if let (Some(_), Some(node)) = (&level, node) {
             t.node = node;
@@ -139,7 +144,7 @@ fn on_scene(world: &mut World, t: &mut SceneTransition) {
         }
         return;
     };
-    if applied == level {
+    if Some(&applied) == level.as_ref() {
         // 盖的时候又换回了正在玩的那一关：不重建，揭开
         if t.holding() {
             release(world, t);
@@ -152,8 +157,16 @@ fn on_scene(world: &mut World, t: &mut SceneTransition) {
             if !t.holding() {
                 t.phase = Phase::Out;
                 t.elapsed = 0.0;
+            }
+            if !t.holding() || t.target != level {
+                // 新开一组：盖着的时候又换了一关，不再等中间那一关的资源
                 t.loading = Some(Preloading::default());
                 t.reported = None;
+                t.target = level;
+            }
+            // 贴图开关先设好：预加载的贴图一上传就是要的样子
+            if let Err(e) = world.run_system_cached(crate::sync::sync_textures) {
+                log::error!("scene.textures 没设上：{e}");
             }
             let uris = uris_of(world.resource::<Scene>());
             let loading = t.loading.get_or_insert_with(Preloading::default);
@@ -173,7 +186,14 @@ fn step(world: &mut World, t: &mut SceneTransition, dt: f32) {
         Phase::Out => {
             t.cover = if t.node.out > 0.0 { (t.cover + dt / t.node.out).min(1.0) } else { 1.0 };
             t.elapsed += dt;
-            let progress = t.loading.as_mut().map(|l| l.poll(world)).unwrap_or_default();
+            let mut progress = t.loading.as_mut().map(|l| l.poll(world)).unwrap_or_default();
+            if !progress.finished() && t.elapsed >= t.node.timeout {
+                // 超时：没加载完的记成失败，照样放开
+                let reason = format!("超时：{} 秒还没加载完", t.node.timeout);
+                let pending = t.loading.as_ref().map(|l| l.pending(world)).unwrap_or_default();
+                progress.failed.extend(pending.into_iter().map(|uri| (uri, reason.clone())));
+                progress.done = progress.total;
+            }
             let now = (progress.done, progress.total, progress.failed.len());
             if t.reported != Some(now) {
                 t.reported = Some(now);
@@ -202,6 +222,7 @@ fn release(world: &mut World, t: &mut SceneTransition) {
     let level = world.resource::<Scene>().level.clone();
     t.applied = Some(level.clone());
     t.loading = None;
+    t.target = None;
     t.phase = Phase::In;
     send(world, "in", level, None);
 }
@@ -245,7 +266,7 @@ mod tests {
 
     use super::*;
     use crate::sync::SceneId;
-    use crate::testing::{PNG, app, frame};
+    use crate::testing::{PNG, SLOW, app, frame};
 
     fn phases(events: &[(String, Value)]) -> Vec<String> {
         events.iter().filter(|(n, _)| n == "transition").map(|(_, v)| v["phase"].as_str().unwrap().to_owned()).collect()
@@ -441,5 +462,136 @@ mod tests {
         run_until(&mut app, |app, _| has(app, "only-2"));
         let world = app.world_mut();
         assert_eq!(world.query::<&nge_render2d::Camera2d>().single(world).unwrap().position.x, 77.0);
+    }
+
+    fn png_loaded(app: &mut nge_ecs::App) -> (nge_assets::ImageId, bool) {
+        app.world_mut().resource_scope(|world, mut server: Mut<nge_assets::AssetServer>| {
+            let mut images = world.resource_mut::<nge_assets::Assets<nge_assets::Image>>();
+            let handle = server.load(&mut images, PNG);
+            (handle, images.state(handle) == nge_assets::LoadState::Loaded)
+        })
+    }
+
+    fn holding(app: &nge_ecs::App) -> bool {
+        app.world().resource::<SceneTransition>().holding()
+    }
+
+    #[test]
+    fn the_new_lighting_waits_for_the_switch() {
+        let mut app = app();
+        let t = json!({ "out": 1.0 });
+        frame(&mut app, Some(level(1, t.clone())));
+        settle(&mut app);
+        let mut next = level(2, t);
+        next["lighting"] = json!({ "ambient": "#000000" });
+        frame(&mut app, Some(next));
+        assert!(holding(&app) && has(&mut app, "only-1"));
+        assert!(!app.world().resource::<nge_render2d::Lighting2d>().enabled, "按住时上一关不被新关卡的光照照着");
+        run_until(&mut app, |app, _| has(app, "only-2"));
+        assert!(app.world().resource::<nge_render2d::Lighting2d>().enabled, "换了就照");
+    }
+
+    #[test]
+    fn the_same_unknown_uri_counts_once_while_held() {
+        let mut app = app();
+        let t = json!({ "out": 100.0, "preload": ["asset:/@t/what.xyz"] });
+        frame(&mut app, Some(level(1, t.clone())));
+        settle(&mut app);
+        let mut last = None;
+        for i in 0..4 {
+            let mut s = level(2, t.clone());
+            s["sprites"][0]["x"] = json!(i);
+            for (n, v) in frame(&mut app, Some(s)) {
+                if n == "transition" {
+                    last = Some((v["total"].clone(), v["failed"].as_array().unwrap().len()));
+                }
+            }
+        }
+        assert_eq!(last, Some((json!(1), 1)));
+    }
+
+    #[test]
+    fn the_first_level_fades_in_even_after_frames_without_one() {
+        let mut app = app();
+        frame(&mut app, None);
+        frame(&mut app, Some(json!({ "sprites": [] })));
+        let events = frame(&mut app, Some(level(1, json!({ "out": 1.0, "in": 1.0 }))));
+        assert_eq!(phases(&events), ["in"], "第一次声明关卡：从盖满揭开");
+        assert!(has(&mut app, "only-1"));
+    }
+
+    #[test]
+    fn scene_textures_apply_before_the_preload_uploads() {
+        let mut app = app();
+        let t = json!({ "out": 0.1, "min": 3.0 });
+        frame(&mut app, Some(level(1, t.clone())));
+        settle(&mut app);
+        let mut next = level(2, t);
+        next["sprites"] = json!([{ "id": "only-2", "texture": PNG }]);
+        next["textures"] = json!({ PNG: { "mipmaps": false } });
+        frame(&mut app, Some(next));
+        run_until(&mut app, |app, _| png_loaded(app).1);
+        assert!(holding(&app));
+        let (id, _) = png_loaded(&mut app);
+        assert_eq!(app.world().resource::<nge_assets::GpuImages>().mipmaps(id), Some(false), "贴图加载好、渲染器上传之前开关已经设了");
+    }
+
+    #[test]
+    fn a_load_that_never_ends_times_out_and_lets_go() {
+        let mut app = app();
+        let t = json!({ "out": 0.1, "timeout": 2.0 });
+        frame(&mut app, Some(level(1, t.clone())));
+        settle(&mut app);
+        let mut next = level(2, t);
+        next["sprites"] = json!([{ "id": "only-2", "texture": SLOW }]);
+        frame(&mut app, Some(next));
+        let mut frames = 0;
+        let events = run_until(&mut app, |app, _| {
+            frames += 1;
+            has(app, "only-2")
+        });
+        // 一帧 0.5 秒：2 秒超时
+        assert!(frames <= 5, "{frames} 帧才放开");
+        let out = events.iter().filter(|(n, v)| n == "transition" && v["phase"] == json!("out")).map(|(_, v)| v).last().unwrap();
+        assert_eq!((out["done"].clone(), out["total"].clone()), (json!(1), json!(1)), "{out}");
+        assert_eq!(out["failed"][0]["uri"], json!(SLOW));
+        assert!(out["failed"][0]["error"].as_str().unwrap().contains("超时"), "{out}");
+    }
+
+    #[test]
+    fn updates_while_held_do_not_restart_the_minimum_time() {
+        let mut app = app();
+        let t = json!({ "out": 0.1, "min": 2.0 });
+        frame(&mut app, Some(level(1, t.clone())));
+        settle(&mut app);
+        let mut frames = 0;
+        while !has(&mut app, "only-2") {
+            frames += 1;
+            assert!(frames < 20, "一直在更新场景就一直换不了");
+            let mut s = level(2, t.clone());
+            s["sprites"][0]["x"] = json!(frames);
+            frame(&mut app, Some(s));
+        }
+        assert!(frames <= 5, "{frames} 帧");
+    }
+
+    #[test]
+    fn switching_again_while_covered_stops_waiting_for_the_middle_level() {
+        let mut app = app();
+        let t = json!({ "out": 0.1, "timeout": 100.0 });
+        frame(&mut app, Some(level(1, t.clone())));
+        settle(&mut app);
+        let mut b = level(2, t.clone());
+        b["sprites"] = json!([{ "id": "only-2", "texture": SLOW }]);
+        frame(&mut app, Some(b));
+        let mut frames = 0;
+        let events = run_until(&mut app, |app, _| {
+            frames += 1;
+            if frames == 1 {
+                app.prop("scene", Some(&level(3, t.clone())));
+            }
+            has(app, "only-3")
+        });
+        assert!(frames <= 3, "不等第 2 关的贴图（{frames} 帧）：{events:?}");
     }
 }

@@ -1,6 +1,6 @@
 //! GPU 上的贴图：每张图只上传一次，2D 和 3D 的渲染器都从这里拿纹理视图。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use bevy_ecs::prelude::Resource;
 use glam::UVec2;
@@ -12,40 +12,49 @@ use crate::server::Assets;
 
 #[derive(Resource, Default)]
 pub struct GpuImages {
-    /// 平常的视图，和按线性数据读的视图（sRGB 的贴图另开一个不带 sRGB 的；本来就不是 sRGB 的两个一样）。
-    views: Vec<Option<(wgpu::TextureView, wgpu::TextureView)>>,
+    /// 平常的视图、按线性数据读的视图（sRGB 的贴图另开一个不带 sRGB 的；本来就不是 sRGB 的两个一样），和上传时的方式。
+    views: Vec<Option<(wgpu::TextureView, wgpu::TextureView, Upload)>>,
     /// 按贴图开关 mipmap（优先于 `Image::mipmaps`）。
     mipmaps: HashMap<u32, bool>,
+    /// 存的是数据不是颜色的贴图（法线图）：mip 按存的值平均，不按 sRGB 解码。
+    linear: HashSet<u32>,
+    /// 有贴图重传过就加一：渲染器看到变了就丢掉缓存的绑定组。
+    generation: u64,
     mipmapper: Option<Mipmapper>,
 }
 
+/// 一张贴图按什么方式上传的：生成 mip 链，按数据（线性）生成。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Upload {
+    mips: bool,
+    linear: bool,
+}
+
 impl GpuImages {
-    /// 上传新加载好的贴图。渲染器每帧画之前调用，没有新贴图时只是一次遍历。
+    /// 上传新加载好的贴图，开关变了的重传。渲染器每帧画之前调用，没有要传的时只是一次遍历。
     pub fn sync(&mut self, gfx: &Gfx, images: &Assets<Image>) {
         if self.views.len() < images.len() {
             self.views.resize_with(images.len(), || None);
         }
         for (id, image) in images.iter() {
-            if self.views[id.index() as usize].is_some() {
-                continue;
+            let index = id.index();
+            let wanted = self.mipmaps.get(&index).copied().unwrap_or(image.mipmaps) && image.compressed.is_none() && image.size.max_element() > 1;
+            let how = Upload { mips: wanted, linear: wanted && self.linear.contains(&index) };
+            let slot = &mut self.views[index as usize];
+            match slot {
+                Some((.., before)) if *before == how => continue,
+                Some(_) => self.generation += 1,
+                None => {}
             }
-            let mips = self.mipmaps.get(&id.index()).copied().unwrap_or(image.mipmaps);
-            let view = upload(gfx, image, mips, &mut self.mipmapper);
+            let view = upload(gfx, image, how, &mut self.mipmapper);
             let linear = linear_view(&view);
-            self.views[id.index() as usize] = Some((view, linear));
+            *slot = Some((view, linear, how));
         }
     }
 
-    /// 这张贴图上传时要不要生成 mip 链；`None` 是按 `Image::mipmaps`。贴图加载好之前设也行。
-    /// 已经上传了再改不重传（渲染器按贴图缓存了绑定组），只 warn。
+    /// 这张贴图要不要生成 mip 链；`None` 是按 `Image::mipmaps`。贴图加载好之前设也行；
+    /// 上传以后改了，下一次 [`Self::sync`] 重传（代数加一）。
     pub fn set_mipmaps(&mut self, id: ImageId, on: Option<bool>) {
-        let before = self.mipmaps.get(&id.index()).copied();
-        if before == on {
-            return;
-        }
-        if self.views.get(id.index() as usize).is_some_and(Option::is_some) {
-            log::warn!("{id:?} 已经上传了，mipmap 的开关从下一次加载起才生效");
-        }
         match on {
             Some(on) => self.mipmaps.insert(id.index(), on),
             None => self.mipmaps.remove(&id.index()),
@@ -57,14 +66,33 @@ impl GpuImages {
         self.mipmaps.get(&id.index()).copied()
     }
 
+    /// 标成存数据的贴图（法线图）：生成 mip 时按存的值平均。上传以后改了也重传。
+    pub fn set_linear(&mut self, id: ImageId, on: bool) {
+        if on {
+            self.linear.insert(id.index());
+        } else {
+            self.linear.remove(&id.index());
+        }
+    }
+
+    /// [`Self::set_linear`] 标过。
+    pub fn linear(&self, id: ImageId) -> bool {
+        self.linear.contains(&id.index())
+    }
+
+    /// 有贴图重传过就变。
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
     /// 还没加载完（或者没上传）的贴图返回 None，调用方用 [`ImageId::WHITE`] 代替，并且不要缓存。
     pub fn view(&self, id: ImageId) -> Option<&wgpu::TextureView> {
-        self.views.get(id.index() as usize).and_then(Option::as_ref).map(|(v, _)| v)
+        self.views.get(id.index() as usize).and_then(Option::as_ref).map(|(v, ..)| v)
     }
 
     /// 按线性数据读的视图（法线图之类）：sRGB 的贴图取样时不做 sRGB → 线性的转换，拿到存着的原值。
     pub fn linear_view(&self, id: ImageId) -> Option<&wgpu::TextureView> {
-        self.views.get(id.index() as usize).and_then(Option::as_ref).map(|(_, v)| v)
+        self.views.get(id.index() as usize).and_then(Option::as_ref).map(|(_, v, _)| v)
     }
 }
 
@@ -97,10 +125,10 @@ pub(crate) fn direct_format(c: &Compressed, size: UVec2, features: wgpu::Feature
     (features.contains(need) && size % c.format.block() == UVec2::ZERO).then_some(format)
 }
 
-fn upload(gfx: &Gfx, image: &Image, mips: bool, mipmapper: &mut Option<Mipmapper>) -> wgpu::TextureView {
+fn upload(gfx: &Gfx, image: &Image, how: Upload, mipmapper: &mut Option<Mipmapper>) -> wgpu::TextureView {
     let Some(c) = &image.compressed else {
-        if mips && image.size.max_element() > 1 {
-            return upload_mipmapped(gfx, image.size, &image.rgba, mipmapper);
+        if how.mips {
+            return upload_mipmapped(gfx, image.size, &image.rgba, how.linear, mipmapper);
         }
         return upload_rgba(gfx, image.size, &image.rgba, true);
     };
@@ -152,9 +180,9 @@ fn upload_rgba_levels(gfx: &Gfx, size: UVec2, levels: &[impl AsRef<[u8]>], srgb:
     texture.create_view(&Default::default())
 }
 
-/// 写第 0 级，再在 GPU 上一级一级往下生成，直到 1×1（sRGB 贴图）。
-fn upload_mipmapped(gfx: &Gfx, size: UVec2, rgba: &[u8], mipmapper: &mut Option<Mipmapper>) -> wgpu::TextureView {
-    let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+/// 写第 0 级，再在 GPU 上一级一级往下生成，直到 1×1。颜色是 sRGB 贴图；存数据的（`linear`）不带 sRGB，按存的值平均。
+fn upload_mipmapped(gfx: &Gfx, size: UVec2, rgba: &[u8], linear: bool, mipmapper: &mut Option<Mipmapper>) -> wgpu::TextureView {
+    let format = if linear { wgpu::TextureFormat::Rgba8Unorm } else { wgpu::TextureFormat::Rgba8UnormSrgb };
     let levels = mip_levels(size);
     let texture = texture(gfx, size, levels, format, wgpu::TextureUsages::RENDER_ATTACHMENT);
     gfx.queue.write_texture(
@@ -315,6 +343,21 @@ mod tests {
                 assert_eq!(w.block_copy_size(None), Some(f.block_bytes() as u32), "{f:?}");
                 assert_eq!(w.is_srgb(), srgb, "{f:?}");
             }
+        }
+    }
+
+    #[test]
+    fn the_mip_shader_translates_to_webgl2_glsl() {
+        use naga::back::glsl;
+        let module = naga::front::wgsl::parse_str(MIP_SHADER).expect("WGSL 解析");
+        let info = naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::empty()).validate(&module).expect("校验");
+        let options = glsl::Options { version: glsl::Version::Embedded { version: 300, is_webgl: true }, ..Default::default() };
+        for (stage, entry) in [(naga::ShaderStage::Vertex, "vs"), (naga::ShaderStage::Fragment, "fs")] {
+            let pipeline = glsl::PipelineOptions { shader_stage: stage, entry_point: entry.into(), multiview: None };
+            let mut out = String::new();
+            let mut writer = glsl::Writer::new(&mut out, &module, &info, &options, &pipeline, naga::proc::BoundsCheckPolicies::default()).expect(entry);
+            writer.write().expect(entry);
+            assert!(out.starts_with("#version 300 es"), "{out}");
         }
     }
 }

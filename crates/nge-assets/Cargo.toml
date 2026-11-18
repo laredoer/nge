@@ -18,3 +18,5 @@ texture2ddecoder.workspace = true
 [dev-dependencies]
 texpresso.workspace = true
 pollster.workspace = true
+# 只编译、不运行：生成 mip 的着色器能不能转成 WebGL2 / GLES 的 GLSL
+naga = { workspace = true, features = ["glsl-out"] }

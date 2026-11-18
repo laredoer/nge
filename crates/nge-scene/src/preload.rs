@@ -108,11 +108,16 @@ fn collect(scene: &Scene, out: &mut Vec<String>, depth: usize) {
 #[derive(Default)]
 pub(crate) struct Preloading {
     group: LoadGroup,
+    /// 加过的 uri：同一个只记一次（认不出的、没注册的也是）。
+    uris: std::collections::HashSet<String>,
     files: Vec<(Handle<SceneFile>, bool)>,
 }
 
 impl Preloading {
     pub fn add(&mut self, world: &mut World, uri: &str) {
+        if !self.uris.insert(uri.to_owned()) {
+            return;
+        }
         match kind_of(uri) {
             Some(Kind::Image) => drop(start::<Image>(world, &mut self.group, uri)),
             Some(Kind::Sound) => drop(start::<Sound>(world, &mut self.group, uri)),
@@ -125,6 +130,11 @@ impl Preloading {
             }
             None => self.group.fail(uri, "认不出资源类型（按扩展名：png、jpg、ktx2、wav、ogg、mp3、flac、gltf、glb、ttf、otf、json）"),
         }
+    }
+
+    /// 还在加载的 uri。
+    pub fn pending(&self, world: &World) -> Vec<String> {
+        self.group.pending(world)
     }
 
     /// 先把加载好的 JSON 文件引用的资源加进来，再算进度。
@@ -194,7 +204,7 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::*;
-    use crate::testing::{BEEP, PACK, PNG, TREE, app, frame};
+    use crate::testing::{BEEP, FONT, GLB, PACK, PNG, TREE, app, frame};
 
     fn progress(events: &[(String, Value)]) -> Vec<Value> {
         events.iter().filter(|(n, _)| n == "preload").map(|(_, v)| v.clone()).collect()
@@ -283,5 +293,23 @@ mod tests {
         let events = progress(&frame(&mut app, None));
         assert_eq!(events, [json!({ "id": "again", "done": 1, "total": 1, "failed": [], "finished": true })], "已经加载过的当帧完成");
         assert!(app.world().resource::<Preloads>().0.is_empty(), "完成的组扔掉");
+    }
+
+    #[test]
+    fn fonts_and_models_load_as_their_own_kind() {
+        let mut app = app();
+        app.command("preload", &json!({ "id": "f", "uris": [FONT, GLB] }));
+        let last = run_until_finished(&mut app, "f").pop().unwrap();
+        assert_eq!((last["done"].clone(), last["failed"].clone()), (json!(2), json!([])), "{last}");
+    }
+
+    #[test]
+    fn the_same_uri_is_added_once() {
+        let mut app = app();
+        let mut loading = Preloading::default();
+        for uri in ["asset:/@t/what.xyz", "asset:/@t/what.xyz", PNG, PNG] {
+            loading.add(app.world_mut(), uri);
+        }
+        assert_eq!(loading.poll(app.world_mut()).total, 2);
     }
 }

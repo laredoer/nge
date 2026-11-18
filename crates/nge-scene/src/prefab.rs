@@ -14,7 +14,7 @@ use crate::protocol::Scene;
 pub(crate) const LISTS: [&str; 7] = ["sprites", "tilemaps", "texts", "emitters", "bars", "bubbles", "joints"];
 /// 嵌套最多几层。
 const MAX_DEPTH: usize = 16;
-/// 一个场景最多展开出多少个节点。
+/// 一个场景最多展开多少个实例和节点（合起来）。
 const MAX_NODES: usize = 10_000;
 
 /// 场景 / 预制体的 JSON 文件（`asset:/….json`）。
@@ -62,6 +62,12 @@ pub(crate) fn expand(instances: &[InstanceNode], find: &mut dyn FnMut(&str) -> F
 }
 
 fn instantiate(inst: &InstanceNode, find: &mut dyn FnMut(&str) -> Found, stack: &mut Vec<String>, out: &mut [Vec<Value>; 7], budget: &mut usize) {
+    // 实例也算进上限：只有实例、没有节点的一层层扇出也停得住
+    if *budget == 0 {
+        warn_once(format!("预制体展开出的实例和节点超过 {MAX_NODES} 个，后面的不要了"));
+        return;
+    }
+    *budget -= 1;
     if stack.contains(&inst.prefab) {
         warn_once(format!("预制体循环：{} → {}，跳过实例 {:?}", stack.join(" → "), inst.prefab, inst.id));
         return;
@@ -96,7 +102,7 @@ fn instantiate(inst: &InstanceNode, find: &mut dyn FnMut(&str) -> Found, stack: 
             if node.get("id").and_then(Value::as_str).is_none() {
                 warn_once(format!("预制体 {} 的 {name} 里有一项没有字符串 id，跳过", inst.prefab));
             } else if *budget == 0 {
-                warn_once(format!("预制体展开出的节点超过 {MAX_NODES} 个，后面的不要了"));
+                warn_once(format!("预制体展开出的实例和节点超过 {MAX_NODES} 个，后面的不要了"));
                 break;
             } else {
                 *budget -= 1;
@@ -172,6 +178,9 @@ fn place(list: &str, node: &mut Value, inst: &InstanceNode, inside: &HashSet<Str
                 if let Some(target) = node.get_mut("chase").and_then(|c| c.get_mut("target")) {
                     prefix(target);
                 }
+                if let Some(tree) = node.get_mut("behavior").and_then(|b| b.get_mut("tree")) {
+                    behavior(tree, &prefix, inst);
+                }
             }
             offset(node, "x", inst.x);
             offset(node, "y", inst.y);
@@ -206,12 +215,40 @@ fn place(list: &str, node: &mut Value, inst: &InstanceNode, inside: &HashSet<Str
     }
 }
 
+/// 行为树里 see / near / chase 的目标跟着改名，goto 的点跟着平移。
+fn behavior(node: &mut Value, prefix: &dyn Fn(&mut Value), inst: &InstanceNode) {
+    match node.get("type").and_then(Value::as_str) {
+        Some("see" | "near" | "chase") => {
+            if let Some(target) = node.get_mut("target") {
+                prefix(target);
+            }
+        }
+        Some("goto") => {
+            for (key, by) in [("x", inst.x), ("y", inst.y)] {
+                if let Some(Value::Number(n)) = node.get(key) {
+                    node[key] = (n.as_f64().unwrap_or(0.0) + f64::from(by)).into();
+                }
+            }
+        }
+        _ => {}
+    }
+    if let Some(Value::Array(children)) = node.get_mut("children") {
+        for child in children {
+            behavior(child, prefix, inst);
+        }
+    }
+    if let Some(child) = node.get_mut("child") {
+        behavior(child, prefix, inst);
+    }
+}
+
 /// 名字找 `scene.prefabs`，`asset:/` 路径交给资源层（还没加载就开始加载）。
-fn find(name: &str, inline: &HashMap<String, Value>, server: &mut AssetServer, files: &mut Assets<SceneFile>) -> Found {
+fn find(name: &str, inline: &HashMap<String, Value>, server: &mut AssetServer, files: &mut Assets<SceneFile>, used: &mut HashSet<u32>) -> Found {
     if !name.starts_with("asset:/") {
         return inline.get(name).cloned().map_or_else(|| Found::Missing("场景的 prefabs 里没有".into()), Found::Ready);
     }
     let handle = server.load(files, name);
+    used.insert(handle.index());
     match files.state(handle) {
         LoadState::Loaded => files.get(handle).map_or(Found::Loading, |f| Found::Ready(f.0.clone())),
         LoadState::Loading => Found::Loading,
@@ -230,10 +267,15 @@ pub(crate) fn expand_prefabs(
     mut files: ResMut<Assets<SceneFile>>,
     mut events: MessageReader<AssetEvent<SceneFile>>,
     mut base: Local<Option<[usize; 7]>>,
+    mut used: Local<HashSet<u32>>,
 ) {
-    let loaded = events.read().count() > 0;
+    // 只有这个场景用到的预制体文件加载好（或失败）了才重新展开
+    let loaded = events.read().any(|e| match e {
+        AssetEvent::Loaded(h) | AssetEvent::Failed(h, _) => used.contains(&h.index()),
+    });
     if scene.is_changed() && !scene.expanded {
         *base = None;
+        used.clear();
         if scene.instances.is_empty() {
             return;
         }
@@ -242,7 +284,8 @@ pub(crate) fn expand_prefabs(
     }
     let scene = &mut *scene;
     let lens = *base.get_or_insert_with(|| lens(scene));
-    let [sprites, tilemaps, texts, emitters, bars, bubbles, joints] = expand(&scene.instances, &mut |name| find(name, &scene.prefabs, &mut server, &mut files));
+    let used = &mut *used;
+    let [sprites, tilemaps, texts, emitters, bars, bubbles, joints] = expand(&scene.instances, &mut |name| find(name, &scene.prefabs, &mut server, &mut files, used));
     scene.sprites.truncate(lens[0]);
     scene.sprites.extend(items::<crate::protocol::SpriteNode>("sprites", Value::Array(sprites)));
     scene.tilemaps.truncate(lens[1]);
@@ -258,6 +301,34 @@ pub(crate) fn expand_prefabs(
     scene.joints.truncate(lens[6]);
     scene.joints.extend(items::<crate::joints::JointNode>("joints", Value::Array(joints)));
     scene.expanded = true;
+    for dup in duplicate_ids(scene) {
+        warn_once(format!("场景里有重复的 id（{dup}）：同一个列表里后面的盖掉前面的"));
+    }
+}
+
+/// 重复的实例 id，和展开后同一个列表里重复的 id（`列表: id`）。
+pub(crate) fn duplicate_ids(scene: &Scene) -> Vec<String> {
+    let lists: [(&str, Vec<&str>); 8] = [
+        ("instances", scene.instances.iter().map(|n| n.id.as_str()).collect()),
+        ("sprites", scene.sprites.iter().map(|n| n.id.as_str()).collect()),
+        ("tilemaps", scene.tilemaps.iter().map(|n| n.id.as_str()).collect()),
+        ("texts", scene.texts.iter().map(|n| n.id.as_str()).collect()),
+        ("emitters", scene.emitters.iter().map(|n| n.id.as_str()).collect()),
+        ("bars", scene.bars.iter().map(|n| n.id.as_str()).collect()),
+        ("bubbles", scene.bubbles.iter().map(|n| n.id.as_str()).collect()),
+        ("joints", scene.joints.iter().map(|n| n.id.as_str()).collect()),
+    ];
+    let mut out = Vec::new();
+    for (list, ids) in lists {
+        let mut seen = HashSet::new();
+        let mut reported = HashSet::new();
+        for id in ids {
+            if !seen.insert(id) && reported.insert(id) {
+                out.push(format!("{list}: {id}"));
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -370,7 +441,8 @@ mod tests {
         assert_eq!(out[0].len(), MAX_DEPTH, "最多 {MAX_DEPTH} 层");
         let wide = json!({ "leaf": { "sprites": (0..100).map(|i| json!({ "id": format!("s{i}") })).collect::<Vec<_>>() } });
         let many: Vec<InstanceNode> = (0..200).map(|i| instance(json!({ "id": format!("i{i}"), "prefab": "leaf" }))).collect();
-        assert_eq!(expand(&many, &mut defs(wide))[0].len(), MAX_NODES);
+        let n = expand(&many, &mut defs(wide))[0].len();
+        assert!(n <= MAX_NODES && n > MAX_NODES - 200, "实例也占上限：{n}");
     }
 
     #[test]
@@ -423,5 +495,77 @@ mod tests {
         let scene = crate::protocol::SCENE.decode(&json!({ "instances": [{ "id": "a", "prefab": "p" }, { "id": "b" }, { "id": "c", "prefab": "p", "sett": {} }], "prefabs": { "p": {}, "q": 3 } })).unwrap();
         assert_eq!(scene.instances.iter().map(|i| i.id.as_str()).collect::<Vec<_>>(), ["a"]);
         assert_eq!(scene.prefabs.len(), 1, "不是对象的预制体丢掉");
+    }
+
+    #[test]
+    fn wide_and_deep_chains_stop_in_time() {
+        // 每层 8 个实例指向下一层，16 层：不设实例上限时要展开 8 的 16 次方次
+        let mut map = serde_json::Map::new();
+        for i in 0..16 {
+            let kids: Vec<Value> = (0..8).map(|k| json!({ "id": format!("k{k}"), "prefab": format!("p{}", i + 1) })).collect();
+            map.insert(format!("p{i}"), json!({ "instances": kids }));
+        }
+        map.insert("p16".into(), json!({ "sprites": [{ "id": "leaf" }] }));
+        let defs = Value::Object(map);
+        // 在别的线程里展开：停不下来时测试照样按时失败
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut calls = 0usize;
+            let out = expand(&[instance(json!({ "id": "r", "prefab": "p0" }))], &mut |name: &str| {
+                calls += 1;
+                defs.get(name).cloned().map_or(Found::Missing("没有".into()), Found::Ready)
+            });
+            let _ = tx.send((calls, out[0].len()));
+        });
+        let (calls, nodes) = rx.recv_timeout(Duration::from_secs(5)).expect("5 秒内要展开完");
+        assert!(calls <= MAX_NODES, "最多展开 {MAX_NODES} 个实例：{calls}");
+        assert!(nodes <= MAX_NODES);
+    }
+
+    #[test]
+    fn behavior_targets_follow_the_rename_and_goto_moves() {
+        let def = json!({ "sprites": [
+            { "id": "body" },
+            { "id": "eye", "behavior": { "tree": { "type": "sequence", "children": [
+                { "type": "see", "target": "body", "range": 10 },
+                { "type": "near", "target": "player", "range": 10 },
+                { "type": "invert", "child": { "type": "chase", "target": "body" } },
+                { "type": "goto", "x": 1, "y": 2 },
+            ] } } },
+        ] });
+        let out = expand(&[instance(json!({ "id": "e", "prefab": "enemy", "x": 100, "y": 10 }))], &mut defs(json!({ "enemy": def })));
+        let tree = &out[0][1]["behavior"]["tree"]["children"];
+        assert_eq!(tree[0]["target"], json!("e/body"));
+        assert_eq!(tree[1]["target"], json!("player"), "外面的不改");
+        assert_eq!(tree[2]["child"]["target"], json!("e/body"));
+        assert_eq!((tree[3]["x"].as_f64(), tree[3]["y"].as_f64()), (Some(101.0), Some(12.0)));
+    }
+
+    #[test]
+    fn unrelated_scene_files_do_not_reexpand() {
+        let mut app = app();
+        frame(&mut app, Some(json!({ "prefabs": { "tree": tree() }, "instances": [{ "id": "t", "prefab": "tree" }] })));
+        frame(&mut app, None);
+        let before = app.world().resource_ref::<Scene>().last_changed();
+        app.command("preload", &json!({ "id": "x", "uris": [TREE] }));
+        wait_for(&mut app, |app| {
+            let files = app.world().resource::<Assets<SceneFile>>();
+            files.iter().count() > 0
+        });
+        frame(&mut app, None);
+        assert_eq!(app.world().resource_ref::<Scene>().last_changed(), before, "这个场景没用到这个文件，不重新展开");
+    }
+
+    #[test]
+    fn duplicate_ids_are_found() {
+        let mut app = app();
+        frame(&mut app, Some(json!({
+            "prefabs": { "tree": tree() },
+            "instances": [{ "id": "t", "prefab": "tree" }, { "id": "t", "prefab": "tree", "x": 5 }, { "id": "u", "prefab": "tree" }],
+            "sprites": [{ "id": "u/crown" }],
+        })));
+        let mut dup = duplicate_ids(app.world().resource::<Scene>());
+        dup.sort();
+        assert_eq!(dup, ["instances: t", "sprites: t/crown", "sprites: t/trunk", "sprites: u/crown"]);
     }
 }

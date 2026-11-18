@@ -159,15 +159,38 @@ fn compressed_textures_keep_their_own_levels() {
 }
 
 #[test]
-fn turning_mipmaps_off_after_the_upload_does_not_reupload() {
+fn changing_the_switch_after_the_upload_reuploads_and_bumps_the_generation() {
     let Some(gfx) = gfx() else { return eprintln!("没有可用 GPU，跳过") };
     let mut images = Assets::<Image>::with_white();
     let id = images.add(png(UVec2::splat(4), &[9; 64]));
     let mut gpu = GpuImages::default();
     gpu.sync(&gfx, &images);
-    let before = gpu.view(id).unwrap().texture().clone();
+    let (before, generation) = (gpu.view(id).unwrap().texture().clone(), gpu.generation());
+    assert_eq!(before.mip_level_count(), 3);
+    gpu.set_mipmaps(id, Some(true));
+    gpu.sync(&gfx, &images);
+    assert_eq!((gpu.view(id).unwrap().texture(), gpu.generation()), (&before, generation), "和原来一样的不重传");
     gpu.set_mipmaps(id, Some(false));
     gpu.sync(&gfx, &images);
-    assert_eq!(gpu.view(id).unwrap().texture(), &before, "渲染器按贴图缓存了绑定组，不换纹理");
-    assert_eq!(before.mip_level_count(), 3);
+    assert_eq!(gpu.view(id).unwrap().texture().mip_level_count(), 1, "关掉以后重传");
+    assert_ne!(gpu.generation(), generation, "渲染器看到代数变了就丢掉缓存的绑定组");
+}
+
+#[test]
+fn normal_maps_average_the_stored_values() {
+    let Some(gfx) = gfx() else { return eprintln!("没有可用 GPU，跳过") };
+    let image = || png(UVec2::new(2, 1), &[0, 0, 0, 255, 255, 255, 255, 255]);
+    let (gpu, id) = upload(&gfx, image(), |gpu, id| gpu.set_linear(id, true));
+    let p = read_level(&gfx, &gpu, id, 1)[0];
+    assert!((126..=129).contains(&p[0]), "法线图存的是数据，不按 sRGB 解码再平均：{p:?}");
+    assert_eq!(read_level(&gfx, &gpu, id, 0), [[0, 0, 0, 255], [255, 255, 255, 255]], "第 0 级原样");
+    // 上传以后才知道是法线图：重传
+    let mut images = Assets::<Image>::with_white();
+    let id = images.add(image());
+    let mut gpu = GpuImages::default();
+    gpu.sync(&gfx, &images);
+    gpu.set_linear(id, true);
+    gpu.sync(&gfx, &images);
+    let p = read_level(&gfx, &gpu, id, 1)[0];
+    assert!((126..=129).contains(&p[0]), "{p:?}");
 }

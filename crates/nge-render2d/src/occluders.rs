@@ -1,6 +1,6 @@
 //! 法线贴图和挡光（见 docs/render2d-more.md）。
 
-use bevy_ecs::prelude::Component;
+use bevy_ecs::prelude::{Changed, Component, Query, ResMut};
 use glam::{Vec2, Vec4};
 use nge_assets::ImageId;
 
@@ -71,6 +71,13 @@ pub(crate) fn pack_edges(edges: &[(Vec2, Vec2)], lights: &[Light2d], out: &mut V
     dropped
 }
 
+/// 当法线图用的贴图存的是数据：生成 mip 时按存的值平均（见 docs/scene-flow.md）。
+pub(crate) fn mark_normal_maps(maps: Query<&NormalMap, Changed<NormalMap>>, mut images: ResMut<nge_assets::GpuImages>) {
+    for map in &maps {
+        images.set_linear(map.0, true);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use glam::Vec3;
@@ -121,5 +128,16 @@ mod tests {
         let many: Vec<_> = (0..MAX_OCCLUDER_EDGES + 3).map(|i| (Vec2::new(1.0, i as f32 * 0.01), Vec2::new(2.0, 0.0))).collect();
         assert_eq!(pack_edges(&many, &[light(0.0, 10.0, true)], &mut out), 3);
         assert_eq!(out.len(), MAX_OCCLUDER_EDGES);
+    }
+
+    #[test]
+    fn normal_maps_are_marked_as_data() {
+        let mut app = nge_ecs::App::new();
+        app.add_plugins(crate::Render2dPlugin);
+        let (color, normal) = (nge_assets::ImageId::new(5), nge_assets::ImageId::new(6));
+        app.world_mut().spawn(NormalMap(normal));
+        app.tick(nge_core::Viewport { size: [10.0, 10.0], pixels: [10, 10] }, 0.1);
+        let images = app.world().resource::<nge_assets::GpuImages>();
+        assert!(images.linear(normal) && !images.linear(color));
     }
 }

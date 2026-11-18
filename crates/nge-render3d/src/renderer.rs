@@ -96,6 +96,7 @@ struct Gpu {
     sampler: wgpu::Sampler,
     /// 按贴图编号缓存；贴图还没加载完的不缓存，先用白色贴图的。
     textures: Vec<Option<wgpu::BindGroup>>,
+    generation: u64,
     meshes: Vec<GpuMesh>,
     depth: Option<(wgpu::TextureView, wgpu::Extent3d)>,
     billboards: BillboardGpu,
@@ -140,6 +141,11 @@ impl Renderer for MeshRenderer {
         sort_draws(&mut self.draws);
         crate::billboards::build(world.resource::<Billboards>(), view, &mut self.billboard_vertices, &mut self.billboard_batches);
         let images = world.resource::<GpuImages>();
+        // 贴图重传过：缓存的绑定组指着旧纹理
+        if gpu.generation != images.generation() {
+            gpu.generation = images.generation();
+            gpu.textures.clear();
+        }
         let textures = self.draws.iter().map(|d| d.texture).chain(self.billboard_batches.iter().map(|b| b.texture));
         for id in std::iter::once(ImageId::WHITE).chain(textures) {
             gpu.cache_texture(gfx, images, id);
@@ -365,6 +371,7 @@ impl Gpu {
             texture_layout,
             sampler,
             textures: Vec::new(),
+            generation: 0,
             meshes: Vec::new(),
             depth: None,
             billboards,

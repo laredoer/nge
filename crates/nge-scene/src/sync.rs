@@ -148,27 +148,38 @@ pub(crate) fn sync_sprites(
     });
 }
 
-/// `scene.timeScale`：声明变了才写 `Time.scale`，并且这一帧就按新的缩放重算 `delta`。
-/// 一直没声明时不碰，Rust 自己设的缩放不会被第一次同步覆盖；声明去掉时回到 1。
+/// 设过 mipmap 开关的贴图（场景去掉时恢复默认）。
+#[derive(Resource, Default)]
+pub(crate) struct TextureSwitches(HashSet<ImageId>);
+
 /// `scene.textures`：按名字设 mipmap 开关；去掉的恢复成按图片自己的。
-pub(crate) fn sync_textures(scene: Res<Scene>, mut assets: SceneAssets, mut gpu: ResMut<GpuImages>, mut set: Local<HashSet<ImageId>>) {
-    let mut now = HashSet::new();
+/// 几个名字指到同一张贴图（图集名、同一个路径的不同写法）又写得不一样时，关掉的算数。
+pub(crate) fn sync_textures(scene: Res<Scene>, mut assets: SceneAssets, mut gpu: ResMut<GpuImages>, mut set: ResMut<TextureSwitches>) {
+    let mut now: HashMap<ImageId, bool> = HashMap::new();
     for (name, options) in &scene.textures {
         let Some(id) = assets.image(name) else {
             crate::lenient::warn_once(format!("scene.textures 里的 {name:?} 不是注册过的纹理名，也不是 asset:/ 路径"));
             continue;
         };
-        gpu.set_mipmaps(id, options.mipmaps);
-        if options.mipmaps.is_some() {
-            now.insert(id);
+        if let Some(on) = options.mipmaps {
+            let entry = now.entry(id).or_insert(on);
+            if *entry != on {
+                crate::lenient::warn_once(format!("scene.textures 里 {name:?} 和别的名字指同一张贴图、mipmaps 写得不一样，按关掉算"));
+                *entry = false;
+            }
         }
     }
-    for id in set.difference(&now) {
+    for (id, on) in &now {
+        gpu.set_mipmaps(*id, Some(*on));
+    }
+    for id in set.0.iter().filter(|id| !now.contains_key(id)) {
         gpu.set_mipmaps(*id, None);
     }
-    *set = now;
+    set.0 = now.into_keys().collect();
 }
 
+/// `scene.timeScale`：声明变了才写 `Time.scale`，并且这一帧就按新的缩放重算 `delta`。
+/// 一直没声明时不碰，Rust 自己设的缩放不会被第一次同步覆盖；声明去掉时回到 1。
 pub(crate) fn sync_time_scale(scene: Res<Scene>, mut time: ResMut<Time>, mut last: Local<Option<f32>>) {
     if *last == scene.time_scale {
         return;
@@ -423,5 +434,18 @@ mod tests {
         frame(&mut app, Some(json!({ "textures": { "grid": { "mipmaps": true } } })));
         let gpu = app.world().resource::<GpuImages>();
         assert_eq!((gpu.mipmaps(plain), gpu.mipmaps(grid), gpu.mipmaps(png)), (None, Some(true), None), "去掉的恢复成按图片自己的");
+    }
+
+    #[test]
+    fn two_names_for_one_texture_turn_mipmaps_off() {
+        for order in [[true, false], [false, true]] {
+            let mut app = app();
+            let other = "asset://@t/a.png";
+            frame(&mut app, Some(json!({ "textures": { PNG: { "mipmaps": order[0] }, other: { "mipmaps": order[1] } } })));
+            let world = app.world_mut();
+            let mut state: bevy_ecs::system::SystemState<SceneAssets> = bevy_ecs::system::SystemState::new(world);
+            let id = state.get_mut(world).unwrap().image(PNG).unwrap();
+            assert_eq!(app.world().resource::<GpuImages>().mipmaps(id), Some(false), "{order:?}");
+        }
     }
 }

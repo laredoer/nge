@@ -140,8 +140,15 @@ pub(crate) fn apply_sprite(entity: &mut EntityCommands, node: &SpriteNode, asset
     };
 }
 
-/// `scene.shaders` 和 `scene.post`（场景变了才跑）。
-pub(crate) fn sync_effects(scene: Res<Scene>, mut shaders: ResMut<Shaders>, mut post: ResMut<PostEffects>) {
+/// 已经交给同步的 `scene.lighting`：过场按住新场景时还是上一关的。
+#[derive(Resource, Default)]
+pub(crate) struct SceneLighting(Option<LightingNode>);
+
+/// `scene.shaders`、`scene.post` 和 `scene.lighting`（场景变了才跑）。
+pub(crate) fn sync_effects(scene: Res<Scene>, mut shaders: ResMut<Shaders>, mut post: ResMut<PostEffects>, mut lighting: ResMut<SceneLighting>) {
+    if lighting.0 != scene.lighting {
+        lighting.0 = scene.lighting.clone();
+    }
     // 一样的不算改，不会重新编译
     shaders.set(scene.shaders.clone());
     let effects: Vec<PostEffect> = scene.post.iter().map(|p| PostEffect {
@@ -157,15 +164,15 @@ pub(crate) fn sync_effects(scene: Res<Scene>, mut shaders: ResMut<Shaders>, mut 
     }
 }
 
-/// 每帧按 `scene.lighting` 摆灯：跟着精灵的灯放在精灵画的位置（有刚体时是插值过的，带视差时是挪过的）。精灵不存在时用 x、y 当世界坐标。
+/// 每帧按同步过的 `scene.lighting` 摆灯：跟着精灵的灯放在精灵画的位置（有刚体时是插值过的，带视差时是挪过的）。精灵不存在时用 x、y 当世界坐标。
 #[allow(clippy::type_complexity)]
 pub(crate) fn lighting(
-    scene: Res<Scene>,
+    declared: Res<SceneLighting>,
     cameras: Query<&Camera2d>,
     sprites: Query<(&SceneId, &Transform2d, Option<&DrawAt>, Option<&Parallax>), With<Declared<SpriteNode>>>,
     mut lighting: ResMut<Lighting2d>,
 ) {
-    let Some(node) = &scene.lighting else {
+    let Some(node) = &declared.0 else {
         if *lighting != Lighting2d::default() {
             *lighting = Lighting2d::default();
         }

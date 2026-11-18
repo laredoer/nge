@@ -74,8 +74,10 @@ export interface TransitionEvent {
 
 export interface Loading {
   id: string;
-  /** 最新的进度，引擎还没回时是 undefined。 */
+  /** 最新的进度，引擎还没回时是 undefined。加载 JSON 文件后总数会变大，`done / total` 可能变小。 */
   progress: Signal<PreloadEvent | undefined>;
+  /** 进度条用的比例 0 … 1：只涨不退。 */
+  fraction(): number;
   /** 全部完成（失败的也算）时 resolve。 */
   ready: Promise<PreloadEvent>;
 }
@@ -87,37 +89,71 @@ export interface Preloader {
   handle(event: PreloadEvent): void;
   /** 还没完成的组数。 */
   pending(): number;
+  /** 视图重建了（之前的命令引擎收不到了）：还没完成的组都按「没回」结束。 */
+  reset(): void;
 }
+
+/** 引擎多久没回进度就按「没回」结束（毫秒）。 */
+const WAIT_MS = 30000;
 
 /** 所有预加载器共用的编号：几个接同一个事件时不会串。 */
 let nextId = 1;
 
-/** `game` 拿游戏视图（`<GameView ref>`）。 */
-export function preloader(game: () => NativeComponentRef | undefined): Preloader {
-  const waiting = new Map<string, { progress: Signal<PreloadEvent | undefined>; resolve: (e: PreloadEvent) => void }>();
+/** `game` 拿游戏视图（`<GameView ref>`）。引擎 `waitMs` 毫秒没回进度时这一组按「没回」结束，免得一直挂着。 */
+export function preloader(game: () => NativeComponentRef | undefined, settings: { waitMs?: number } = {}): Preloader {
+  type Entry = { uris: string[]; progress: Signal<PreloadEvent | undefined>; resolve: (e: PreloadEvent) => void; timer: ReturnType<typeof setTimeout> };
+  const waiting = new Map<string, Entry>();
+  const finish = (id: string, event: PreloadEvent) => {
+    const entry = waiting.get(id);
+    if (entry === undefined) return;
+    waiting.delete(id);
+    clearTimeout(entry.timer);
+    entry.progress.set(event);
+    entry.resolve(event);
+  };
+  // 没回：已经报失败的留着，别的不知道载好没有，都记成失败
+  const giveUp = (id: string) => {
+    const entry = waiting.get(id)!;
+    const last = entry.progress();
+    const failed = [...(last?.failed ?? [])];
+    for (const uri of entry.uris) if (!failed.some((f) => f.uri === uri)) failed.push({ uri, error: "引擎没回进度，不知道载好没有" });
+    const total = Math.max(last?.total ?? 0, entry.uris.length);
+    finish(id, { id, done: total, total, failed, finished: true });
+  };
+  const arm = (id: string) => setTimeout(() => waiting.has(id) && giveUp(id), settings.waitMs ?? WAIT_MS);
   return {
     load(uris) {
       const id = `preload-${nextId++}`;
       const progress = signal<PreloadEvent | undefined>(undefined);
+      let best = 0;
+      const fraction = () => {
+        const p = progress();
+        const now = p === undefined ? 0 : p.finished || p.total === 0 ? 1 : p.done / p.total;
+        best = Math.max(best, now);
+        return best;
+      };
       const view = game();
       if (view === undefined) {
         const empty: PreloadEvent = { id, done: 0, total: 0, failed: [], finished: true };
         progress.set(empty);
-        return { id, progress, ready: Promise.resolve(empty) };
+        return { id, progress, fraction, ready: Promise.resolve(empty) };
       }
-      const ready = new Promise<PreloadEvent>((resolve) => waiting.set(id, { progress, resolve }));
+      const ready = new Promise<PreloadEvent>((resolve) => waiting.set(id, { uris, progress, resolve, timer: arm(id) }));
       view.command("preload", { id, uris });
-      return { id, progress, ready };
+      return { id, progress, fraction, ready };
     },
     handle(event) {
       const entry = waiting.get(event.id);
       if (entry === undefined) return;
+      if (event.finished) return finish(event.id, event);
       entry.progress.set(event);
-      if (!event.finished) return;
-      waiting.delete(event.id);
-      entry.resolve(event);
+      clearTimeout(entry.timer);
+      entry.timer = arm(event.id);
     },
     pending: () => waiting.size,
+    reset() {
+      for (const id of [...waiting.keys()]) giveUp(id);
+    },
   };
 }
 
@@ -128,6 +164,8 @@ export interface Transitions {
   phase(): TransitionEvent["phase"] | undefined;
   /** 过场里的加载进度。 */
   progress(): { done: number; total: number };
+  /** 过场里有东西在载（显示「载入中」用）：开场的揭开、没有资源要等的过场是 false。 */
+  loading(): boolean;
   /** 接 `<GameView onTransition={fade.handle}>`。 */
   handle(event: TransitionEvent): void;
 }
@@ -140,6 +178,10 @@ export function transitions(): Transitions {
       return phase === "out" || phase === "in";
     },
     phase: () => last()?.phase,
+    loading: () => {
+      const e = last();
+      return e !== undefined && e.phase !== "done" && e.total > 0;
+    },
     progress: () => {
       const e = last();
       return { done: e?.done ?? 0, total: e?.total ?? 0 };

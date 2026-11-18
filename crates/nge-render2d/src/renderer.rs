@@ -37,6 +37,7 @@ impl Plugin for Render2dPlugin {
             .init_resource::<Lighting2d>()
             .init_resource::<PostEffects>()
             .add_systems(PreUpdate, (pointer_world.in_set(PointerWorld), clear_sprite_instances))
+            .add_systems(nge_ecs::PostUpdate, crate::occluders::mark_normal_maps)
             .set_post_process(PostRenderer::default());
         let (back, front) = sprite_layers();
         app.prepend_renderer(back).add_renderer(front);
@@ -74,8 +75,9 @@ struct Gpu {
     globals: wgpu::Buffer,
     globals_group: wgpu::BindGroup,
     sampler: wgpu::Sampler,
-    /// 按（贴图，法线图）缓存；贴图还没加载完的不缓存，先用白色贴图的。
+    /// 按（贴图，法线图）缓存；贴图还没加载完的不缓存，先用白色贴图的。贴图重传过（代数变了）就清掉。
     textures: HashMap<(TextureId, TextureId), wgpu::BindGroup>,
+    generation: u64,
     instances: wgpu::Buffer,
     capacity: u64,
 }
@@ -254,6 +256,10 @@ impl Renderer for SpriteRenderer {
             return;
         }
         batch(&mut self.items, &mut self.instances, &mut self.batches);
+        if gpu.generation != gpu_images.generation() {
+            gpu.generation = gpu_images.generation();
+            gpu.textures.clear();
+        }
         for (color, normal) in std::iter::once((TextureId::WHITE, TextureId::WHITE)).chain(self.batches.iter().map(|b| (b.texture, b.normal))) {
             gpu.cache_texture(gfx, gpu_images, color, normal);
         }
@@ -409,7 +415,7 @@ impl Gpu {
         let instances = instance_buffer(device, INITIAL_CAPACITY);
         let texture_layout = pipes.texture_layout.clone();
         drop(pipes);
-        Self { pipes: shared.clone(), texture_layout, stencil: None, globals, globals_group, sampler, textures: HashMap::new(), instances, capacity: INITIAL_CAPACITY }
+        Self { pipes: shared.clone(), texture_layout, stencil: None, globals, globals_group, sampler, textures: HashMap::new(), generation: 0, instances, capacity: INITIAL_CAPACITY }
     }
 
     /// 模板缓冲跟着渲染目标的大小走（返回的 view 是克隆，便宜）。

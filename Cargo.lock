@@ -2266,6 +2266,7 @@ dependencies = [
  "glam 0.34.2",
  "image",
  "log",
+ "naga 30.0.1",
  "nge-core",
  "nge-ecs",
  "pollster 1.0.1",

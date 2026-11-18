@@ -63,6 +63,11 @@ impl LoadGroup {
         self.items.is_empty()
     }
 
+    /// 还在加载的 uri，按加进来的顺序。
+    pub fn pending(&self, world: &World) -> Vec<String> {
+        self.items.iter().filter(|(_, check)| check(world) == LoadState::Loading).map(|(uri, _)| uri.clone()).collect()
+    }
+
     pub fn progress(&self, world: &World) -> LoadProgress {
         let mut progress = LoadProgress { total: self.items.len(), ..Default::default() };
         for (uri, check) in &self.items {
@@ -174,6 +179,17 @@ mod tests {
         load::<Text>(&mut world, &mut group, "asset:/a.txt");
         assert!(group.progress(&world).finished());
         assert!(LoadGroup::new().progress(&world).finished());
+    }
+
+    #[test]
+    fn pending_lists_what_is_still_loading() {
+        let mut world = world();
+        let mut group = LoadGroup::new();
+        load::<Text>(&mut world, &mut group, "asset:/a.txt");
+        group.fail("asset:/x.what", "不认识");
+        assert_eq!(group.pending(&world), ["asset:/a.txt"]);
+        wait(&mut world, &group);
+        assert!(group.pending(&world).is_empty());
     }
 
     #[test]

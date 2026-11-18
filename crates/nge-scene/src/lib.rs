@@ -72,7 +72,7 @@ pub use query3d::{Hit3d, QUERY3D, QUERY3D_RESULT, Query3d, Query3dCommand, Query
 pub use prefab::{InstanceNode, SceneFile};
 pub use preload::{Failed, PRELOAD, PRELOADED, Preload, PreloadProgress};
 pub use protocol::{Bounds, CameraNode, Color, SCENE, Scene, SpriteNode, TAP, Tap, TextureOptions};
-pub use transition::{SceneTransition, TRANSITION, TransitionEvent, TransitionKind, TransitionNode};
+pub use transition::{SceneTransition, TRANSITION, scene_ready, TransitionEvent, TransitionKind, TransitionNode};
 pub use sync::SceneId;
 pub use tilemap::TilemapNode;
 
@@ -214,6 +214,8 @@ impl Plugin for ScenePlugin {
             .init_asset::<prefab::SceneFile>()
             .init_resource::<preload::Preloads>()
             .init_resource::<transition::SceneTransition>()
+            .init_resource::<sync::TextureSwitches>()
+            .init_resource::<effects::SceneLighting>()
             .add_command(PRELOAD)
             .add_event(PRELOADED)
             .add_event(TRANSITION)
@@ -260,6 +262,22 @@ pub(crate) mod testing {
     pub const CYCLE_A: &str = "asset:/@t/cycle-a.json";
     /// 引用 PNG 和 TREE 的预制体文件。
     pub const PACK: &str = "asset:/@t/pack.json";
+    /// 字体和 glb 模型。
+    pub const FONT: &str = "asset:/@t/a.ttf";
+    pub const GLB: &str = "asset:/@t/crate.glb";
+    /// 要 5 秒才读得出来的 PNG（加载线程卡在这一个上）。
+    pub const SLOW: &str = "asset:/@t/slow.png";
+
+    struct Slow(nge_assets::MemorySource);
+
+    impl nge_assets::AssetSource for Slow {
+        fn read(&self, uri: &str) -> Result<Vec<u8>, String> {
+            if uri == SLOW {
+                std::thread::sleep(std::time::Duration::from_secs(5));
+            }
+            self.0.read(uri)
+        }
+    }
     pub const VIEWPORT: Viewport = Viewport { size: [100.0, 100.0], pixels: [100, 100] };
 
     /// 4×2 的图集，每格 8×8。
@@ -285,9 +303,12 @@ pub(crate) mod testing {
             .with(TREE, json(serde_json::json!({ "sprites": [{ "id": "leaf", "x": 2 }, { "id": "root" }] })))
             .with(CYCLE_A, json(serde_json::json!({ "instances": [{ "id": "b", "prefab": "asset:/@t/cycle-b.json" }] })))
             .with("asset:/@t/cycle-b.json", json(serde_json::json!({ "instances": [{ "id": "a", "prefab": CYCLE_A }] })))
-            .with(PACK, json(serde_json::json!({ "sprites": [{ "id": "s", "texture": PNG }], "instances": [{ "id": "t", "prefab": TREE }] })));
+            .with(PACK, json(serde_json::json!({ "sprites": [{ "id": "s", "texture": PNG }], "instances": [{ "id": "t", "prefab": TREE }] })))
+            .with(FONT, include_bytes!("../../nge-text/fonts/Inter-Bold.ttf").as_slice())
+            .with(GLB, include_bytes!("../../nge-render3d/tests/data/test.glb").as_slice())
+            .with(SLOW, png.clone());
         let mut app = App::new();
-        app.add_plugins(nge_assets::AssetPlugin::new().source(std::sync::Arc::new(source)))
+        app.add_plugins(nge_assets::AssetPlugin::new().source(std::sync::Arc::new(Slow(source))))
             .add_plugins(nge_audio::AudioPlugin::mock())
             .add_plugins(Render3dPlugin)
             .add_plugins(Render2dPlugin);

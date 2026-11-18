@@ -326,7 +326,7 @@ export function Game(props: GameProps = {}) {
   return (
     // 让开系统栏和刘海（手机上状态栏盖在最上面；横过来时刘海在左右）
     <View class="flex-1 bg-black" style={{ paddingTop: safeArea().top, paddingLeft: safeArea().left, paddingRight: safeArea().right }}>
-      <Text class="text-white p-4">{inLab() ? t("lab") : fade.busy() ? t("loading", fade.progress()) : status()}</Text>
+      <Text class="text-white p-4">{inLab() ? t("lab") : fade.loading() ? t("loading", fade.progress()) : status()}</Text>
       <GameView
         class="flex-1"
         {...pinchZoom}

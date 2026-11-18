@@ -22,5 +22,11 @@ export function levelTransition(index: number, sounds: string[]): TransitionNode
   return { kind: index % 2 === 0 ? "fade" : "wipe", out: 0.35, in: 0.35, min: 0.8, preload: sounds };
 }
 
-/** 主角是像素风的图集：mip 链按整张图算，缩小时相邻格子会混进来，像素风缩小也该保持硬边。 */
-export const TEXTURES: Record<string, TextureOptions> = { "asset:/@platformer/hero.png": { mipmaps: false } };
+/**
+ * 主角的图集和地面的瓦片集都是像素风的一格格小图：mip 链按整张图算，缩小时相邻格子的颜色会混进来（格子边上出现杂色的缝），
+ * 像素风缩小也该保持硬边。
+ */
+export const TEXTURES: Record<string, TextureOptions> = {
+  "asset:/@platformer/hero.png": { mipmaps: false },
+  "asset:/@platformer/tiles.png": { mipmaps: false },
+};
