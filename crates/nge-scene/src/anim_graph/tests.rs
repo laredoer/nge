@@ -14,7 +14,7 @@ fn hero() -> Json {
         "params": { "speed": 0, "jump": "trigger" },
         "clips": { "idle": { "frames": [0, 1], "fps": 10 }, "walk": { "frames": [4, 5, 6], "fps": 10, "events": [{ "t": 0.1, "name": "step" }] } },
         "start": "idle",
-        "states": { "idle": { "clip": "idle", "to": [{ "to": "walk", "when": "speed > 1" }] }, "walk": { "clip": "walk" } },
+        "states": { "idle": { "clip": "idle", "to": [{ "to": "walk", "when": "speed > 1" }] }, "walk": { "clip": "walk", "to": [{ "to": "idle", "when": "jump", "exit": 100 }] } },
     })
 }
 
@@ -192,4 +192,58 @@ fn sprite_frame_uses_the_top_heavy_override_layer() {
     assert_eq!(step(&mut g, 0.0), Some(0), "混合树里 idle 占 0.7：取 idle 的帧");
     g.set_float("speed", 0.7);
     assert_eq!(step(&mut g, 0.0), Some(4), "walk 占 0.7");
+}
+
+#[test]
+fn a_typo_in_the_graph_only_drops_the_graph() {
+    let mut app = app();
+    let mut bad = hero();
+    bad["states"]["idle"]["to"][0]["fades"] = json!(0.2);
+    let mut scene = sprite(json!({ "anim": { "frames": [2, 3] }, "animGraph": bad }));
+    scene["sprites"].as_array_mut().unwrap().push(json!({ "id": "other", "color": "#ff0000" }));
+    declare(&mut app, scene);
+    tick(&mut app, 0.0);
+    let e = entity(&mut app, "hero");
+    entity(&mut app, "other");
+    assert!(app.world().get::<AnimGraph>(e).is_none() && app.world().get::<FrameAnimation>(e).is_some(), "场景照常同步，这个节点退回 anim");
+}
+
+#[test]
+fn anim_set_reports_unknown_fields() {
+    let e = ANIM_SET.decode(&json!({ "id": "hero", "param": { "speed": 1 } })).unwrap_err();
+    assert!(e.to_string().contains("param"), "{e}");
+}
+
+#[test]
+fn equal_definitions_share_one_compiled_graph() {
+    let mut app = app();
+    let mut scene = sprite(json!({ "animGraph": hero() }));
+    scene["sprites"].as_array_mut().unwrap().push(json!({ "id": "twin", "texture": "grid", "animGraph": hero() }));
+    declare(&mut app, scene.clone());
+    tick(&mut app, 0.0);
+    let shared = |app: &mut App| {
+        let (a, b) = (entity(app, "hero"), entity(app, "twin"));
+        let w = app.world();
+        (w.get::<AnimGraph>(a).unwrap().graph().clone(), w.get::<AnimGraph>(b).unwrap().graph().clone())
+    };
+    let (a, b) = shared(&mut app);
+    assert!(std::sync::Arc::ptr_eq(&a, &b), "一样的定义编译一次");
+    scene["sprites"][0]["x"] = json!(3);
+    declare(&mut app, scene);
+    tick(&mut app, 0.0);
+    assert!(std::sync::Arc::ptr_eq(&shared(&mut app).0, &a), "定义没变：不重建");
+}
+
+#[test]
+fn sprite_frame_ties_go_to_the_later_clip_like_events() {
+    let def: nge_anim::GraphDef = serde_json::from_value(json!({
+        "params": { "speed": 0.5 },
+        "clips": { "idle": { "frames": [0] }, "walk": { "frames": [4] } },
+        "states": { "move": { "blend": { "by": "speed", "clips": [{ "clip": "idle", "at": 0 }, { "clip": "walk", "at": 1 }] } } },
+    }))
+    .unwrap();
+    let mut g = AnimGraph::from_def(&def).unwrap();
+    let graph = g.graph().clone();
+    g.step(0.0, |c| graph.clip(c).and_then(nge_anim::Clip::frames_duration));
+    assert_eq!(sprite_frame(g.graph(), g.output()), Some(4), "各一半：后面的 walk 赢");
 }

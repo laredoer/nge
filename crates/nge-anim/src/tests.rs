@@ -66,7 +66,7 @@ fn compile_reports_mistakes() {
         (json!({ "params": { "x": 0 }, "states": { "a": { "blend": { "by": ["x", "y"], "clips": [] } } } }), "没有参数"),
         (json!({ "clips": { "a": { "frames": [1], "fps": 0 } }, "states": { "a": { "clip": "a" } } }), "fps"),
         (json!({ "clips": { "a": { "events": [{ "t": -1, "name": "x" }] } }, "states": { "a": { "clip": "a" } } }), "不小于 0"),
-        (json!({ "layers": [{ "weight": "w", "states": { "a": { "clip": "a" } } }] }), "没有参数"),
+        (json!({ "states": { "a": { "clip": "a" } }, "layers": [{ "weight": "w", "states": { "a": { "clip": "a" } } }] }), "没有参数"),
         (json!({ "params": { "on": true }, "states": { "a": { "clip": "a", "speedParam": "on" } } }), "这里要"),
     ];
     for (def, want) in cases {
@@ -131,7 +131,7 @@ fn bool_and_float_conditions_all_have_to_hold() {
 }
 
 #[test]
-fn trigger_is_used_once_and_waits_until_a_transition_uses_it() {
+fn trigger_is_used_once_and_dropped_where_nothing_uses_it() {
     let mut g = graph(json!({
         "params": { "jump": "trigger" },
         "start": "idle",
@@ -145,11 +145,11 @@ fn trigger_is_used_once_and_waits_until_a_transition_uses_it() {
     assert_eq!((g.state(0), g.triggered("jump")), (Some("jump"), Some(false)), "转了，用掉");
     g.trigger("jump");
     step(&mut g, 0.1);
-    assert_eq!((g.state(0), g.triggered("jump")), (Some("jump"), Some(true)), "jump 状态不看它：留着");
+    assert_eq!((g.state(0), g.triggered("jump")), (Some("jump"), Some(false)), "jump 状态没有转换用它：清掉");
     step(&mut g, 0.4);
     assert_eq!(g.state(0), Some("idle"), "播完回去");
     step(&mut g, 0.1);
-    assert_eq!((g.state(0), g.triggered("jump")), (Some("jump"), Some(false)), "回到 idle 后用掉留着的");
+    assert_eq!(g.state(0), Some("idle"), "回到 idle 后不会再跳");
 }
 
 #[test]
@@ -211,7 +211,7 @@ fn any_state_goes_first_and_skips_the_current_state() {
     step(&mut g, 0.1);
     assert_eq!(g.state(0), Some("hurt"));
     assert_clips(&g, 0, &[("hit", 0.2, 1.0)]);
-    assert_eq!(g.triggered("hit"), Some(true), "转到自己的跳过，trigger 不用掉");
+    assert_eq!(g.triggered("hit"), Some(false), "转到自己的跳过；这里没有别的转换用它，清掉");
 }
 
 // ---------- 过渡 ----------
@@ -279,7 +279,7 @@ fn going_back_to_a_fading_state_keeps_its_time() {
 #[test]
 fn instances_are_capped() {
     let states: serde_json::Map<String, Json> =
-        (0..12).map(|i| (format!("s{i}"), json!({ "clip": "a", "to": [{ "to": format!("s{}", (i + 1) % 12), "fade": 100 }] }))).collect();
+        (0..12).map(|i| (format!("s{i}"), json!({ "clip": "a", "to": [{ "to": format!("s{}", (i + 1) % 12), "fade": 100, "exit": 0 }] }))).collect();
     let mut g = graph(json!({ "start": "s0", "states": states }));
     for _ in 0..20 {
         step(&mut g, 0.5);
@@ -516,8 +516,8 @@ fn entering_a_state_fires_its_zero_time_event_once() {
     }));
     step(&mut g, 0.1);
     g.trigger("hit");
-    assert_eq!(step(&mut g, 0.1), Vec::<String>::new(), "这一步转过去");
-    assert_eq!(step(&mut g, 0.1), ["ouch"]);
+    assert_eq!(step(&mut g, 0.1), ["ouch"], "转过去的这一步发");
+    assert_eq!(step(&mut g, 0.1), Vec::<String>::new());
     assert_eq!(step(&mut g, 0.1), Vec::<String>::new());
 }
 
@@ -536,3 +536,5 @@ fn layers_fire_their_own_events_unless_weight_is_zero() {
     let fired = g.step(1.0, durations);
     assert_eq!((fired[1].layer.as_str(), fired[1].state.as_str(), fired[1].clip.as_str()), ("upper", "wave", "wave"));
 }
+
+mod fixes;

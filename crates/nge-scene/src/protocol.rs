@@ -117,7 +117,7 @@ pub struct SpriteNode {
     pub anim: Option<AnimNode>,
     /// 动画状态机（见 docs/anim-graph.md）；有它时 `anim`、`frame` 不起作用。
     #[serde(rename = "animGraph")]
-    pub anim_graph: Option<nge_anim::GraphDef>,
+    pub anim_graph: Option<crate::anim_graph::GraphJson>,
     /// 状态机的参数，和上一次声明不一样时才写进去。
     #[serde(rename = "animParams")]
     pub anim_params: Option<crate::anim_graph::AnimParams>,

@@ -86,13 +86,6 @@ pub struct Pose {
     old_weights: Vec<[f32; MAX_MORPH_TARGETS]>,
 }
 
-impl Pose {
-    /// 只有矩阵和权重的姿势（状态机算好的，见 docs/anim-graph.md）。
-    pub(crate) fn posed(nodes: Vec<glam::Mat4>, weights: Vec<[f32; MAX_MORPH_TARGETS]>) -> Self {
-        Self { nodes, weights, ..Self::default() }
-    }
-}
-
 /// 推进动画、算姿势（`PostUpdate`）。时间按 [`Time`] 的（缩放过的）帧间隔走。有状态机（`AnimGraph`）的实体归 `graph_pose` 管。
 pub(crate) fn animate(time: Res<Time>, assets: Res<Assets3d>, mut models: Query<(&Model3d, &mut Animator, &mut Pose), Without<nge_anim::AnimGraph>>) {
     for (model, mut animator, mut pose) in &mut models {

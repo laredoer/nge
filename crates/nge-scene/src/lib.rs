@@ -175,6 +175,8 @@ impl Plugin for ScenePlugin {
             .add_event(ANIM_EVENT)
             .add_message::<nge_anim::AnimEvent>()
             .add_systems(Update, anim_graph::anim_set)
+            // 物理之后推进状态机：参数可以用物理写回的实际速度
+            .configure_sets(PostUpdate, nge_anim::Animated.after(PhysicsStepped))
             .add_systems(PostUpdate, (anim_graph::animate_sprite_graphs.in_set(nge_anim::Animated), anim_graph::forward_events.after(nge_anim::Animated)))
             .add_event(TWEEN_END)
             .add_event(COLLIDE)

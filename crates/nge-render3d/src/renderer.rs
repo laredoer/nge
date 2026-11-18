@@ -52,6 +52,8 @@ impl Plugin for Render3dPlugin {
             .add_systems(PostUpdate, crate::graph_pose::animate_graphs.in_set(nge_anim::Animated))
             .init_resource::<crate::billboards::Billboards>()
             .add_systems(PreUpdate, crate::billboards::clear_billboards);
+        // 一插上状态机就有 Pose：第一帧就按状态机的姿势画（见 docs/anim-graph.md）
+        app.world_mut().register_required_components::<nge_anim::AnimGraph, crate::animator::Pose>();
         app.insert_resource(Assets3d::default()).init_resource::<AmbientLight>().init_resource::<Shadows>().add_renderer(MeshRenderer::default());
     }
 }

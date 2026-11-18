@@ -59,7 +59,13 @@ impl Node for SpriteNode {
     }
 }
 
-pub(crate) fn sync_sprites(mut commands: Commands, scene: Res<Scene>, mut assets: SceneAssets, nodes: Query<(Entity, &Declared<SpriteNode>)>) {
+pub(crate) fn sync_sprites(
+    mut commands: Commands,
+    scene: Res<Scene>,
+    mut assets: SceneAssets,
+    nodes: Query<(Entity, &Declared<SpriteNode>)>,
+    mut graphs: Local<crate::anim_graph::GraphCache>,
+) {
     sync_list(&mut commands, &scene.sprites, &nodes, |commands, entity, before, node| {
         let image = assets.texture(&node.id, node.texture.as_deref(), node.grid, node.frame);
         // 只给 w 或 h 时按正方形；都不给时纯色块按 1×1、纹理按像素大小
@@ -117,7 +123,7 @@ pub(crate) fn sync_sprites(mut commands: Commands, scene: Res<Scene>, mut assets
         crate::effects::apply_sprite(&mut entity, node, &mut assets);
         crate::ai::apply_chase(&mut entity, before, node);
         // 状态机管帧时不用 anim（见 docs/anim-graph.md）
-        let graph = crate::anim_graph::apply_graph(&mut entity, &node.id, before.map(|b| (&b.anim_graph, &b.anim_params)), &node.anim_graph, &node.anim_params);
+        let graph = crate::anim_graph::apply_graph(&mut entity, &node.id, before.map(|b| (&b.anim_graph, &b.anim_params)), &node.anim_graph, &node.anim_params, &mut graphs);
         if graph {
             if node.anim.is_some() {
                 log::warn!("节点 {:?} 同时写了 anim 和 animGraph，以 animGraph 为准", node.id);

@@ -14,8 +14,8 @@ use nge_assets::{AssetPlugin, AssetServer, Assets, Handle};
 use nge_audio::{Audio, AudioPlugin, Play, Sound};
 use nge_core::EventKey;
 use nge_ecs::glam::Vec2;
-use nge_ecs::{ActionMap, Actions, App, Input, Outbox, Rumble, Startup, Time, Update};
-use nge_physics2d::{Contact, Physics, Velocity};
+use nge_ecs::{ActionMap, Actions, App, Input, Outbox, PostUpdate, Rumble, Startup, Time, Update};
+use nge_physics2d::{Contact, Physics, PhysicsStepped, Velocity};
 use nge_render2d::{Render2dPlugin, Transform2d};
 use nge_render3d::Render3dPlugin;
 use nge_scene::{LevelStart, SceneId, ScenePlugin};
@@ -141,11 +141,13 @@ struct Controller {
     jumped: bool,
     /// 面朝右是 1，左是 -1。
     facing: f32,
+    /// 重生、重开、换关：状态机回到默认状态（不放落地声）。
+    anim_reset: bool,
 }
 
 impl Default for Controller {
     fn default() -> Self {
-        Self { airborne: f32::INFINITY, jump_pressed: f32::INFINITY, air_time: 0.0, spawn: None, falls: 0, stomped: HashSet::new(), jumped: false, facing: 1.0 }
+        Self { airborne: f32::INFINITY, jump_pressed: f32::INFINITY, air_time: 0.0, spawn: None, falls: 0, stomped: HashSet::new(), jumped: false, facing: 1.0, anim_reset: true }
     }
 }
 
@@ -279,10 +281,17 @@ fn control_guest(
 }
 
 /// 主角的动画状态机：速度、竖直速度、着地、起跳的 trigger；按水平速度转向（翻 `scale.x`）。
+/// 在物理之后、状态机推进之前跑（`PostUpdate`），用物理写回的实际速度：顶着墙时是 0，不会原地走路。
 /// 场景同步会把 `scale` 写回声明的值，所以朝向记在 `Controller` 里，每帧都对一下。
-fn animate_player(physics: Res<Physics>, mut ctl: ResMut<Controller>, mut players: Query<(Entity, &SceneId, &Velocity, &mut Transform2d, Option<&mut AnimGraph>)>) {
+fn animate_player(
+    physics: Res<Physics>,
+    mut ctl: ResMut<Controller>,
+    mut players: Query<(Entity, &SceneId, &Velocity, &mut Transform2d, Option<&mut AnimGraph>)>,
+    mut warned: Local<bool>,
+) {
     let Some((entity, _, v, mut t, graph)) = players.iter_mut().find(|(_, id, ..)| id.0 == PLAYER) else { return };
     let jumped = std::mem::take(&mut ctl.jumped);
+    let reset = std::mem::take(&mut ctl.anim_reset);
     if v.linear.x.abs() > FACE_SPEED {
         ctl.facing = v.linear.x.signum();
     }
@@ -290,13 +299,28 @@ fn animate_player(physics: Res<Physics>, mut ctl: ResMut<Controller>, mut player
         t.scale.x = ctl.facing * t.scale.x.abs();
     }
     let Some(mut graph) = graph else { return };
-    let grounded = physics.contacts(entity).iter().any(|c| c.normal.y > GROUND_NORMAL);
-    graph.set_float("speed", v.linear.x.abs());
-    graph.set_float("vy", v.linear.y);
-    graph.set_bool("grounded", grounded);
-    if jumped {
-        graph.trigger("jump");
+    if reset {
+        graph.reset();
     }
+    let grounded = physics.contacts(entity).iter().any(|c| c.normal.y > GROUND_NORMAL);
+    let failed = hero_params(&mut graph, v.linear.x.abs(), v.linear.y, grounded, jumped && !reset);
+    if !failed.is_empty() && !std::mem::replace(&mut *warned, true) {
+        log::warn!("主角的状态机没有参数 {failed:?}（或类型不对），见 hero-anim.json");
+    }
+}
+
+/// 设主角状态机的参数，返回没设上的名字。
+fn hero_params(graph: &mut AnimGraph, speed: f32, vy: f32, grounded: bool, jumped: bool) -> Vec<&'static str> {
+    let mut failed = Vec::new();
+    for (name, ok) in [("speed", graph.set_float("speed", speed)), ("vy", graph.set_float("vy", vy)), ("grounded", graph.set_bool("grounded", grounded))] {
+        if !ok {
+            failed.push(name);
+        }
+    }
+    if jumped && !graph.trigger("jump") {
+        failed.push("jump");
+    }
+    failed
 }
 
 /// 主角动画事件的声音：走跑落脚放脚步声，落地放落地声。
@@ -335,7 +359,8 @@ fn build(audio: AudioPlugin) -> App {
         .init_resource::<Sfx>()
         .add_systems(Startup, load_sfx)
         .init_resource::<debug::DebugView>()
-        .add_systems(Update, (reset_on_level_start, control, control_guest, animate_player, anim_sounds, debug::debug_view, toggle_perf).chain());
+        .add_systems(Update, (reset_on_level_start, control, control_guest, debug::debug_view, toggle_perf).chain())
+        .add_systems(PostUpdate, (animate_player.after(PhysicsStepped).before(nge_anim::Animated), anim_sounds.after(nge_anim::Animated)));
     app.world_mut().resource_mut::<Actions>().set_map(default_controls());
     app
 }
@@ -922,7 +947,11 @@ mod tests {
 
     /// 带上主角图集和动画状态机（hero-anim.json，game.tsx 的 `...HERO` 用的同一份）的关卡。
     fn hero_level() -> Value {
-        let mut scene = level(None);
+        hero_level_with(None)
+    }
+
+    fn hero_level_with(pit: Option<(usize, usize)>) -> Value {
+        let mut scene = level(pit);
         let graph: Value = serde_json::from_str(include_str!("../hero-anim.json")).unwrap();
         let hero = scene["sprites"][0].as_object_mut().unwrap();
         hero.insert("texture".into(), json!("asset:/@platformer/hero.png"));
@@ -985,6 +1014,80 @@ mod tests {
         }
         assert_eq!(seen, ["jump", "fall", "land", "move"], "跳、落、落地、回到走跑");
         assert_eq!(anim_events(&events), [("land".to_owned(), "land".to_owned())], "落地一次");
+    }
+
+    #[test]
+    fn pushing_a_wall_does_not_walk_or_step() {
+        let mut app = app();
+        let mut scene = hero_level();
+        scene["sprites"].as_array_mut().unwrap().push(json!({ "id": "wall", "x": 60, "y": 48, "w": 32, "h": 96, "body": { "kind": "fixed", "friction": 0 } }));
+        app.prop("scene", Some(&scene));
+        run(&mut app, 20);
+        key(&mut app, "ArrowRight", true);
+        run(&mut app, 30);
+        for fps in [60.0, 30.0] {
+            let events: Vec<_> = (0..30).flat_map(|_| app.tick(VIEWPORT, 1.0 / fps)).collect();
+            let (state, frame, _) = hero(&mut app);
+            assert!(player(&mut app).1.x.abs() < 1.0, "顶着墙不动");
+            assert!(state == "move" && frame <= 1, "{fps} 帧：顶墙是待机 {state} {frame}");
+            assert!(anim_events(&events).is_empty(), "{fps} 帧：没有脚步 {:?}", anim_events(&events));
+        }
+    }
+
+    #[test]
+    fn a_second_jump_trigger_in_the_air_lands_once() {
+        let mut app = app();
+        app.prop("scene", Some(&hero_level()));
+        run(&mut app, 20);
+        key(&mut app, "Space", true);
+        run(&mut app, 1);
+        key(&mut app, "Space", false);
+        assert_eq!(hero(&mut app).0, "jump");
+        // 跳的状态里又来一次 jump（比如踩到敌人弹起）
+        let world = app.world_mut();
+        let mut graphs = world.query::<(&SceneId, &mut AnimGraph)>();
+        graphs.iter_mut(world).find(|(id, _)| id.0 == PLAYER).unwrap().1.trigger("jump");
+        let (mut seen, mut events) = (Vec::new(), Vec::new());
+        for _ in 0..120 {
+            events.extend(run(&mut app, 1));
+            let state = hero(&mut app).0;
+            if seen.last() != Some(&state) {
+                seen.push(state);
+            }
+        }
+        assert_eq!(seen, ["jump", "fall", "land", "move"], "落下来以后不再跳一次");
+        assert_eq!(anim_events(&events), [("land".to_owned(), "land".to_owned())], "只落地一次");
+    }
+
+    #[test]
+    fn respawning_and_restarting_reset_the_animation_quietly() {
+        let mut app = app();
+        app.prop("scene", Some(&hero_level_with(Some((22, 24)))));
+        run(&mut app, 20);
+        key(&mut app, "ArrowRight", true);
+        (0..120).find(|_| run(&mut app, 1).iter().any(|(n, _)| n == "respawn")).expect("掉进坑里");
+        key(&mut app, "ArrowRight", false);
+        let after = run(&mut app, 30);
+        assert!(anim_events(&after).iter().all(|(_, n)| n != "land"), "重生不放落地声：{:?}", anim_events(&after));
+        assert_eq!(hero(&mut app).0, "move");
+
+        key(&mut app, "Space", true);
+        run(&mut app, 1);
+        key(&mut app, "Space", false);
+        run(&mut app, 15);
+        assert_eq!(hero(&mut app).0, "fall", "松开空格跳得矮，已经在落");
+        key(&mut app, "KeyR", true);
+        let after = run(&mut app, 30);
+        key(&mut app, "KeyR", false);
+        assert!(anim_events(&after).iter().all(|(_, n)| n != "land"), "重开不放落地声：{:?}", anim_events(&after));
+        assert_eq!(hero(&mut app).0, "move");
+    }
+
+    #[test]
+    fn missing_hero_params_are_reported() {
+        let mut graph = AnimGraph::from_def(&nge_anim::GraphDef::from_json(r#"{ "params": { "speed": 0, "jump": "trigger" }, "states": { "s": { "clip": "s" } } }"#).unwrap()).unwrap();
+        assert_eq!(hero_params(&mut graph, 3.0, -1.0, true, true), ["vy", "grounded"]);
+        assert_eq!(graph.float("speed"), Some(3.0));
     }
 
     #[test]

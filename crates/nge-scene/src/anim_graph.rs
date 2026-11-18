@@ -1,6 +1,8 @@
 //! 节点上的动画状态机（`animGraph` / `animParams`）、`animSet` command、2D 精灵按状态机选帧、动画事件转给 TSX（见 docs/anim-graph.md）。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 
 use bevy_ecs::prelude::*;
 use nge_anim::{AnimEvent, AnimGraph, Graph, GraphDef, LayerOutput, OneOrMany, ParamValue};
@@ -8,7 +10,8 @@ use nge_core::{CommandKey, EventKey};
 use nge_ecs::{Outbox, Time};
 use nge_render2d::{Sprite, SpriteImage};
 use nge_render3d::Model3d;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+use serde_json::Value as Json;
 
 use crate::sync::SceneId;
 
@@ -18,9 +21,9 @@ pub const ANIM_EVENT: EventKey<AnimEventOut> = EventKey::new("animEvent");
 /// 节点上声明式的参数。
 pub type AnimParams = BTreeMap<String, ParamValue>;
 
-/// TSX 的 `animSet` command：设参数、发 trigger。
+/// TSX 的 `animSet` command：设参数、发 trigger。字段写错时整条不认，warn 里有字段名。
 #[derive(Message, Debug, Clone, PartialEq, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct AnimSet {
     pub id: String,
     pub params: AnimParams,
@@ -43,17 +46,93 @@ pub struct AnimEventOut {
     pub name: String,
 }
 
-/// 2D：取最上面一层权重 ≥ 0.5 的覆盖层（都不够时取第 0 层）里权重最大的片段，按时间取帧。
+/// 2D：取最上面一层权重 ≥ 0.5 的覆盖层（都不够时取第 0 层）里最重的片段（和发事件同一个规则：实例权重 × 片段权重，一样重时后面的赢），按时间取帧。
 pub fn sprite_frame(graph: &Graph, out: &[LayerOutput]) -> Option<u32> {
     let layer = out.iter().skip(1).rev().find(|l| !l.additive && l.weight >= 0.5 && !l.clips.is_empty()).or(out.first())?;
-    // 一样重时写在前面的赢
-    let top = layer.clips.iter().fold(None, |best: Option<&nge_anim::ClipSample>, c| if best.is_none_or(|b| c.weight > b.weight) { Some(c) } else { best })?;
+    let top = nge_anim::heaviest(&layer.clips)?;
     graph.clips()[top.clip].frame_at(top.time)
 }
 
-/// 同步节点的 `animGraph` / `animParams`：定义按值比，变了才重建；参数只写和上一次声明不一样的。
+/// 节点上的 `animGraph`：先按任意 JSON 收（定义写错不连累整个场景），同步时再解析。带一个内容的哈希，同步时按它比，不深比较。
+#[derive(Debug, Clone)]
+pub struct GraphJson {
+    pub value: Json,
+    hash: u64,
+}
+
+impl GraphJson {
+    pub fn new(value: Json) -> Self {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        hash_json(&value, &mut h);
+        Self { value, hash: h.finish() }
+    }
+}
+
+/// 按哈希比（64 位，撞上的概率可以不管）。
+impl PartialEq for GraphJson {
+    fn eq(&self, other: &Self) -> bool {
+        self.hash == other.hash
+    }
+}
+
+impl<'de> Deserialize<'de> for GraphJson {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        Json::deserialize(d).map(Self::new)
+    }
+}
+
+fn hash_json(v: &Json, h: &mut impl Hasher) {
+    match v {
+        Json::Null => 0u8.hash(h),
+        Json::Bool(b) => (1u8, b).hash(h),
+        Json::Number(n) => (2u8, n.as_f64().unwrap_or(f64::NAN).to_bits()).hash(h),
+        Json::String(s) => (3u8, s).hash(h),
+        Json::Array(a) => {
+            (4u8, a.len()).hash(h);
+            a.iter().for_each(|x| hash_json(x, h));
+        }
+        Json::Object(o) => {
+            (5u8, o.len()).hash(h);
+            for (k, x) in o {
+                k.hash(h);
+                hash_json(x, h);
+            }
+        }
+    }
+}
+
+/// 定义（按哈希）→ 编译好的状态机：一样的定义只编译一次，各节点共用一个 `Arc<Graph>`。
+#[derive(Default)]
+pub(crate) struct GraphCache(HashMap<u64, Result<Arc<Graph>, String>>);
+
+impl GraphCache {
+    /// 存太多（定义一直在变）时清一次。
+    const MAX: usize = 256;
+
+    fn get(&mut self, def: &GraphJson) -> Result<Arc<Graph>, String> {
+        if self.0.len() > Self::MAX && !self.0.contains_key(&def.hash) {
+            self.0.clear();
+        }
+        self.0
+            .entry(def.hash)
+            .or_insert_with(|| {
+                let parsed = GraphDef::deserialize(&def.value).map_err(|e| format!("定义不对：{e}"))?;
+                Graph::compile(&parsed).map(Arc::new)
+            })
+            .clone()
+    }
+}
+
+/// 同步节点的 `animGraph` / `animParams`：定义按哈希比，变了才重建；参数只写和上一次声明不一样的。
 /// 返回这一帧以后实体上有没有状态机（定义不合法时没有）。
-pub(crate) fn apply_graph(entity: &mut EntityCommands, id: &str, before: Option<(&Option<GraphDef>, &Option<AnimParams>)>, def: &Option<GraphDef>, params: &Option<AnimParams>) -> bool {
+pub(crate) fn apply_graph(
+    entity: &mut EntityCommands,
+    id: &str,
+    before: Option<(&Option<GraphJson>, &Option<AnimParams>)>,
+    def: &Option<GraphJson>,
+    params: &Option<AnimParams>,
+    cache: &mut GraphCache,
+) -> bool {
     let Some(def) = def else {
         entity.remove::<AnimGraph>();
         return false;
@@ -61,23 +140,21 @@ pub(crate) fn apply_graph(entity: &mut EntityCommands, id: &str, before: Option<
     let empty = AnimParams::new();
     let wanted = params.as_ref().unwrap_or(&empty);
     let rebuild = before.is_none_or(|(d, _)| d.as_ref() != Some(def));
-    if rebuild {
-        return match AnimGraph::from_def(def) {
-            Ok(mut graph) => {
-                set_params(&mut graph, id, wanted);
-                entity.insert(graph);
-                true
-            }
-            Err(e) => {
+    let graph = match cache.get(def) {
+        Ok(graph) => graph,
+        Err(e) => {
+            if rebuild {
                 log::warn!("节点 {id:?} 的 animGraph 不对，不建状态机：{e}");
                 entity.remove::<AnimGraph>();
-                false
             }
-        };
-    }
-    // 定义没变：上一次没建成的这次也建不成（编译很快，节点变了才走到这里）
-    if Graph::compile(def).is_err() {
-        return false;
+            return false;
+        }
+    };
+    if rebuild {
+        let mut graph = AnimGraph::new(graph);
+        set_params(&mut graph, id, wanted);
+        entity.insert(graph);
+        return true;
     }
     let old = before.and_then(|(_, p)| p.as_ref()).unwrap_or(&empty);
     let changed: AnimParams = wanted.iter().filter(|(k, v)| old.get(*k) != Some(*v)).map(|(k, v)| (k.clone(), *v)).collect();

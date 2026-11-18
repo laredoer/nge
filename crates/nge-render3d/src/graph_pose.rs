@@ -1,6 +1,7 @@
 //! 按状态机（`nge_anim::AnimGraph`）的输出算 3D 姿势：每层的片段加权混合，覆盖层按遮罩盖上去，叠加层按参考姿势算差值叠上去（见 docs/anim-graph.md「3D」）。
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use bevy_ecs::prelude::*;
 use glam::{Quat, Vec3, Vec4};
@@ -9,7 +10,7 @@ use nge_ecs::Time;
 
 use crate::animation::{Skeleton, Trs};
 use crate::animator::{Pose, apply, reset};
-use crate::assets::{Assets3d, Model};
+use crate::assets::{Assets3d, Model, ModelId};
 use crate::mesh::MAX_MORPH_TARGETS;
 use crate::renderer::Model3d;
 
@@ -30,15 +31,16 @@ pub fn mask(skeleton: &Skeleton, names: &[String]) -> (Vec<f32>, bool) {
 }
 
 /// 加权混合几份姿势（权重加起来是 1）：平移、缩放、变形权重加权平均，旋转按和第一份同半球加权求和再归一化。
-pub(crate) fn mix(poses: &[(&[Trs], &[Weights], f32)], locals: &mut Vec<Trs>, weights: &mut Vec<Weights>) {
+pub(crate) fn mix<L: AsRef<[Trs]>, W: AsRef<[Weights]>>(poses: &[(L, W, f32)], locals: &mut Vec<Trs>, weights: &mut Vec<Weights>) {
     locals.clear();
     weights.clear();
-    let Some(&(first, _, _)) = poses.first() else { return };
+    let Some((first, _, _)) = poses.first() else { return };
+    let first = first.as_ref();
     for i in 0..first.len() {
         let (mut t, mut s, mut q, mut w, mut total) = (Vec3::ZERO, Vec3::ZERO, Vec4::ZERO, [0.0; MAX_MORPH_TARGETS], 0.0);
         let r0 = Vec4::from(first[i].rotation);
-        for &(pose, ws, a) in poses.iter().filter(|p| p.2 > 0.0) {
-            let x = pose[i];
+        for (pose, ws, a) in poses.iter().filter(|p| p.2 > 0.0) {
+            let (x, ws, a) = (pose.as_ref()[i], ws.as_ref(), *a);
             t += x.translation * a;
             s += x.scale * a;
             let r = Vec4::from(x.rotation);
@@ -90,93 +92,126 @@ pub(crate) fn add(base: &mut [Trs], base_w: &mut [Weights], pose: &[Trs], pose_w
 }
 
 /// 片段 `clip` 在 `t` 的本地姿势；没有这个片段时是不播动画的姿势。
-fn sample(model: &Model, clip: Option<&crate::Animation>, t: f32) -> (Vec<Trs>, Vec<Weights>) {
-    let (mut locals, mut weights) = (Vec::new(), Vec::new());
-    reset(model, &mut locals, &mut weights);
-    if let Some(clip) = clip {
-        apply(clip, t, &mut locals, &mut weights);
+/// 每帧复用的缓冲区：片段采样、这层的姿势、参考姿势、每个节点的 alpha。
+#[derive(Default)]
+pub(crate) struct Scratch {
+    /// 采样池：(本地姿势, 变形权重, 混合权重)；只增不减，按需要的个数用前面的。
+    samples: Vec<(Vec<Trs>, Vec<Weights>, f32)>,
+    pose: (Vec<Trs>, Vec<Weights>),
+    reference: (Vec<Trs>, Vec<Weights>),
+    alpha: Vec<f32>,
+    locals: Vec<Trs>,
+    weights: Vec<Weights>,
+}
+
+/// 一个实体的遮罩缓存：状态机或模型换了才重算。留着 `Arc` 本身，指针不会被别的状态机重用。
+pub(crate) struct Masks {
+    graph: Arc<Graph>,
+    model: ModelId,
+    layers: Vec<Option<(Vec<f32>, bool)>>,
+}
+
+impl Masks {
+    pub(crate) fn new(graph: &Arc<Graph>, model: &Model, id: ModelId) -> Self {
+        let layers = graph.layers().iter().map(|l| l.mask.as_ref().map(|names| mask(&model.skeleton, names))).collect();
+        Self { graph: Arc::clone(graph), model: id, layers }
     }
-    (locals, weights)
+
+    fn fits(&self, graph: &Arc<Graph>, id: ModelId) -> bool {
+        Arc::ptr_eq(&self.graph, graph) && self.model == id
+    }
 }
 
-/// 几个 (片段名, 时间, 权重) 采样后混在一起；找不到的片段名记进 `missing`。
-fn mix_clips(model: &Model, clips: impl Iterator<Item = (String, f32, f32)>, missing: &mut Vec<String>) -> (Vec<Trs>, Vec<Weights>) {
-    let samples: Vec<_> = clips
-        .map(|(name, t, w)| {
-            let anim = model.animations.iter().find(|a| a.name == name);
-            if anim.is_none() && !missing.contains(&name) {
-                missing.push(name);
-            }
-            (sample(model, anim, t), w)
-        })
-        .collect();
-    let refs: Vec<_> = samples.iter().map(|((l, w), a)| (&l[..], &w[..], *a)).collect();
-    let (mut locals, mut weights) = (Vec::new(), Vec::new());
-    mix(&refs, &mut locals, &mut weights);
-    (locals, weights)
+/// 按名字采样几个片段（找不到的停在不播动画的姿势，记进 `missing`），按权重混进 `out`。
+fn mix_clips<'a>(model: &Model, clips: impl Iterator<Item = (&'a str, f32, f32)>, samples: &mut Vec<(Vec<Trs>, Vec<Weights>, f32)>, out: &mut (Vec<Trs>, Vec<Weights>), missing: &mut Vec<String>) {
+    let mut n = 0;
+    for (name, t, w) in clips {
+        if samples.len() == n {
+            samples.push((Vec::new(), Vec::new(), 0.0));
+        }
+        let (locals, weights, a) = &mut samples[n];
+        reset(model, locals, weights);
+        match model.animations.iter().find(|a| a.name == name) {
+            Some(clip) => apply(clip, t, locals, weights),
+            None if !missing.iter().any(|m| m == name) => missing.push(name.to_owned()),
+            None => {}
+        }
+        *a = w;
+        n += 1;
+    }
+    mix(&samples[..n], &mut out.0, &mut out.1);
 }
 
-/// 按状态机的输出算本地姿势。返回模型里找不到的片段名、一个名字都没对上的遮罩所在的层。
-pub(crate) fn graph_pose(model: &Model, graph: &Graph, out: &[LayerOutput], locals: &mut Vec<Trs>, weights: &mut Vec<Weights>) -> (Vec<String>, Vec<usize>) {
+/// 按状态机的输出算本地姿势：第 0 层直接用，上面的层按模式覆盖或叠加。返回找不到的片段名和遮罩一个都没对上的层。
+pub(crate) fn graph_pose(model: &Model, graph: &Graph, out: &[LayerOutput], masks: &Masks, scratch: &mut Scratch) -> (Vec<String>, Vec<usize>) {
     let (mut missing, mut unmatched) = (Vec::new(), Vec::new());
+    let Scratch { samples, pose, reference, alpha, locals, weights } = scratch;
     reset(model, locals, weights);
-    let name = |c: usize| graph.clips()[c].name.clone();
+    let name = |c: usize| graph.clips()[c].name.as_str();
     for (i, layer) in out.iter().enumerate() {
         if layer.clips.is_empty() {
             continue;
         }
-        let (pose, pose_w) = mix_clips(model, layer.clips.iter().map(|c| (name(c.clip), c.time, c.weight)), &mut missing);
-        // 第 0 层下面没东西：不管模式，直接是它
+        mix_clips(model, layer.clips.iter().map(|c| (name(c.clip), c.time, c.weight)), samples, pose, &mut missing);
+        // 第 0 层下面没东西，权重固定是 1（编译时保证）
         if i == 0 {
-            (*locals, *weights) = (pose, pose_w);
+            locals.clone_from(&pose.0);
+            weights.clone_from(&pose.1);
             continue;
         }
         if layer.weight <= 0.0 {
             continue;
         }
         let def = &graph.layers()[layer.layer];
-        let alpha: Vec<f32> = match &def.mask {
-            Some(names) => {
-                let (m, matched) = mask(&model.skeleton, names);
+        alpha.clear();
+        match masks.layers.get(layer.layer).and_then(Option::as_ref) {
+            Some((m, matched)) => {
                 if !matched {
                     unmatched.push(layer.layer);
                 }
-                m.iter().map(|m| m * layer.weight).collect()
+                alpha.extend(m.iter().map(|m| m * layer.weight));
             }
-            None => vec![layer.weight; locals.len()],
-        };
+            None => alpha.resize(locals.len(), layer.weight),
+        }
         if layer.additive {
             // 参考姿势：reference 片段（或每个片段自己）的 0 秒，按同样的权重混
-            let (reference, ref_w) = mix_clips(model, layer.clips.iter().map(|c| (name(def.reference.unwrap_or(c.clip)), 0.0, c.weight)), &mut missing);
-            add(locals, weights, &pose, &pose_w, &reference, &ref_w, &alpha);
+            mix_clips(model, layer.clips.iter().map(|c| (name(def.reference.unwrap_or(c.clip)), 0.0, c.weight)), samples, reference, &mut missing);
+            add(locals, weights, &pose.0, &pose.1, &reference.0, &reference.1, alpha);
         } else {
-            overlay(locals, weights, &pose, &pose_w, &alpha);
+            overlay(locals, weights, &pose.0, &pose.1, alpha);
         }
     }
     (missing, unmatched)
 }
 
-/// 推进状态机、算姿势、发动画事件（`PostUpdate`，`nge_anim::Animated` 集）。没有 [`Pose`] 的补上。
+/// 推进状态机、算姿势、发动画事件（`PostUpdate`，`nge_anim::Animated` 集）。`Pose` 是状态机要求的组件，插上就有。
 #[allow(clippy::type_complexity)]
 pub(crate) fn animate_graphs(
-    mut commands: Commands,
     time: Res<Time>,
     assets: Res<Assets3d>,
-    mut models: Query<(Entity, &Model3d, &mut AnimGraph, Option<&mut Pose>)>,
+    mut models: Query<(Entity, &Model3d, &mut AnimGraph, &mut Pose)>,
     mut events: MessageWriter<AnimEvent>,
     mut warned: Local<HashSet<(Entity, String)>>,
+    mut masks: Local<HashMap<Entity, Masks>>,
+    mut scratch: Local<Scratch>,
 ) {
-    // 删掉的实体留下的提示记录：攒多了清一次
+    // 删掉的实体留下的记录：攒多了清一次
     if warned.len() > 1024 {
         warned.clear();
     }
-    for (entity, model, mut graph, pose) in &mut models {
+    if masks.len() > 2 * models.iter().len() + 16 {
+        masks.retain(|e, _| models.contains(*e));
+    }
+    for (entity, model, mut graph, mut pose) in &mut models {
         let Some(m) = assets.model(model.0) else { continue };
         for fired in graph.step(time.delta, |name| m.animations.iter().find(|a| a.name == name).map(|a| a.duration)) {
             events.write(AnimEvent::new(entity, fired));
         }
-        let (mut locals, mut weights) = (Vec::new(), Vec::new());
-        let (missing, unmatched) = graph_pose(m, graph.graph(), graph.output(), &mut locals, &mut weights);
+        let entry = masks.entry(entity).or_insert_with(|| Masks::new(graph.graph(), m, model.0));
+        if !entry.fits(graph.graph(), model.0) {
+            *entry = Masks::new(graph.graph(), m, model.0);
+        }
+        let (missing, unmatched) = graph_pose(m, graph.graph(), graph.output(), entry, &mut scratch);
         for name in missing {
             if warned.insert((entity, name.clone())) {
                 let names: Vec<&str> = m.animations.iter().map(|a| a.name.as_str()).collect();
@@ -188,16 +223,9 @@ pub(crate) fn animate_graphs(
                 log::warn!("状态机第 {layer} 层的遮罩一个节点名都没对上（模型的节点：{:?}），这层不起作用", m.skeleton.names);
             }
         }
-        let mut nodes = Vec::new();
-        m.skeleton.globals(&locals, &mut nodes);
-        match pose {
-            Some(mut pose) => {
-                (pose.nodes, pose.weights) = (nodes, weights);
-            }
-            None => {
-                commands.entity(entity).insert(Pose::posed(nodes, weights));
-            }
-        }
+        let pose = &mut *pose;
+        m.skeleton.globals(&scratch.locals, &mut pose.nodes);
+        pose.weights.clone_from(&scratch.weights);
     }
 }
 
@@ -411,7 +439,52 @@ mod tests {
         let world = app.world();
         let model = world.resource::<Assets3d>().model(world.get::<Model3d>(e).unwrap().0).unwrap().clone();
         let graph = world.get::<AnimGraph>(e).unwrap();
-        let (missing, unmatched) = graph_pose(&model, graph.graph(), graph.output(), &mut Vec::new(), &mut Vec::new());
+        let masks = Masks::new(graph.graph(), &model, world.get::<Model3d>(e).unwrap().0);
+        let (missing, unmatched) = graph_pose(&model, graph.graph(), graph.output(), &masks, &mut Scratch::default());
         assert_eq!((missing, unmatched), (vec!["nope".to_owned()], vec![1]));
+    }
+
+    #[test]
+    fn mask_ignores_repeated_and_empty_names() {
+        let s = Skeleton { names: ["hips", "", "arm", ""].map(String::from).to_vec(), ..skeleton() };
+        assert_eq!(mask(&s, &["".into(), "arm".into(), "arm".into()]), (vec![0.0, 0.0, 1.0, 0.0], true), "空名字对不上没有名字的节点，重复的名字没关系");
+        assert_eq!(mask(&s, &["".into()]), (vec![0.0; 4], false));
+    }
+
+    #[test]
+    fn the_pose_is_there_from_the_first_frame() {
+        let (mut app, e) = app(json!({ "states": { "s": { "clip": "lift" } } }));
+        assert!(app.world().get::<Pose>(e).is_some(), "一插上状态机就有 Pose，渲染不会先画一帧不动的");
+        tick(&mut app, 0.0);
+        assert!(near(node(&app, e, 1), Vec3::new(0.0, 5.0, 0.0)), "{}", node(&app, e, 1));
+    }
+
+    #[test]
+    fn switching_between_animator_and_graph_keeps_the_pose_right() {
+        let (mut app, e) = app(json!({ "states": { "s": { "clip": "slide" } } }));
+        tick(&mut app, 0.0);
+        tick(&mut app, 0.5);
+        assert!(near(node(&app, e, 0), Vec3::new(5.0, 0.0, 0.0)));
+        app.world_mut().entity_mut(e).remove::<AnimGraph>().insert(crate::Animator::new("lift"));
+        tick(&mut app, 0.1);
+        assert!(near(node(&app, e, 0), Vec3::ZERO) && near(node(&app, e, 1), Vec3::new(0.0, 5.0, 0.0)), "换成 Animator：{} {}", node(&app, e, 0), node(&app, e, 1));
+        let graph = AnimGraph::from_def(&serde_json::from_value(json!({ "states": { "s": { "clip": "slide" } } })).unwrap()).unwrap();
+        app.world_mut().entity_mut(e).remove::<crate::Animator>().insert(graph);
+        tick(&mut app, 0.25);
+        assert!(near(node(&app, e, 0), Vec3::new(2.5, 0.0, 0.0)) && near(node(&app, e, 1), Vec3::new(2.5, 1.0, 0.0)), "换回状态机：{} {}", node(&app, e, 0), node(&app, e, 1));
+    }
+
+    #[test]
+    fn a_new_graph_on_the_same_entity_uses_its_own_mask() {
+        let layered = |mask: &str| json!({ "states": { "s": { "clip": "slide" } }, "layers": [{ "mask": [mask], "states": { "l": { "clip": "lift" } } }] });
+        let (mut app, e) = app(layered("arm"));
+        tick(&mut app, 0.0);
+        tick(&mut app, 0.5);
+        assert!(near(node(&app, e, 0), Vec3::new(5.0, 0.0, 0.0)) && near(node(&app, e, 1), Vec3::new(5.0, 5.0, 0.0)), "只盖 arm：{} {}", node(&app, e, 0), node(&app, e, 1));
+        let graph = AnimGraph::from_def(&serde_json::from_value(layered("hips")).unwrap()).unwrap();
+        app.world_mut().entity_mut(e).insert(graph);
+        tick(&mut app, 0.0);
+        tick(&mut app, 0.5);
+        assert!(near(node(&app, e, 0), Vec3::ZERO) && near(node(&app, e, 1), Vec3::new(0.0, 5.0, 0.0)), "遮罩换成 hips：整个盖成 lift：{} {}", node(&app, e, 0), node(&app, e, 1));
     }
 }

@@ -13,7 +13,7 @@ pub use def::{
     AtDef, BlendClipDef, BlendDef, Clip, ClipDef, EventDef, Graph, GraphDef, Layer, LayerDef, LayerMode, OneOrMany, ParamDef, ParamKind, ParamValue, StateDef, TransitionDef, WeightDef,
 };
 pub use events::{MAX_LOOPS, crossed};
-pub use graph::{AnimGraph, ClipSample, Fired, LayerOutput, MAX_INSTANCES};
+pub use graph::{AnimGraph, ClipSample, Fired, LayerOutput, MAX_INSTANCES, heaviest};
 
 /// 动画事件（ECS 消息）：`entity` 上第 `layer` 层的 `state` 状态里，片段 `clip` 播到了事件 `name`。
 #[derive(Message, Debug, Clone, PartialEq)]

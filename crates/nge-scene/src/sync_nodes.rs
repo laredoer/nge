@@ -89,6 +89,7 @@ pub(crate) fn sync_models(
     mut assets: SceneAssets,
     nodes: Query<(Entity, &Declared<ModelNode>)>,
     mut animators: Query<&mut Animator>,
+    mut graphs: Local<crate::anim_graph::GraphCache>,
 ) {
     sync_list(&mut commands, &scene.models, &nodes, |commands, entity, before, node| {
         let [rx, ry, rz] = node.rotation.map(f32::to_radians);
@@ -112,7 +113,7 @@ pub(crate) fn sync_models(
             entity.remove::<Model3d>().insert(GltfModel(assets.model(&node.model)));
         }
         // 状态机接管时不用 animation（见 docs/anim-graph.md）
-        let graph = crate::anim_graph::apply_graph(&mut entity, &node.id, before.map(|b| (&b.anim_graph, &b.anim_params)), &node.anim_graph, &node.anim_params);
+        let graph = crate::anim_graph::apply_graph(&mut entity, &node.id, before.map(|b| (&b.anim_graph, &b.anim_params)), &node.anim_graph, &node.anim_params, &mut graphs);
         if graph && node.animation.is_some() {
             log::warn!("模型 {:?} 同时写了 animation 和 animGraph，以 animGraph 为准", node.id);
         }

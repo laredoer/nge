@@ -329,6 +329,13 @@ impl Graph {
             .then(|| LayerDef { name: "base".into(), start: def.start.clone(), states: def.states.clone(), any: def.any.clone(), ..LayerDef::default() });
         for (i, layer) in top.iter().chain(&def.layers).enumerate() {
             let name = if layer.name.is_empty() { format!("{i}") } else { layer.name.clone() };
+            if layers.iter().any(|l: &Layer| l.name == name) {
+                return Err(format!("层名重复：{name:?}（只有顶层的 states 时第 0 层叫 \"base\"）"));
+            }
+            // 第 0 层下面没东西：权重固定是 1，3D 姿势、2D 选帧、事件都按 1 算
+            if i == 0 && layer.weight != WeightDef::Fixed(1.0) {
+                return Err(format!("第 0 层 {name:?} 的 weight 固定是 1，不能写别的数或参数"));
+            }
             layers.push(b.layer(layer, name)?);
         }
         if layers.is_empty() {
@@ -410,6 +417,9 @@ impl Builder<'_> {
                     if !t.fade.is_finite() || t.exit.is_some_and(|e| !e.is_finite()) {
                         return Err(format!("{what}：fade、exit 要是有限数"));
                     }
+                    if t.when.list().is_empty() && t.exit.is_none() {
+                        return Err(format!("{what}：没有条件也没有 exit，每一步都会转"));
+                    }
                     Ok(Transition { to, when, fade: t.fade.max(0.0), exit: t.exit })
                 })
                 .collect()
@@ -453,6 +463,9 @@ impl Builder<'_> {
             };
             if !(p[0].is_finite() && p[1].is_finite()) {
                 return Err(format!("{what}：片段 {:?} 的 at 不是有限数", c.clip));
+            }
+            if at.contains(&p) {
+                return Err(format!("{what}：片段 {:?} 的 at 和前面的位置重复", c.clip));
             }
             clips.push(self.clip(&c.clip));
             at.push(p);
