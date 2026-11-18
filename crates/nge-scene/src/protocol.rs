@@ -40,6 +40,8 @@ pub struct Scene {
     pub bubbles: Vec<crate::world_ui::BubbleNode>,
     /// 关节（见 docs/joints.md）。
     pub joints: Vec<JointNode>,
+    /// 3D 关节（见 docs/gameplay3d.md）。
+    pub joints3d: Vec<crate::joints3d::Joint3dNode>,
     /// 游戏写的着色器：名字 → WGSL（见 docs/effects2d.md）。
     pub shaders: std::collections::HashMap<String, String>,
     /// 2D 光照，写了就开。

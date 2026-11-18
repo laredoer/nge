@@ -2,7 +2,8 @@
 import { i18n, type Messages } from "../../ts/nge";
 
 export const ZH = {
-  help: "← → / A D / 手柄 移动 · 空格 / ↑ / A 跳 · R 重来 · 数字键选关（解锁了 {count} 关）· S 换存档 · L 语言 · N 联网 · K 改键 · Q 调试 · P 性能 · ",
+  help: "← → / A D / 手柄 移动 · 空格 / ↑ / A 跳 · R 重来 · 数字键选关（解锁了 {count} 关）· S 换存档 · L 语言 · N 联网 · K 改键 · Q 调试 · P 性能 · G 3D 试验场 · ",
+  lab: "3D 试验场：WASD / 方向键 走 · 空格 跳 · Q 调试线 · G 回去",
   slot: "存档 {n}",
   slotBroken: "（坏了）",
   slotNewer: "（新版本存的，不覆盖）",
@@ -42,7 +43,8 @@ export const ZH = {
 };
 
 export const EN: Messages<typeof ZH> = {
-  help: "← → / A D / pad move · Space / ↑ / A jump · R restart · digits pick a level ({count} unlocked) · S save slot · L language · N online · K keys · Q debug · P perf · ",
+  help: "← → / A D / pad move · Space / ↑ / A jump · R restart · digits pick a level ({count} unlocked) · S save slot · L language · N online · K keys · Q debug · P perf · G 3D lab · ",
+  lab: "3D lab: WASD / arrows walk · Space jump · Q debug lines · G back",
   slot: "Save {n}",
   slotBroken: " (broken)",
   slotNewer: " (from a newer version, kept)",

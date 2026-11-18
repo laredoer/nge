@@ -1,0 +1,232 @@
+//! 3D 试验场（按 G 进出，场景在 lab.ts / lab.json，见 docs/gameplay3d.md）：WASD / 方向键走、空格跳、掉出去回到起点；
+//! 相机跟在角色后上方；平台按时间来回挪；调试视图开着时角色往下打一条射线、往前扫一个球。
+
+use bevy_ecs::prelude::*;
+use nge_ecs::glam::{Quat, Vec3};
+use nge_ecs::{Input, Time};
+use nge_physics3d::{CharacterState3d, Physics3d, Physics3dDebug, QueryFilter, QueryShape, Velocity};
+use nge_render3d::{Camera3d, Transform3d};
+use nge_scene::SceneId;
+
+/// 试验场的角色和平台（lab.json 里的 id）。
+pub const LAB_HERO: &str = "lab-hero";
+pub const LAB_PLATFORM: &str = "lab-platform";
+
+/// 走的速度（point / s），起跳速度（重力 981 时跳 100 多高）。
+const SPEED: f32 = 220.0;
+const JUMP: f32 = 450.0;
+/// 掉到这以下回到起点。
+const FALL_LINE: f32 = -300.0;
+/// 相机在角色后上方多远。
+const CAMERA_BACK: Vec3 = Vec3::new(0.0, 220.0, 420.0);
+/// 平台左右挪多远、来回一趟几秒。
+const PLATFORM_REACH: f32 = 150.0;
+const PLATFORM_PERIOD: f32 = 6.0;
+/// 调试时往下打多远、往前扫多远、扫的球多大。
+const PROBE_DOWN: f32 = 200.0;
+const PROBE_FORWARD: f32 = 120.0;
+const PROBE_BALL: f32 = 10.0;
+
+/// 角色的起点（第一次见到时的位置）、朝哪边（停下来时保持）。
+#[derive(Resource, Debug)]
+pub(crate) struct Lab {
+    spawn: Option<(Entity, Vec3)>,
+    facing: Vec3,
+    platform: Option<(Entity, Vec3)>,
+}
+
+impl Default for Lab {
+    fn default() -> Self {
+        Self { spawn: None, facing: Vec3::NEG_Z, platform: None }
+    }
+}
+
+type Hero<'a> = (Entity, &'a SceneId, &'a mut Transform3d, &'a mut Velocity, &'a CharacterState3d);
+
+/// 键盘走、跳，掉下去回到起点。
+pub(crate) fn walk(time: Res<Time>, input: Res<Input>, mut lab: ResMut<Lab>, mut heroes: Query<Hero, Without<Camera3d>>) {
+    let Some((entity, _, mut t, mut v, state)) = heroes.iter_mut().find(|(_, id, ..)| id.0 == LAB_HERO) else { return };
+    if !(time.delta > 0.0) {
+        return;
+    }
+    // 新的场景（重新进试验场）是新的实体：重新记起点
+    let spawn = match lab.spawn {
+        Some((e, at)) if e == entity => at,
+        _ => lab.spawn.insert((entity, t.translation)).1,
+    };
+    if t.translation.y < FALL_LINE {
+        t.translation = spawn;
+        *v = Velocity::default();
+        return;
+    }
+    let held = |keys: [&str; 2]| keys.iter().any(|k| input.key_down(k));
+    let x = f32::from(held(["KeyD", "ArrowRight"])) - f32::from(held(["KeyA", "ArrowLeft"]));
+    let z = f32::from(held(["KeyS", "ArrowDown"])) - f32::from(held(["KeyW", "ArrowUp"]));
+    let walk = Vec3::new(x, 0.0, z).normalize_or_zero() * SPEED;
+    if walk != Vec3::ZERO {
+        lab.facing = walk.normalize();
+    }
+    // 竖直速度归引擎管（重力），着地时按空格往上跳
+    let y = if state.grounded && input.key_pressed("Space") { JUMP } else { v.linear.y };
+    v.linear = Vec3::new(walk.x, y, walk.z);
+}
+
+/// 平台绕着第一次见到的位置左右挪。
+pub(crate) fn move_platform(time: Res<Time>, mut lab: ResMut<Lab>, mut platforms: Query<(Entity, &SceneId, &mut Transform3d), Without<Camera3d>>) {
+    let Some((entity, _, mut t)) = platforms.iter_mut().find(|(_, id, _)| id.0 == LAB_PLATFORM) else { return };
+    let origin = match lab.platform {
+        Some((e, at)) if e == entity => at,
+        _ => lab.platform.insert((entity, t.translation)).1,
+    };
+    let phase = (time.elapsed as f32 / PLATFORM_PERIOD) * std::f32::consts::TAU;
+    t.translation = origin + Vec3::X * PLATFORM_REACH * phase.sin();
+}
+
+/// 相机跟在角色后上方看着它（物理走完以后摆，和这一帧的位置一致）。
+pub(crate) fn follow(heroes: Query<(&SceneId, &Transform3d), Without<Camera3d>>, mut cameras: Query<(&mut Camera3d, &mut Transform3d)>) {
+    let Some((_, hero)) = heroes.iter().find(|(id, _)| id.0 == LAB_HERO) else { return };
+    let target = hero.translation;
+    for (mut camera, mut t) in &mut cameras {
+        // 单位是 point：默认的近远平面太小
+        camera.near = 1.0;
+        camera.far = 5000.0;
+        *t = Transform3d::from_xyz(target.x + CAMERA_BACK.x, target.y + CAMERA_BACK.y, target.z + CAMERA_BACK.z).looking_at(target, Vec3::Y);
+    }
+}
+
+/// 调试视图开着时：往下打一条射线、往前扫一个球（`Physics3dDebug` 把它们画出来）。
+pub(crate) fn probe(debug: Res<Physics3dDebug>, physics: Res<Physics3d>, lab: Res<Lab>, heroes: Query<(Entity, &SceneId, &Transform3d)>) {
+    if !debug.enabled {
+        return;
+    }
+    let Some((entity, _, t)) = heroes.iter().find(|(_, id, _)| id.0 == LAB_HERO) else { return };
+    let me = QueryFilter::default().exclude(entity);
+    physics.raycast(t.translation, Vec3::NEG_Y, PROBE_DOWN, me);
+    physics.cast_shape(QueryShape::Ball(PROBE_BALL), t.translation, Quat::IDENTITY, lab.facing, PROBE_FORWARD, me);
+}
+
+#[cfg(test)]
+mod tests {
+    use nge_core::Viewport;
+    use nge_ecs::App;
+    use nge_physics3d::Collider;
+    use nge_render3d::Gizmos3d;
+    use serde_json::{Value, json};
+
+    use super::*;
+
+    const VIEWPORT: Viewport = Viewport { size: [800.0, 600.0], pixels: [800, 600] };
+
+    /// lab.ts 拼的场景（Rust 这边按 lab.json 拼一样的）。
+    fn scene() -> Value {
+        let lab: Value = serde_json::from_str(include_str!("../lab.json")).unwrap();
+        let mut models = vec![lab["hero"].clone()];
+        models.extend(lab["models"].as_array().unwrap().iter().cloned());
+        json!({ "level": "lab3d", "physics3d": { "gravity": [0, -981, 0] }, "models": models, "joints3d": lab["joints3d"] })
+    }
+
+    fn run(app: &mut App, frames: usize) {
+        for _ in 0..frames {
+            app.tick(VIEWPORT, 1.0 / 60.0);
+        }
+    }
+
+    fn key(app: &mut App, code: &str, down: bool) {
+        app.command("key", &json!({ "code": code, "down": down }));
+    }
+
+    fn find<C: Component + Clone>(app: &mut App, id: &str) -> Option<C> {
+        let world = app.world_mut();
+        world.query::<(&SceneId, &C)>().iter(world).find(|(s, _)| s.0 == id).map(|(_, c)| c.clone())
+    }
+
+    fn at(app: &mut App, id: &str) -> Transform3d {
+        find::<Transform3d>(app, id).unwrap()
+    }
+
+    fn place(app: &mut App, id: &str, to: Vec3) {
+        let world = app.world_mut();
+        let mut t = world.query::<(&SceneId, &mut Transform3d)>().iter_mut(world).find(|(s, _)| s.0 == id).unwrap().1;
+        t.translation = to;
+    }
+
+    /// 进试验场，等模型加载完、碰撞体都生成、角色站稳（地面还没有时角色先掉下去，掉出去回到起点再站上来）。
+    fn lab() -> App {
+        let mut app = crate::build(nge_audio::AudioPlugin::mock());
+        app.prop("scene", Some(&scene()));
+        for _ in 0..600 {
+            run(&mut app, 1);
+            let ready = ["lab-floor", "lab-steps", "lab-ramps", "lab-door", "lab-rock"].iter().all(|id| find::<Collider>(&mut app, id).is_some());
+            let standing = find::<CharacterState3d>(&mut app, LAB_HERO).is_some_and(|s| s.grounded) && (at(&mut app, LAB_HERO).translation.z - 300.0).abs() < 1.0;
+            if ready && standing {
+                return app;
+            }
+        }
+        panic!("试验场没准备好：{:?}", find::<CharacterState3d>(&mut app, LAB_HERO));
+    }
+
+    #[test]
+    fn the_hero_walks_jumps_and_climbs_the_steps() {
+        let mut app = lab();
+        let start = at(&mut app, LAB_HERO).translation;
+        assert!((start.y - 24.0).abs() < 2.0, "站在地上 {start}");
+        key(&mut app, "KeyW", true);
+        run(&mut app, 30);
+        key(&mut app, "KeyW", false);
+        let walked = at(&mut app, LAB_HERO).translation;
+        assert!(start.z - walked.z > 90.0 && (walked.y - start.y).abs() < 2.0, "W 往 -z 走 {walked}");
+        key(&mut app, "Space", true);
+        run(&mut app, 1);
+        key(&mut app, "Space", false);
+        run(&mut app, 12);
+        assert!(at(&mut app, LAB_HERO).translation.y > start.y + 50.0, "跳起来 {}", at(&mut app, LAB_HERO).translation);
+        run(&mut app, 60);
+        assert!(find::<CharacterState3d>(&mut app, LAB_HERO).unwrap().grounded, "落回地上");
+        // 走上四级台阶（每级 16 高，角色能迈 20）
+        place(&mut app, LAB_HERO, Vec3::new(-300.0, 25.0, 230.0));
+        run(&mut app, 10);
+        key(&mut app, "KeyW", true);
+        let mut highest = 0.0f32;
+        for _ in 0..80 {
+            run(&mut app, 1);
+            highest = highest.max(at(&mut app, LAB_HERO).translation.y);
+        }
+        assert!((highest - (64.0 + 24.0)).abs() < 2.0, "走上最高一级（64 高）{highest}");
+    }
+
+    #[test]
+    fn the_hero_pushes_the_door_open_and_falls_back_to_the_start() {
+        let mut app = lab();
+        let closed = at(&mut app, "lab-door").rotation;
+        key(&mut app, "KeyW", true);
+        run(&mut app, 200);
+        let open = at(&mut app, "lab-door").rotation.angle_between(closed).to_degrees();
+        assert!(open > 20.0, "门推开了 {open}°");
+        assert!(open < 101.0, "限位 ±100° {open}°");
+        // 掉出去回到起点
+        key(&mut app, "KeyW", false);
+        place(&mut app, LAB_HERO, Vec3::new(2000.0, 25.0, 0.0));
+        run(&mut app, 60);
+        let back = at(&mut app, LAB_HERO).translation;
+        assert!(back.distance(Vec3::new(0.0, 24.0, 300.0)) < 5.0, "回到起点 {back}");
+    }
+
+    #[test]
+    fn q_toggles_the_3d_debug_view_and_the_platform_moves() {
+        let mut app = lab();
+        let platform = at(&mut app, LAB_PLATFORM).translation;
+        key(&mut app, "KeyQ", true);
+        run(&mut app, 1);
+        key(&mut app, "KeyQ", false);
+        assert!(app.world().resource::<Physics3dDebug>().enabled);
+        run(&mut app, 1);
+        let lines = app.world().resource::<Gizmos3d>().depth_tested().len();
+        assert!(lines > 100, "画了碰撞体的轮廓、射线、球 {lines}");
+        key(&mut app, "KeyQ", true);
+        run(&mut app, 1);
+        key(&mut app, "KeyQ", false);
+        assert!(!app.world().resource::<Physics3dDebug>().enabled);
+        run(&mut app, 60);
+        assert!(at(&mut app, LAB_PLATFORM).translation.distance(platform) > 10.0, "平台在挪");
+    }
+}

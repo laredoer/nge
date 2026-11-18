@@ -1,0 +1,267 @@
+{
+  "_": "3D 试验场的布置（见 docs/gameplay3d.md）：lab.ts 拿去拼场景，Rust 测试也读它。单位 point，地面 y = 0。",
+  "hero": {
+    "id": "lab-hero",
+    "model": "asset:/@platformer/lab-hero.glb",
+    "x": 0,
+    "y": 25,
+    "z": 300,
+    "body": {
+      "kind": "character",
+      "shape": "capsule",
+      "r": 12,
+      "h": 24,
+      "step": 20,
+      "snap": 4,
+      "friction": 0
+    }
+  },
+  "models": [
+    {
+      "id": "lab-floor",
+      "model": "asset:/@platformer/lab-floor.glb",
+      "body": {
+        "kind": "fixed",
+        "shape": "convex"
+      }
+    },
+    {
+      "id": "lab-ramps",
+      "model": "asset:/@platformer/lab-ramps.glb",
+      "x": 150,
+      "z": 150,
+      "rotation": [
+        0,
+        90,
+        0
+      ],
+      "body": {
+        "kind": "fixed",
+        "shape": "trimesh"
+      }
+    },
+    {
+      "id": "lab-steps",
+      "model": "asset:/@platformer/lab-steps.glb",
+      "x": -300,
+      "z": 150,
+      "rotation": [
+        0,
+        90,
+        0
+      ],
+      "body": {
+        "kind": "fixed",
+        "shape": "hulls"
+      }
+    },
+    {
+      "id": "lab-door",
+      "model": "asset:/@platformer/lab-door.glb",
+      "x": -45,
+      "y": 1,
+      "z": -200,
+      "body": {
+        "shape": "convex",
+        "density": 0.05
+      }
+    },
+    {
+      "id": "lab-rock",
+      "model": "asset:/@platformer/lab-rock.glb",
+      "x": -150,
+      "y": 80,
+      "z": -40,
+      "scale": 30,
+      "body": {
+        "shape": "convex",
+        "density": 0.2,
+        "friction": 0.8
+      }
+    },
+    {
+      "id": "lab-platform",
+      "model": "asset:/@platformer/lab-platform.glb",
+      "x": 150,
+      "y": 24,
+      "z": -380,
+      "body": {
+        "kind": "kinematic",
+        "size": [
+          120,
+          16,
+          120
+        ],
+        "friction": 1
+      }
+    },
+    {
+      "id": "lab-link-0",
+      "model": "asset:/@platformer/lab-ball.glb",
+      "x": -250,
+      "y": 166,
+      "z": -320,
+      "scale": 7,
+      "body": {
+        "shape": "ball",
+        "r": 7,
+        "density": 0.2
+      }
+    },
+    {
+      "id": "lab-link-1",
+      "model": "asset:/@platformer/lab-ball.glb",
+      "x": -250,
+      "y": 148,
+      "z": -320,
+      "scale": 7,
+      "body": {
+        "shape": "ball",
+        "r": 7,
+        "density": 0.2
+      }
+    },
+    {
+      "id": "lab-link-2",
+      "model": "asset:/@platformer/lab-ball.glb",
+      "x": -250,
+      "y": 130,
+      "z": -320,
+      "scale": 7,
+      "body": {
+        "shape": "ball",
+        "r": 7,
+        "density": 0.2
+      }
+    },
+    {
+      "id": "lab-link-3",
+      "model": "asset:/@platformer/lab-ball.glb",
+      "x": -250,
+      "y": 112,
+      "z": -320,
+      "scale": 7,
+      "body": {
+        "shape": "ball",
+        "r": 7,
+        "density": 0.2
+      }
+    },
+    {
+      "id": "lab-link-4",
+      "model": "asset:/@platformer/lab-ball.glb",
+      "x": -250,
+      "y": 94,
+      "z": -320,
+      "scale": 7,
+      "body": {
+        "shape": "ball",
+        "r": 7,
+        "density": 0.2
+      }
+    },
+    {
+      "id": "lab-weight",
+      "model": "asset:/@platformer/lab-ball.glb",
+      "x": -250,
+      "y": 63,
+      "z": -320,
+      "scale": 22,
+      "body": {
+        "shape": "ball",
+        "r": 22,
+        "density": 0.2
+      }
+    }
+  ],
+  "joints3d": [
+    {
+      "id": "lab-hinge",
+      "b": "lab-door",
+      "kind": "revolute",
+      "anchorA": [
+        -45,
+        66,
+        -200
+      ],
+      "axis": [
+        0,
+        1,
+        0
+      ],
+      "limits": [
+        -100,
+        100
+      ],
+      "motor": {
+        "speed": 0,
+        "maxForce": 3000000
+      }
+    },
+    {
+      "id": "lab-chain-0",
+      "b": "lab-link-0",
+      "kind": "ball",
+      "anchorA": [
+        -250,
+        175,
+        -320
+      ]
+    },
+    {
+      "id": "lab-chain-1",
+      "a": "lab-link-0",
+      "b": "lab-link-1",
+      "kind": "ball",
+      "anchorA": [
+        -250,
+        157,
+        -320
+      ]
+    },
+    {
+      "id": "lab-chain-2",
+      "a": "lab-link-1",
+      "b": "lab-link-2",
+      "kind": "ball",
+      "anchorA": [
+        -250,
+        139,
+        -320
+      ]
+    },
+    {
+      "id": "lab-chain-3",
+      "a": "lab-link-2",
+      "b": "lab-link-3",
+      "kind": "ball",
+      "anchorA": [
+        -250,
+        121,
+        -320
+      ]
+    },
+    {
+      "id": "lab-chain-4",
+      "a": "lab-link-3",
+      "b": "lab-link-4",
+      "kind": "ball",
+      "anchorA": [
+        -250,
+        103,
+        -320
+      ]
+    },
+    {
+      "id": "lab-chain-5",
+      "a": "lab-link-4",
+      "b": "lab-weight",
+      "kind": "ball",
+      "anchorA": [
+        -250,
+        85,
+        -320
+      ]
+    }
+  ]
+}

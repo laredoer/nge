@@ -2,7 +2,8 @@
 """生成 nge 用的 glTF 测试 / 示例模型（.glb，贴图内嵌），只用标准库。
 
 用法：python3 tools/gen_glb.py
-输出：crates/nge-render3d/tests/data/{test,morph}.glb、examples/{model,platformer}/assets/crate.glb、examples/platformer/assets/{flag,jelly}.glb
+输出：crates/nge-render3d/tests/data/{test,morph}.glb、examples/{model,platformer}/assets/crate.glb、examples/platformer/assets/{flag,jelly}.glb、
+examples/platformer/assets/lab-*.glb（3D 试验场，见 docs/gameplay3d.md）
 """
 import json
 import math
@@ -289,9 +290,129 @@ def jelly_model():
     b.write(ROOT / "examples/platformer/assets/jelly.glb")
 
 
+# ---- 3D 试验场（平台跳跃按 G）：单位是 point，场景里 scale 1（石头除外） ----
+
+def flat_mesh(faces):
+    """faces：每个面一串逆时针（朝外看）的顶点，法线按面算，扇形切成三角形。返回 pos, nor, idx。"""
+    pos, nor, idx = [], [], []
+    for face in faces:
+        a, b, c = face[0], face[1], face[2]
+        u = [b[i] - a[i] for i in range(3)]
+        v = [c[i] - a[i] for i in range(3)]
+        n = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]]
+        length = math.sqrt(sum(x * x for x in n))
+        n = tuple(x / length for x in n)
+        base = len(pos)
+        for p in face:
+            pos.append(tuple(float(x) for x in p))
+            nor.append(n)
+        for i in range(1, len(face) - 1):
+            idx += [base, base + i, base + i + 1]
+    return pos, nor, idx
+
+
+def box_faces(lo, hi):
+    (x0, y0, z0), (x1, y1, z1) = lo, hi
+    return [
+        [(x1, y0, z1), (x1, y0, z0), (x1, y1, z0), (x1, y1, z1)],
+        [(x0, y0, z0), (x0, y0, z1), (x0, y1, z1), (x0, y1, z0)],
+        [(x0, y1, z1), (x1, y1, z1), (x1, y1, z0), (x0, y1, z0)],
+        [(x0, y0, z0), (x1, y0, z0), (x1, y0, z1), (x0, y0, z1)],
+        [(x0, y0, z1), (x1, y0, z1), (x1, y1, z1), (x0, y1, z1)],
+        [(x1, y0, z0), (x0, y0, z0), (x0, y1, z0), (x1, y1, z0)],
+    ]
+
+
+def wedge_faces(x0, x1, rise, z0, z1):
+    """从 x0 的地面升到 x1 高 rise 的斜坡（三棱柱）。"""
+    return [
+        [(x0, 0, z1), (x1, 0, z1), (x1, rise, z1)],
+        [(x1, 0, z0), (x0, 0, z0), (x1, rise, z0)],
+        [(x0, 0, z0), (x0, 0, z1), (x1, rise, z1), (x1, rise, z0)],
+        [(x1, 0, z1), (x1, 0, z0), (x1, rise, z0), (x1, rise, z1)],
+        [(x0, 0, z0), (x1, 0, z0), (x1, 0, z1), (x0, 0, z1)],
+    ]
+
+
+def smooth_mesh(rings, segments, point):
+    """经纬网格：point(i, j) -> (位置, 法线)，i 从上到下 0..rings，j 绕一圈 0..segments。"""
+    pos, nor, idx = [], [], []
+    for i in range(rings + 1):
+        for j in range(segments + 1):
+            p, n = point(i, j)
+            pos.append(p)
+            nor.append(n)
+    w = segments + 1
+    for i in range(rings):
+        for j in range(segments):
+            a, b = i * w + j, (i + 1) * w + j
+            idx += [a, b, b + 1, a, b + 1, a + 1]
+    return pos, nor, idx
+
+
+def sphere(radius, rings=10, segments=16):
+    def point(i, j):
+        t, f = math.pi * i / rings, 2 * math.pi * j / segments
+        n = (math.sin(t) * math.cos(f), math.cos(t), -math.sin(t) * math.sin(f))
+        return tuple(radius * x for x in n), n
+    return smooth_mesh(rings, segments, point)
+
+
+def capsule(half_height, radius, rings=12, segments=16):
+    """竖着的胶囊：上半球、圆柱、下半球（rings 是偶数，中间两圈分别在圆柱的上下沿）。"""
+    half = rings // 2
+
+    def point(i, j):
+        # 上半球 0..half，下半球 half+1..rings+1：多一圈把圆柱接上
+        k = i if i <= half else i - 1
+        t, f = math.pi * k / rings, 2 * math.pi * j / segments
+        n = (math.sin(t) * math.cos(f), math.cos(t), -math.sin(t) * math.sin(f))
+        y = half_height if i <= half else -half_height
+        return (radius * n[0], radius * n[1] + y, radius * n[2]), n
+    return smooth_mesh(rings + 1, segments, point)
+
+
+def lab_model(name, parts, color, metallic=0.0, roughness=0.8):
+    """parts：[(pos, nor, idx)]，每个一个图元（同一个网格），一个纯色材质。"""
+    b = Builder()
+    prims = []
+    for pos, nor, idx in parts:
+        attrs = {"POSITION": b.accessor(pos, "VEC3"), "NORMAL": b.accessor(nor, "VEC3")}
+        prims.append({"attributes": attrs, "indices": b.accessor(idx, "SCALAR", 5125), "material": 0})
+    b.gltf["meshes"] = [{"name": name, "primitives": prims}]
+    b.gltf["materials"] = [{"pbrMetallicRoughness": {"baseColorFactor": list(color) + [1.0], "metallicFactor": metallic, "roughnessFactor": roughness}}]
+    b.gltf["nodes"] = [{"name": name, "mesh": 0}]
+    b.gltf["scenes"] = [{"nodes": [0]}]
+    b.gltf["scene"] = 0
+    b.write(ROOT / f"examples/platformer/assets/lab-{name}.glb")
+
+
+def lab_models():
+    lab_model("floor", [flat_mesh(box_faces((-800, -20, -800), (800, 0, 800)))], (0.32, 0.36, 0.4))
+    # 20° 的缓坡（长 300）和 40° 的陡坡（长 150），并排，宽 160
+    gentle, steep = math.tan(math.radians(20)), math.tan(math.radians(40))
+    lab_model("ramps", [flat_mesh(wedge_faces(0, 300, 300 * gentle, -80, 80) + wedge_faces(0, 150, 150 * steep, 140, 300))], (0.55, 0.5, 0.38))
+    # 四级台阶，每级高 16、深 50、宽 160：一级一个图元
+    steps = [flat_mesh(box_faces((i * 50, 0, -80), (i * 50 + 50, 16 * (i + 1), 80))) for i in range(4)]
+    lab_model("steps", steps, (0.6, 0.45, 0.35))
+    lab_model("door", [flat_mesh(box_faces((0, 0, -4), (90, 130, 4)))], (0.62, 0.38, 0.2))
+    lab_model("platform", [flat_mesh(box_faces((-60, -8, -60), (60, 8, 60)))], (0.75, 0.52, 0.32))
+    lab_model("ball", [sphere(1.0)], (0.75, 0.75, 0.8), metallic=0.8, roughness=0.3)
+    lab_model("hero", [capsule(12, 12)], (0.95, 0.55, 0.25))
+    # 不规则的石头：二十面体的顶点各自拉长或压扁一点，每个面一份顶点（60 个），凸包只剩 12 个角
+    t = (1 + math.sqrt(5)) / 2
+    corners = [(-1, t, 0), (1, t, 0), (-1, -t, 0), (1, -t, 0), (0, -1, t), (0, 1, t), (0, -1, -t), (0, 1, -t), (t, 0, -1), (t, 0, 1), (-t, 0, -1), (-t, 0, 1)]
+    bumps = [1.0, 0.85, 1.1, 0.9, 1.15, 0.8, 1.05, 0.95, 0.9, 1.2, 0.85, 1.0]
+    corners = [tuple(c * k * s / math.sqrt(1 + t * t) for c, s in zip(p, (1.3, 0.8, 1.0))) for p, k in zip(corners, bumps)]
+    tris = [(0, 11, 5), (0, 5, 1), (0, 1, 7), (0, 7, 10), (0, 10, 11), (1, 5, 9), (5, 11, 4), (11, 10, 2), (10, 7, 6), (7, 1, 8),
+            (3, 9, 4), (3, 4, 2), (3, 2, 6), (3, 6, 8), (3, 8, 9), (4, 9, 5), (2, 4, 11), (6, 2, 10), (8, 6, 7), (9, 8, 1)]
+    lab_model("rock", [flat_mesh([[corners[i] for i in tri] for tri in tris])], (0.5, 0.48, 0.45))
+
+
 if __name__ == "__main__":
     test_model()
     morph_model()
     crate_model()
     flag_model()
     jelly_model()
+    lab_models()

@@ -6,7 +6,7 @@ use glam::{Quat, UVec2, Vec2, Vec3, Vec4};
 use nge_core::{Ctx, Emit, Gfx, Viewport, wgpu};
 use nge_ecs::prelude::*;
 use nge_render3d::prelude::*;
-use nge_render3d::{AssetPlugin, AssetSource, ImageId, MemorySource, Shadows};
+use nge_render3d::{AssetPlugin, AssetSource, Gizmos3d, ImageId, MemorySource, Shadows};
 
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 const SIZE: u32 = 64;
@@ -1195,3 +1195,33 @@ fn cascades_shadow_near_and_far_casters_but_not_past_the_distance() {
 
 #[path = "offscreen/morph.rs"]
 mod morph;
+
+/// 一条穿过画面中心的白线（z = -1），前面挡着一个红色方块；`on_top` 时画在最前面。
+fn line_behind_cube(on_top: bool) -> Option<Pixels> {
+    render(SIZE, move |app| {
+        unlit(app);
+        app.add_systems(Startup, |world: &mut World| solid(world, Vec4::new(1.0, 0.0, 0.0, 1.0), Mesh::cube(1.0), Transform3d::from_xyz(0.0, 0.0, 1.0)));
+        app.add_systems(Update, move |mut gizmos: ResMut<Gizmos3d>| {
+            let (a, b, white) = (Vec3::new(-4.0, 0.0, -1.0), Vec3::new(4.0, 0.0, -1.0), Vec4::ONE);
+            if on_top {
+                gizmos.on_top().line(a, b, white);
+            } else {
+                gizmos.line(a, b, white);
+            }
+        });
+    })
+}
+
+/// 中间那两行（1 像素的线落在其中一行）里，第 `x` 列有没有白色。
+fn white_in_middle(img: &Pixels, x: u32) -> bool {
+    [SIZE / 2 - 1, SIZE / 2].iter().any(|&y| close(img.at(x, y), [255, 255, 255, 255]))
+}
+
+#[test]
+fn debug_lines_are_hidden_behind_models_unless_on_top() {
+    let Some(img) = line_behind_cube(false) else { return eprintln!("没有 GPU，跳过") };
+    assert!(white_in_middle(&img, 4), "方块外面看得见线");
+    assert!(!white_in_middle(&img, SIZE / 2) && close(img.center(), [255, 0, 0, 255]), "被前面的方块挡住 {:?}", img.center());
+    let Some(img) = line_behind_cube(true) else { return };
+    assert!(white_in_middle(&img, 4) && white_in_middle(&img, SIZE / 2), "画在最前面的不被挡");
+}

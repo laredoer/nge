@@ -14,7 +14,7 @@ pub(crate) fn warn_disabled(scene: Res<Scene>, mut warned: Local<[bool; 3]>) {
 /// `scene` 用到的、没编进来的、还没报过的功能，记成报过。
 fn unwarned(scene: &Scene, warned: &mut [bool; 3]) -> Vec<&'static str> {
     let uses = [
-        cfg!(not(feature = "physics3d")) && (scene.physics3d.is_some() || scene.models.iter().any(|m| m.body.is_some())),
+        cfg!(not(feature = "physics3d")) && (scene.physics3d.is_some() || !scene.joints3d.is_empty() || scene.models.iter().any(|m| m.body.is_some())),
         cfg!(not(feature = "ai")) && scene.sprites.iter().any(|s| s.chase.is_some()),
         cfg!(not(feature = "net")) && scene.net.is_some(),
     ];

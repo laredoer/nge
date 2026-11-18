@@ -1,6 +1,7 @@
 // nge 的 TSX 绑定：<GameView> 组件和场景类型（和 crates/nge-scene 的协议一一对应）。
 import { nativeComponent, signal, Storage, Text, untracked, View, type GestureResponderEvent, type NativeComponentProps, type NativeComponentRef, type Signal } from "nsh";
 import type { HttpReply } from "./http";
+import type { Query3dReply } from "./physics3d";
 import type { ActionEvent, ActionMap, PadEvent } from "./input";
 import type { NetEvent, NetNode } from "./net";
 import { heldKey } from "./touch";
@@ -363,10 +364,16 @@ export interface Emitter3dNode {
 
 /** 模型的 3D 刚体和碰撞体。和 2D 刚体在两个世界里，互不碰撞。 */
 export interface ModelBody {
-  /** 默认 "dynamic"。kinematic 跟着声明的位置平滑移动，会推开别的刚体。 */
-  kind?: "dynamic" | "fixed" | "kinematic";
-  /** 默认 "box"。capsule 是竖着的胶囊。 */
-  shape?: "box" | "ball" | "capsule";
+  /**
+   * 默认 "dynamic"。kinematic 跟着声明的位置平滑移动，会推开别的刚体。
+   * character 是角色控制器：游戏在 Rust 里改速度，引擎负责重力、贴地、爬坡、上台阶、被平台带着走（见 docs/gameplay3d.md）。
+   */
+  kind?: "dynamic" | "fixed" | "kinematic" | "character";
+  /**
+   * 默认 "box"。capsule 是竖着的胶囊。
+   * convex / hulls / trimesh 从模型网格生成（按 scale 缩放，模型加载完才建刚体）：整个模型一个凸包、每个图元一个凸包、三角网格（只能配 kind: "fixed"）。
+   */
+  shape?: "box" | "ball" | "capsule" | "convex" | "hulls" | "trimesh";
   /** 盒子的长宽高（世界单位，不乘 scale），默认边长 = 模型的 scale。 */
   size?: [number, number, number];
   /** 球、胶囊的半径，默认 scale / 2（球）、scale / 4（胶囊）。 */
@@ -385,6 +392,14 @@ export interface ModelBody {
   velocity?: [number, number, number];
   /** 碰撞开始 / 结束时发 collide 事件（两边都是模型时）。 */
   collide?: boolean;
+  /** 碰撞分组（1 … 31）：同一组的互相不碰撞；0 不分组。 */
+  group?: number;
+  /** character：能爬的最陡的坡（度），默认 50。 */
+  slope?: number;
+  /** character：自动迈上去的台阶最高多高，默认 0 不自动上。 */
+  step?: number;
+  /** character：离地多近就往下贴，默认 4，0 不贴。 */
+  snap?: number;
 }
 
 export interface ModelAnimation {
@@ -428,6 +443,38 @@ export interface JointNode {
   /** spring 的阻尼，默认 10。 */
   damping?: number;
   /** 连着的两个精灵之间还碰撞，默认不碰。 */
+  collide?: boolean;
+}
+
+/**
+ * 3D 关节：把两个带 body 的模型（或一个模型和世界）连起来，见 docs/gameplay3d.md。字段和 `JointNode` 一样，坐标是三维的。
+ */
+export interface Joint3dNode {
+  id: string;
+  /** 模型 id；不写时连到世界上。 */
+  a?: string;
+  b: string;
+  /** fixed 焊死；ball 球窝，绕支点随便转；revolute 铰链，绕 axis 转；prismatic 沿 axis 滑、不转；rope 最远 length；spring 拉向 length。 */
+  kind: "fixed" | "ball" | "revolute" | "prismatic" | "rope" | "spring";
+  /**
+   * fixed / ball / revolute / prismatic 只有一个支点：只写 anchorA 或 anchorB 时两头都用它，都不写是 b 的位置。
+   * rope / spring 两头各一个：anchorA 不写是 a 的位置（连世界时必须写），anchorB 不写是 b 的位置。
+   */
+  anchorA?: [number, number, number];
+  anchorB?: [number, number, number];
+  /** revolute 绕的轴、prismatic 滑的方向（世界坐标），默认 [1, 0, 0]。 */
+  axis?: [number, number, number];
+  /** revolute：b 相对 a 能转的角度范围（度，从声明时算起）；prismatic：沿轴的范围（point，从支点算起）。 */
+  limits?: [number, number];
+  /** 马达：revolute 的 speed 是度 / 秒，prismatic 是 point / s；maxForce 不写时不限。 */
+  motor?: { speed: number; maxForce?: number };
+  /** rope 的最大长度、spring 的静止长度；不写时是两个锚点声明时的距离。 */
+  length?: number;
+  /** spring 的劲度，按加速度算、和质量无关，默认 100。 */
+  stiffness?: number;
+  /** spring 的阻尼，默认 10。 */
+  damping?: number;
+  /** 连着的两个模型之间还碰撞，默认不碰。 */
   collide?: boolean;
 }
 
@@ -532,6 +579,8 @@ export interface Scene {
   /** 3D 重力，默认 [0, -981, 0]。 */
   physics3d?: { gravity?: [number, number, number] };
   joints?: JointNode[];
+  /** 3D 关节。 */
+  joints3d?: Joint3dNode[];
   bars?: BarNode[];
   bubbles?: BubbleNode[];
   /** 自己写的着色器：名字 → WGSL。精灵着色器写 `fn effect(e: Effect) -> vec4f`，后处理写 `fn post(p: Post) -> vec4f`。见 docs/effects2d.md。 */
@@ -918,6 +967,8 @@ interface BuiltinEvents {
   net: NetEvent;
   /** HTTP 请求的结果（见 `httpClient()`）。 */
   http: HttpReply;
+  /** 3D 空间查询的结果（见 `queries3d()`）。 */
+  query3d: Query3dReply;
 }
 
 type TouchPhase = "start" | "move" | "end" | "cancel";
@@ -926,14 +977,14 @@ export type GameViewProps<P, E> = NativeComponentProps<Partial<BuiltinProps> & P
 
 /**
  * 生成游戏视图组件。`props` / `events` 是游戏自己的通道名（Rust 侧 `add_prop` / `add_state` / `add_event`），
- * 类型由泛型给出；内置 prop `scene` / `actions`、事件 `tap` / `collide` / `animEnd` / `animEvent` / `tweenEnd` / `key` / `action` / `pad` / `levelStart` / `chase` / `typed` / `fps` / `error` / `ready` / `net` / `http`，触摸自动转成引擎的 `touch` command。
+ * 类型由泛型给出；内置 prop `scene` / `actions`、事件 `tap` / `collide` / `animEnd` / `animEvent` / `tweenEnd` / `key` / `action` / `pad` / `levelStart` / `chase` / `typed` / `fps` / `error` / `ready` / `net` / `http` / `query3d`，触摸自动转成引擎的 `touch` command。
  */
 export function gameView<P extends object = {}, E extends object = {}>(
   spec: { props?: readonly (keyof P & string)[]; events?: readonly (keyof E & string)[] } = {},
 ) {
   const Native = nativeComponent<BuiltinProps & P, BuiltinEvents & E>("nge.game", {
     props: [...new Set(["scene", "captureKeys", "actions", "screenOrientation", ...(spec.props ?? [])])] as (keyof (BuiltinProps & P) & string)[],
-    events: [...new Set(["tap", "collide", "animEnd", "animEvent", "tweenEnd", "key", "action", "pad", "levelStart", "chase", "typed", "fps", "error", "ready", "net", "http", ...(spec.events ?? [])])] as (keyof (BuiltinEvents & E) & string)[],
+    events: [...new Set(["tap", "collide", "animEnd", "animEvent", "tweenEnd", "key", "action", "pad", "levelStart", "chase", "typed", "fps", "error", "ready", "net", "http", "query3d", ...(spec.events ?? [])])] as (keyof (BuiltinEvents & E) & string)[],
   });
 
   return (props: GameViewProps<P, E>) => {
@@ -970,6 +1021,7 @@ export { i18n, missing, plural, resolveLocale, type I18n, type I18nOptions, type
 // 联网见 docs/networking.md
 export { netRoom, netSend, relayHttp, remoteId, type NetEvent, type NetNode, type NetPeer, type NetRoom, type NetStatus } from "./net";
 export { httpClient, json, type HttpClient, type HttpOptions, type HttpReply, type HttpResult } from "./http";
+export { queries3d, type Hit3d, type Queries3d, type Query3dOptions, type Query3dReply, type QueryShape3d } from "./physics3d";
 // 输入映射见 docs/input-actions.md
 export { bindingsOf, conflictsOf, inputMap, KEY_NAMES, keyAt, slotsOf, withKey, type ActionEvent, type ActionMap, type AnalogAxis, type AnalogStick, type Binding, type Bindings, type InputMap, type InputMapOptions, type InputStore, type PadEvent, type Part, type PendingBind, type Slot } from "./input";
 // 触屏控制见 docs/touch-input.md

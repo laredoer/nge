@@ -38,7 +38,7 @@ fn show(mut gizmos: Gizmos) {
 
 ## 不做
 
-- 3D 的调试绘制、文字标签、虚线、画在屏幕坐标上（HUD 用 NSH 写）。
+- 3D 的调试绘制（后来做了，见 [gameplay3d.md](gameplay3d.md)）、文字标签、虚线、画在屏幕坐标上（HUD 用 NSH 写）。
 - TSX 开关物理调试视图：需要时加一个 `scene.physics.debug`。
 
 ## 验收记录

@@ -1,10 +1,11 @@
 //! 调试视图（按 Q 开关）：所有碰撞体的轮廓（[`PhysicsDebug`]），加上角色周围的空间查询——往前、往下各一条射线，
-//! 身边一个重叠框（见 docs/physics2d.md「空间查询」、docs/gizmos.md）。
+//! 身边一个重叠框（见 docs/physics2d.md「空间查询」、docs/gizmos.md）。3D 的调试视图（[`Physics3dDebug`]）跟着一起开关。
 
 use bevy_ecs::prelude::*;
 use nge_ecs::Input;
 use nge_ecs::glam::{Vec2, Vec4};
 use nge_physics2d::{Physics, PhysicsDebug, QueryFilter, Velocity};
+use nge_physics3d::Physics3dDebug;
 use nge_render2d::{DrawAt, Gizmos, Transform2d};
 use nge_scene::SceneId;
 
@@ -37,12 +38,14 @@ pub(crate) fn debug_view(
     physics: Res<Physics>,
     mut view: ResMut<DebugView>,
     mut debug: ResMut<PhysicsDebug>,
+    mut debug3d: ResMut<Physics3dDebug>,
     players: Query<(Entity, &SceneId, &Transform2d, &DrawAt, &Velocity)>,
     drawn: Query<&DrawAt>,
     mut gizmos: Gizmos,
 ) {
     if input.key_pressed(TOGGLE_KEY) {
         debug.enabled = !debug.enabled;
+        debug3d.enabled = debug.enabled;
     }
     let Some((entity, _, t, at, v)) = players.iter().find(|(_, id, ..)| id.0 == PLAYER) else { return };
     if v.linear.x.abs() > 1.0 {

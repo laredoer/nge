@@ -3292,6 +3292,7 @@ dependencies = [
  "nge-core",
  "nge-ecs",
  "nge-physics2d",
+ "nge-physics3d",
  "nge-platform",
  "nge-render2d",
  "nge-render3d",

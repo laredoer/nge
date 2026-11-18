@@ -9,41 +9,41 @@ use super::*;
 const VIEWPORT: Viewport = Viewport { size: [100.0, 100.0], pixels: [100, 100] };
 
 /// 按 point 用：重力 -981，一米 100。
-fn app() -> App {
+pub(crate) fn app() -> App {
     let mut app = App::new();
     app.add_plugins(Physics3dPlugin { gravity: Vec3::new(0.0, -981.0, 0.0), length_unit: 100.0 });
     app
 }
 
-fn at(x: f32, y: f32, z: f32) -> Transform3d {
+pub(crate) fn at(x: f32, y: f32, z: f32) -> Transform3d {
     Transform3d { translation: Vec3::new(x, y, z), ..Default::default() }
 }
 
-fn steps(app: &mut App, n: usize) {
+pub(crate) fn steps(app: &mut App, n: usize) {
     for _ in 0..n {
         app.tick(VIEWPORT, STEP);
     }
 }
 
-fn pos(app: &App, e: Entity) -> Vec3 {
+pub(crate) fn pos(app: &App, e: Entity) -> Vec3 {
     app.world().get::<Transform3d>(e).unwrap().translation
 }
 
-fn rot(app: &App, e: Entity) -> Quat {
+pub(crate) fn rot(app: &App, e: Entity) -> Quat {
     app.world().get::<Transform3d>(e).unwrap().rotation
 }
 
 /// 顶面在 y = 0、很大的地面。
-fn ground(app: &mut App) -> Entity {
+pub(crate) fn ground(app: &mut App) -> Entity {
     app.world_mut().spawn((RigidBody::Fixed, Collider::cuboid(Vec3::new(2000.0, 20.0, 2000.0)), at(0.0, -10.0, 0.0))).id()
 }
 
 /// 20 见方的动态盒子。
-fn crate_at(app: &mut App, x: f32, y: f32, z: f32) -> Entity {
+pub(crate) fn crate_at(app: &mut App, x: f32, y: f32, z: f32) -> Entity {
     app.world_mut().spawn((RigidBody::Dynamic, Collider::cuboid(Vec3::splat(20.0)), at(x, y, z), Velocity::default())).id()
 }
 
-fn collisions(app: &mut App) -> Vec<Collision3d> {
+pub(crate) fn collisions(app: &mut App) -> Vec<Collision3d> {
     app.world_mut().resource_mut::<Messages<Collision3d>>().drain().collect()
 }
 
@@ -262,7 +262,7 @@ fn reinserting_the_same_collider_keeps_the_body() {
     let b = app.world_mut().spawn((RigidBody::Dynamic, Collider { events: true, ..Collider::cuboid(Vec3::splat(20.0)) }, at(0.0, 10.0, 0.0))).id();
     steps(&mut app, 30);
     collisions(&mut app);
-    let same = *app.world().get::<Collider>(b).unwrap();
+    let same = app.world().get::<Collider>(b).unwrap().clone();
     app.world_mut().entity_mut(b).insert(same);
     steps(&mut app, 5);
     assert!(collisions(&mut app).is_empty(), "没重建，不会重新开始接触");

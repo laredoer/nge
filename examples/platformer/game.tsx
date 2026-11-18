@@ -8,6 +8,7 @@ import { levelKey, otherLocale, strings } from "./strings";
 import { NEW_SAVE, nextSlot, SAVE_MIGRATIONS, SAVE_VERSION, saveDataOf, saveSummary, SLOTS } from "./savefile";
 import { hpBar, outOfHearts, padPlace, stickPlace, TITLE_HOLD_MS, titleBubble, zoomBy } from "./hud";
 import { boardOf, leaderOf, nameTags, netLabel, netNode, netSetting, playerName, remotePlayers, scoresUrl, submitUrl, type Leader } from "./online";
+import { labScene } from "./lab";
 import { campfireAt, finish, flagOn, HERO, JELLY_ZONE, jellyAt, LEVELS, TILE, TOWER_TRIGGER, towerAt, towerSpot, type Built, type Progress } from "./levels";
 
 /** Rust 发的事件：掉出关卡或被敌人撞到送回起点、按 R 重新开始、踩到敌人。 */
@@ -117,6 +118,8 @@ export function Game(props: GameProps = {}) {
   /** 关卡名气泡（存关卡号，画的时候取文案，换语言跟着变）：每关开始时冒出来，打完过一会儿去掉。 */
   const title = signal<number | null>(null);
   let titleEnd: ReturnType<typeof setTimeout> | undefined;
+  /** 在 3D 试验场里（按 G 进出，桌面上）：场景换成 `labScene()`，存档、语言、联网、选关不响应。 */
+  const inLab = signal(false);
   /** 刚被撞回起点：角色闪白一下。 */
   const flashing = signal(false);
   let flashEnd: ReturnType<typeof setTimeout> | undefined;
@@ -284,38 +287,52 @@ export function Game(props: GameProps = {}) {
   });
 
   const best = () => progress().best[String(level() + 1)];
+  /** 顶上的一行说明。 */
+  const status = () =>
+    [
+      trial !== undefined ? "试玩，按 Esc 回到编辑 · " : platform.desktop ? t("help", { count: progress().unlocked }) : "",
+      trial !== undefined ? "" : t("slot", { n: slot() + 1 }),
+      trial !== undefined ? "" : brokenSlot() === "newer" ? t("slotNewer") : brokenSlot() ? t("slotBroken") : "",
+      trial !== undefined ? "" : " · ",
+      t("level", { n: level() + 1, name: levelName(level()) }),
+      " · ",
+      t("coins", { got: taken().length, all: now().coins.length, count: now().coins.length }),
+      " · ",
+      t("falls", { count: falls() }),
+      best() === undefined ? "" : t("best", { seconds: best()! }),
+      won() === null ? "" : t("won", { seconds: won()! }),
+      leader() === null ? "" : t("leader", { ...leader()! }),
+      trial !== undefined ? "" : " · ",
+      trial !== undefined ? "" : netLabel(t, online.on(), room.status(), room.peers().length, room.error()),
+    ].join("");
+  /** 进出试验场：进去时这一关的事件都不算了；出来时这一关从头开始。 */
+  const toggleLab = () => {
+    if (inLab()) {
+      inLab.set(false);
+      return play(level());
+    }
+    clearTimeout(next);
+    next = undefined;
+    switching = true;
+    inLab.set(true);
+  };
 
   return (
     // 让开系统栏和刘海（手机上状态栏盖在最上面；横过来时刘海在左右）
     <View class="flex-1 bg-black" style={{ paddingTop: safeArea().top, paddingLeft: safeArea().left, paddingRight: safeArea().right }}>
-      <Text class="text-white p-4">
-        {trial !== undefined ? "试玩，按 Esc 回到编辑 · " : platform.desktop ? t("help", { count: progress().unlocked }) : ""}
-        {trial !== undefined ? "" : t("slot", { n: slot() + 1 })}
-        {trial !== undefined ? "" : brokenSlot() === "newer" ? t("slotNewer") : brokenSlot() ? t("slotBroken") : ""}
-        {trial !== undefined ? "" : " · "}
-        {t("level", { n: level() + 1, name: levelName(level()) })}
-        {" · "}
-        {t("coins", { got: taken().length, all: now().coins.length, count: now().coins.length })}
-        {" · "}
-        {t("falls", { count: falls() })}
-        {best() === undefined ? "" : t("best", { seconds: best()! })}
-        {won() === null ? "" : t("won", { seconds: won()! })}
-        {leader() === null ? "" : t("leader", { ...leader()! })}
-        {trial !== undefined ? "" : " · "}
-        {trial !== undefined ? "" : netLabel(t, online.on(), room.status(), room.peers().length, room.error())}
-      </Text>
+      <Text class="text-white p-4">{inLab() ? t("lab") : status()}</Text>
       <GameView
         class="flex-1"
         {...pinchZoom}
         ref={(n: NativeComponentRef) => (game = n)}
-        scene={scene()}
+        scene={inLab() ? labScene() : scene()}
         actions={input.prop()}
         onPad={input.handlePad}
         onAction={(e: ActionEvent) => {
           input.handle(e);
           if (!e.down || e.player !== 0) return;
           if (e.action === "remap") return remapping() ? closeRemap() : remapping.set(true);
-          if (trial !== undefined) return;
+          if (trial !== undefined || inLab()) return;
           if (e.action === "slot") return pick(nextSlot(target));
           if (e.action === "lang") return chosenLang.set(otherLocale(lang.locale()));
           if (e.action === "net") return online.toggle();
@@ -361,6 +378,8 @@ export function Game(props: GameProps = {}) {
             if (e.down && e.code === "Escape") props.onExit?.();
             return;
           }
+          if (e.down && !e.repeat && e.code === "KeyG" && platform.desktop) return toggleLab();
+          if (inLab()) return;
           // 换存档、语言、联网是动作（onAction）；Digit1 … Digit9：选已经解锁的关
           const n = /^Digit([1-9])$/.exec(e.code)?.[1];
           if (!e.down || e.repeat || n === undefined) return;

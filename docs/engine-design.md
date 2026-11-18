@@ -103,6 +103,7 @@
 | **输入映射** | 动作绑定（`Actions`，按钮 / 一维 / 二维轴，Rust 每帧问、TSX 收 `action` 事件）；`inputMap()` 改键（按任意键、冲突、恢复默认、存在设备上）；手柄按设备分（`pad` command，`Input::pad`，每个玩家一个手柄，接入 / 拔出事件）；扳机模拟量；手柄震动（`Rumble`，GameController haptics / Android `VibratorManager` / `vibrationActuator`）；浏览器的手柄；见 [input-actions.md](input-actions.md) | 平台跳跃的操作全走动作，有改键面板，第二个手柄接入时出现第二个角色，落地、受伤时震动 |
 | **触屏控制** | `<VirtualStick>`（浮动 / 固定、死区、半径、八 / 四方向，按动作发）；手势识别的纯函数状态机（轻点、长按、滑动、拖动、双指捏合和旋转，`gestureHandlers`）；`<ActionButton>` 的按住连发、冷却显示、按下反馈；引擎认直接驱动的一帧内重按；见 [touch-input.md](touch-input.md) | 长坂坡在手机上用摇杆和按钮能玩；平台跳跃的 ← → 换成摇杆、双指缩放镜头；编辑器触控板捏合缩放 |
 | **动画状态机** | 新 crate `nge-anim`：和骨骼无关的状态机（状态、转换、bool / float / trigger 参数、退出时间、任意状态、默认状态），一维 / 二维混合树和相位同步，分层（覆盖、叠加、骨骼遮罩），叠加动画，动画事件（`AnimEvent` 消息、TSX 的 `animEvent`）；3D 按输出混姿势，2D 按输出选精灵帧；节点的 `animGraph` / `animParams`、`animSet` command；见 [anim-graph.md](anim-graph.md) | 平台跳跃的主角由状态机驱动待机、走、跑、跳、落、落地，脚步声和落地声是动画事件；果冻改用状态机 |
+| **3D 玩法基础** | `Character3d` 角色控制器（爬坡和坡度上限、上台阶、贴地、被平台带着走、沿墙滑，`CharacterState3d` 给着地、地面法线、实际速度、碰撞列表）；`Joint3d` 关节（焊死、球窝、铰链带限位和马达、滑轨、绳子、弹簧）；`MeshCollider` 从 glTF 网格生成凸包、按图元的凸包、三角网格；空间查询（球、胶囊、盒子的形状投射，重叠，点，最近点，碰撞分组过滤）；`Gizmos3d` 调试画线（线、盒、球、胶囊、坐标轴，被模型挡或画在最前）和 `Physics3dDebug`；场景的 `kind: "character"`、`shape: "convex" \| "hulls" \| "trimesh"`、`joints3d`、`query3d`；见 [gameplay3d.md](gameplay3d.md) | 平台跳跃按 G 进「3D 试验场」：3D 角色走斜坡和台阶、推开铰链门、撞链子吊着的球、推凸包石头、站上移动平台，Q 开调试线 |
 
 ## 待定
 

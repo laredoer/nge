@@ -92,7 +92,7 @@ models: [{ id: "crate", model: "asset:/@platformer/crate.glb", attach: "crate-bo
 - 关节断裂（受力超过多少就断）、关节的受力读数。
 - 多体关节（rapier 的 multibody，长链子更稳）：4 节的链子挂重 12 倍的球，两秒后连接点误差在 2 point 以内，够用。
 - 位置马达（转到某个角度停住）、弹簧的最大长度。
-- 3D 模型带碰撞体、3D 物理。
+- 3D 模型带碰撞体、3D 物理（后来做了，见 [physics3d.md](physics3d.md)；3D 关节见 [gameplay3d.md](gameplay3d.md)）。
 - 模型跟着瓦片地图或者别的模型走。
 
 ## 验收

@@ -12,6 +12,8 @@ use nge_assets::{AssetApp, Assets, GpuImages, Image, ImageId};
 use crate::animator::animate;
 use crate::billboard_gpu::BillboardGpu;
 use crate::billboards::{Batch, BillboardVertex, Billboards};
+use crate::gizmos::Gizmos3d;
+use crate::line_gpu::LineGpu;
 use crate::assets::{Assets3d, MaterialId, MeshId, ModelId};
 use crate::collect::{Draw, DrawRaw, Scratch, blend_depth, collect, globals, sort_draws};
 use crate::gltf_load::{Gltf, GltfModels, resolve_gltf_models};
@@ -51,7 +53,10 @@ impl Plugin for Render3dPlugin {
             .add_message::<nge_anim::AnimEvent>()
             .add_systems(PostUpdate, crate::graph_pose::animate_graphs.in_set(nge_anim::Animated))
             .init_resource::<crate::billboards::Billboards>()
-            .add_systems(PreUpdate, crate::billboards::clear_billboards);
+            .add_systems(PreUpdate, crate::billboards::clear_billboards)
+            // 调试画线（见 docs/gameplay3d.md）
+            .init_resource::<Gizmos3d>()
+            .add_systems(PreUpdate, crate::gizmos::clear_gizmos);
         // 一插上状态机就有 Pose：第一帧就按状态机的姿势画（见 docs/anim-graph.md）
         app.world_mut().register_required_components::<nge_anim::AnimGraph, crate::animator::Pose>();
         app.insert_resource(Assets3d::default()).init_resource::<AmbientLight>().init_resource::<Shadows>().add_renderer(MeshRenderer::default());
@@ -94,6 +99,7 @@ struct Gpu {
     meshes: Vec<GpuMesh>,
     depth: Option<(wgpu::TextureView, wgpu::Extent3d)>,
     billboards: BillboardGpu,
+    lines: LineGpu,
 }
 
 #[derive(Default)]
@@ -139,6 +145,7 @@ impl Renderer for MeshRenderer {
             gpu.cache_texture(gfx, images, id);
         }
         gpu.billboards.prepare(gfx, view_proj, &self.billboard_vertices);
+        gpu.lines.prepare(gfx, view_proj, world.resource::<Gizmos3d>());
         gpu.write_draws(gfx, &self.draws, &mut self.bytes, &self.joints);
         // 半透明的不投影子；一个算坏了的包围盒不该让整个场景的影子消失
         self.casters.clear();
@@ -165,6 +172,9 @@ impl Renderer for MeshRenderer {
         let billboards = world.resource::<Billboards>();
         let quads = (billboards.quads() + billboards.ribbons()) as u32;
         world.resource_mut::<RenderFrame>().count(self.billboard_batches.len() as u32, quads);
+        let lines = world.resource::<Gizmos3d>();
+        let segments = (lines.depth_tested().len() + lines.top().len()) as u32;
+        world.resource_mut::<RenderFrame>().count(gpu.lines.draws(), segments);
         let depth = gpu.depth_view(gfx, target.texture().size());
         // 混排时深度留给后面的精灵
         let interleave = world.resource::<Interleave>().0;
@@ -202,6 +212,8 @@ impl Renderer for MeshRenderer {
         }
         // 透明的方片和带子画在所有网格后面
         gpu.billboards.draw(&mut pass, &self.billboard_batches, |id| gpu.texture(id));
+        // 调试画线最后画：半透明的方片不会盖住它
+        gpu.lines.draw(&mut pass);
     }
 }
 
@@ -335,6 +347,7 @@ impl Gpu {
             ..Default::default()
         });
         let billboards = BillboardGpu::new(gfx, &texture_layout);
+        let lines = LineGpu::new(gfx);
         Self {
             pipelines,
             globals,
@@ -355,6 +368,7 @@ impl Gpu {
             meshes: Vec::new(),
             depth: None,
             billboards,
+            lines,
         }
     }
 

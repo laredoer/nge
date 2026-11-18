@@ -4,7 +4,7 @@ use bevy_ecs::prelude::*;
 use bevy_ecs::system::EntityCommands;
 use glam::Vec3;
 use nge_ecs::Outbox;
-use nge_physics3d::{Collider, Collision3d, Impulse, Physics3d, RigidBody, Velocity};
+use nge_physics3d::{Character3d, Collider, Collision3d, Impulse, MeshCollider, MeshShape, Physics3d, RigidBody, Velocity};
 use serde::Deserialize;
 
 use crate::nodes::ModelNode;
@@ -27,9 +27,13 @@ pub(crate) fn register(app: &mut nge_ecs::App) {
     if !app.is_plugin_added::<Physics3dPlugin>() {
         app.add_plugins(Physics3dPlugin { gravity: GRAVITY, length_unit: LENGTH_UNIT });
     }
-    app.add_systems(PreUpdate, sync_gravity.run_if(resource_changed::<Scene>).after(crate::level::switch_level).before(PointerWorld))
+    app.add_systems(PreUpdate, (sync_gravity, crate::joints3d::sync_joints3d).run_if(resource_changed::<Scene>).after(crate::level::switch_level).before(PointerWorld))
         .configure_sets(PostUpdate, nge_particles::Particles3dSimulated.after(Physics3dStepped))
-        .add_systems(PostUpdate, collide.after(Physics3dStepped));
+        // 模型和关节都同步完了再连
+        .add_systems(PostUpdate, crate::joints3d::resolve.before(Physics3dStepped))
+        .add_command(crate::query3d::QUERY3D)
+        .add_event(crate::query3d::QUERY3D_RESULT)
+        .add_systems(PostUpdate, (collide, crate::query3d::answer).after(Physics3dStepped));
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
@@ -39,6 +43,8 @@ pub enum Body3dKind {
     Dynamic,
     Fixed,
     Kinematic,
+    /// 角色控制器：kinematic 刚体，游戏改速度，引擎负责重力、贴地、爬坡、上台阶、被平台带着走（见 docs/gameplay3d.md）。
+    Character,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
@@ -48,6 +54,12 @@ pub enum Shape3dName {
     Box,
     Ball,
     Capsule,
+    /// 从模型网格生成：所有顶点一个凸包。
+    Convex,
+    /// 每个图元一个凸包。
+    Hulls,
+    /// 三角网格，只能配 `kind: "fixed"`。
+    TriMesh,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -67,6 +79,14 @@ pub struct ModelBody {
     pub sensor: bool,
     pub velocity: [f32; 3],
     pub collide: bool,
+    /// 碰撞分组（1 … 31）：同一组的互相不碰撞；0 不分组。
+    pub group: u8,
+    /// `character`：能爬的最陡的坡（度）。
+    pub slope: f32,
+    /// `character`：自动迈上去的台阶最高多高，0 不自动上。
+    pub step: f32,
+    /// `character`：离地多近就往下贴，0 不贴。
+    pub snap: f32,
 }
 
 impl Default for ModelBody {
@@ -83,6 +103,10 @@ impl Default for ModelBody {
             sensor: false,
             velocity: [0.0; 3],
             collide: false,
+            group: 0,
+            slope: 50.0,
+            step: 0.0,
+            snap: 4.0,
         }
     }
 }
@@ -101,15 +125,31 @@ pub(crate) fn keeps_place(before: Option<&ModelNode>, node: &ModelNode) -> bool 
 /// 按模型节点的 `body` 挂上或拿掉 3D 物理组件。
 pub(crate) fn apply_body(entity: &mut EntityCommands, before: Option<&ModelNode>, node: &ModelNode) {
     let Some(body) = &node.body else {
-        entity.remove::<(RigidBody, Collider, Velocity, Impulse)>();
+        entity.remove::<(RigidBody, Collider, Velocity, Impulse, Character3d, MeshCollider)>();
         return;
     };
     let kind = match body.kind {
         Body3dKind::Dynamic => RigidBody::Dynamic,
         Body3dKind::Fixed => RigidBody::Fixed,
-        Body3dKind::Kinematic => RigidBody::Kinematic,
+        Body3dKind::Kinematic | Body3dKind::Character => RigidBody::Kinematic,
     };
-    entity.insert((kind, collider(body, node.scale))).insert_if_new(Impulse::default());
+    if body.kind == Body3dKind::Character {
+        entity.insert(Character3d { max_slope: body.slope.to_radians(), step: body.step, snap: body.snap, gravity_scale: 1.0 });
+    } else {
+        entity.remove::<Character3d>();
+    }
+    entity.insert(kind).insert_if_new(Impulse::default());
+    let mesh = match body.shape {
+        Shape3dName::Convex => Some(MeshShape::Convex),
+        Shape3dName::Hulls => Some(MeshShape::Hulls),
+        Shape3dName::TriMesh => Some(MeshShape::TriMesh),
+        _ => None,
+    };
+    match mesh {
+        // 网格的等模型加载完再生成碰撞体（`nge-physics3d` 里）；之前的碰撞体先留着，不让刚体没了碰撞体往下掉
+        Some(kind) => drop(entity.insert(MeshCollider { kind, scale: Vec3::splat(node.scale), collider: collider(body, node.scale) })),
+        None => drop(entity.remove::<MeshCollider>().insert(collider(body, node.scale))),
+    }
     // 初速度只在生成、改了 velocity、或者重新放了一次时设置，不打断已经在动的刚体
     let same = keeps_place(before, node) && before.and_then(|b| b.body.as_ref()).is_some_and(|b| b.velocity == body.velocity);
     if !same {
@@ -124,12 +164,15 @@ fn collider(body: &ModelBody, scale: f32) -> Collider {
         Shape3dName::Box => Collider::cuboid(body.size.map_or(Vec3::splat(scale), Vec3::from)),
         Shape3dName::Ball => Collider::ball(body.r.unwrap_or(scale / 2.0)),
         Shape3dName::Capsule => Collider::capsule(body.h.unwrap_or(scale / 2.0) / 2.0, body.r.unwrap_or(scale / 4.0)),
+        // 形状由 `MeshCollider` 换掉，这里只给材质参数
+        Shape3dName::Convex | Shape3dName::Hulls | Shape3dName::TriMesh => Collider::ball(scale / 2.0),
     };
     c.restitution = body.restitution;
     c.friction = body.friction;
     c.density = body.density;
     c.sensor = body.sensor;
     c.events = body.collide;
+    c.group = body.group;
     c
 }
 
@@ -274,6 +317,50 @@ mod tests {
         assert_eq!(app.world().resource::<Physics3d>().gravity(), Vec3::new(0.0, 0.0, -5.0));
         frame(&mut app, Some(json!({})));
         assert_eq!(app.world().resource::<Physics3d>().gravity(), GRAVITY);
+    }
+
+    #[test]
+    fn character_bodies_get_a_controller_and_groups() {
+        let mut app = app();
+        let hero = |kind: &str| json!({ "models": [model("hero", 0.0, 100.0, json!({ "kind": kind, "shape": "capsule", "step": 20, "group": 2 }))] });
+        frame(&mut app, Some(hero("character")));
+        let c = get::<nge_physics3d::Character3d>(&mut app, "hero").expect("有角色控制器");
+        assert_eq!((c.max_slope, c.step, c.snap), (50f32.to_radians(), 20.0, 4.0));
+        assert_eq!(get::<RigidBody>(&mut app, "hero"), Some(RigidBody::Kinematic));
+        assert_eq!(get::<Collider>(&mut app, "hero").unwrap().group, 2);
+        frame(&mut app, Some(hero("dynamic")));
+        assert!(get::<nge_physics3d::Character3d>(&mut app, "hero").is_none(), "换成别的种类就去掉");
+    }
+
+    #[test]
+    fn mesh_shapes_wait_for_the_model_then_use_its_hull() {
+        let mut app = app();
+        let scene = |shape: &str| json!({ "models": [
+            model("floor", 0.0, -10.0, json!({ "kind": "fixed", "size": [400, 20, 400] })),
+            model("rock", 0.0, 100.0, json!({ "shape": shape, "restitution": 0.25 })),
+        ] });
+        frame(&mut app, Some(scene("convex")));
+        for _ in 0..4 {
+            frame(&mut app, None);
+        }
+        assert_eq!(at(&mut app, "rock").y, 100.0, "模型没加载：先不建刚体");
+        assert!(get::<Collider>(&mut app, "rock").is_none());
+        let world = app.world_mut();
+        let model = crate::testing::cube_model(world);
+        let rock = world.query::<(Entity, &SceneId)>().iter(world).find(|(_, s)| s.0 == "rock").unwrap().0;
+        world.entity_mut(rock).insert(nge_render3d::Model3d(model));
+        frame(&mut app, None);
+        let c = get::<Collider>(&mut app, "rock").expect("加载完有碰撞体");
+        assert!(matches!(&c.shape, Shape::Convex(p) if p.len() == 8 && p.iter().all(|v| v.abs() == Vec3::splat(20.0))), "边长 2 的立方体按 scale 20 放大 {:?}", c.shape);
+        assert_eq!(c.restitution, 0.25);
+        for _ in 0..40 {
+            frame(&mut app, None);
+        }
+        assert!((at(&mut app, "rock").y - 20.0).abs() < 1.0, "落在地上 {}", at(&mut app, "rock"));
+        frame(&mut app, Some(scene("box")));
+        frame(&mut app, None);
+        assert!(get::<nge_physics3d::MeshCollider>(&mut app, "rock").is_none(), "换回普通形状去掉 MeshCollider");
+        assert_eq!(get::<Collider>(&mut app, "rock").unwrap().shape, Shape::Box(Vec3::splat(20.0)));
     }
 
     #[test]

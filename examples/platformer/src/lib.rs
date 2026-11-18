@@ -3,8 +3,10 @@
 //! 踩敌人、被敌人撞或掉下去了送回起点，重新开始；起跳、踩敌人和掉坑的音效、落地和受伤时手柄的震动也在这里放。
 //! 第二个手柄接入时 TSX 往场景里放第二个角色（`player2`），这里让它能跑能跳。
 //! 主角的动画状态机（hero-anim.json，见 docs/anim-graph.md）的参数也在这里设，走跑的脚步声、落地声按它的动画事件放。
+//! 按 G 进的 3D 试验场在 lab.rs。
 
 mod debug;
+mod lab;
 
 use std::collections::HashSet;
 
@@ -360,6 +362,10 @@ fn build(audio: AudioPlugin) -> App {
         .add_systems(Startup, load_sfx)
         .init_resource::<debug::DebugView>()
         .add_systems(Update, (reset_on_level_start, control, control_guest, debug::debug_view, toggle_perf).chain())
+        // 3D 试验场（按 G 进出）：走、平台在物理之前，相机在物理之后
+        .init_resource::<lab::Lab>()
+        .add_systems(Update, (lab::walk, lab::move_platform, lab::probe).chain().after(debug::debug_view))
+        .add_systems(PostUpdate, lab::follow.after(nge_physics3d::Physics3dStepped))
         .add_systems(PostUpdate, (animate_player.after(PhysicsStepped).before(nge_anim::Animated), anim_sounds.after(nge_anim::Animated)));
     app.world_mut().resource_mut::<Actions>().set_map(default_controls());
     app
