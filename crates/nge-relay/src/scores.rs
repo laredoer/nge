@@ -1,6 +1,7 @@
 //! 内存里的排行榜：分数小的在前（比如通关秒数），每个名字在一个榜上只留最好的一条，每个榜最多 100 条；
-//! 最多 64 个榜，满了去掉最久没写过的。
+//! 最多 64 个榜，满了去掉最久没写过的；一个账号最多建 `MAX_NEW_BOARDS` 个新榜（不带账号的开发模式不限）。
 //! 名字归账号：鉴权后交的成绩带着账号，一个名字第一次被哪个账号用了就归它，别的账号（和不带账号的）再用这个名字交会被拒。
+//! 比名字时先做 NFKC 规范化再转小写（`Alice`、`alice`、全角的 `Ａｌｉｃｅ` 算同一个名字）。
 //! 不鉴权的本机开发模式里谁都能交分。
 
 use std::collections::HashMap;
@@ -20,8 +21,14 @@ pub const MAX_BOARD: usize = 64;
 pub const MAX_SCORE: f64 = 1.0e9;
 /// 最多记几个名字的归属：满了新名字交不了（只在内存里，重启清空）。
 pub const MAX_OWNED: usize = 10_000;
+/// 一个账号最多建几个新榜（只在内存里，重启清空）：拿到 token 的人刷不掉所有榜。
+pub const MAX_NEW_BOARDS: usize = 8;
 /// 名字归别的账号了。
 pub const NAME_TAKEN: &str = "名字归别的账号了";
+/// 名字归属表满了，新名字记不下。
+pub const OWNERS_FULL: &str = "记的名字太多了";
+/// 这个账号建的新榜够多了。
+pub const TOO_MANY_BOARDS: &str = "这个账号建的新榜太多了";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Entry {
@@ -40,8 +47,10 @@ struct Board {
 pub struct Leaderboard {
     boards: HashMap<String, Board>,
     writes: u64,
-    /// 名字 → 账号。
+    /// 名字（规范化以后）→ 账号。
     owners: HashMap<String, String>,
+    /// 账号 → 建过几个新榜。
+    created: HashMap<String, usize>,
 }
 
 impl Leaderboard {
@@ -57,18 +66,26 @@ impl Leaderboard {
         if !(score.is_finite() && (0.0..MAX_SCORE).contains(&score)) {
             return Err("分数不合规");
         }
-        match (self.owners.get(&name), owner) {
-            (Some(o), Some(me)) if o == me => {}
+        let key = owner_key(&name);
+        let claim = match (self.owners.get(&key), owner) {
+            (Some(o), Some(me)) if o == me => false,
             (Some(_), _) => return Err(NAME_TAKEN),
-            (None, Some(me)) => {
-                if self.owners.len() >= MAX_OWNED {
-                    return Err("记的名字太多了");
-                }
-                self.owners.insert(name.clone(), me.to_owned());
+            (None, Some(_)) if self.owners.len() >= MAX_OWNED => return Err(OWNERS_FULL),
+            (None, Some(_)) => true,
+            (None, None) => false,
+        };
+        let new_board = !self.boards.contains_key(&board);
+        if let (true, Some(me)) = (new_board, owner) {
+            let created = self.created.get(me).copied().unwrap_or(0);
+            if created >= MAX_NEW_BOARDS {
+                return Err(TOO_MANY_BOARDS);
             }
-            (None, None) => {}
+            self.created.insert(me.to_owned(), created + 1);
         }
-        if !self.boards.contains_key(&board) && self.boards.len() >= MAX_BOARDS {
+        if let (true, Some(me)) = (claim, owner) {
+            self.owners.insert(key, me.to_owned());
+        }
+        if new_board && self.boards.len() >= MAX_BOARDS {
             let oldest = self.boards.iter().min_by_key(|(_, b)| b.written).map(|(k, _)| k.clone());
             if let Some(oldest) = oldest {
                 self.boards.remove(&oldest);
@@ -95,9 +112,22 @@ impl Leaderboard {
         Ok(Some(rank + 1))
     }
 
+    #[cfg(test)]
+    pub(crate) fn fill_owners_for_tests(&mut self) {
+        for i in self.owners.len()..MAX_OWNED {
+            self.owners.insert(format!("filler-{i}"), format!("filler-acct-{i}"));
+        }
+    }
+
     pub fn top(&self, board: &str) -> Vec<Entry> {
         self.boards.get(board).map(|b| b.entries.iter().take(TOP).cloned().collect()).unwrap_or_default()
     }
+}
+
+/// 名字归属表的键：NFKC 规范化再转小写。
+fn owner_key(name: &str) -> String {
+    use unicode_normalization::UnicodeNormalization;
+    name.nfkc().collect::<String>().to_lowercase()
 }
 
 #[cfg(test)]
@@ -171,6 +201,12 @@ mod tests {
         assert_eq!(b.submit("l", "路人", 30.0), Ok(Some(3)));
         assert_eq!(b.submit_as("l", Some("acct-2"), "路人", 25.0), Ok(Some(3)));
         assert_eq!(b.submit("l", "路人", 1.0), Err(NAME_TAKEN));
+        // 大小写、全角半角不同的同一个名字也归同一个账号
+        assert_eq!(b.submit_as("l", Some("acct-1"), "Alice", 40.0), Ok(Some(4)));
+        for lookalike in ["alice", "ALICE", "Ａｌｉｃｅ"] {
+            assert_eq!(b.submit_as("l", Some("acct-2"), lookalike, 1.0), Err(NAME_TAKEN), "{lookalike}");
+        }
+        assert!(b.submit_as("l", Some("acct-1"), "alice", 39.0).is_ok(), "自己换个大小写照样能用");
     }
 
     #[test]
@@ -186,5 +222,34 @@ mod tests {
         assert!(b.top("b1").is_empty());
         assert_eq!(b.top("b0").len(), 2);
         assert_eq!(b.top("b2").len(), 1);
+    }
+
+    #[test]
+    fn one_account_cannot_crowd_out_every_board() {
+        let mut b = Leaderboard::default();
+        for i in 0..MAX_BOARDS - MAX_NEW_BOARDS {
+            b.submit_as(&format!("old{i}"), Some("acct-1"), "小红", 1.0).ok();
+            b.created.clear();
+        }
+        for i in 0..MAX_NEW_BOARDS {
+            assert_eq!(b.submit_as(&format!("spam{i}"), Some("acct-2"), "捣乱", 1.0), Ok(Some(1)));
+        }
+        assert_eq!(b.submit_as("spam-more", Some("acct-2"), "捣乱", 1.0), Err(TOO_MANY_BOARDS), "一个账号建的新榜有上限");
+        assert_eq!(b.boards.len(), MAX_BOARDS);
+        assert_eq!(b.top("old0").len(), 1, "别人的榜没被挤掉");
+        assert_eq!(b.submit_as("spam0", Some("acct-2"), "捣乱", 0.5), Ok(Some(1)), "往自己建过的榜上交照样行");
+        assert_eq!(b.submit_as("old0", Some("acct-2"), "捣乱", 0.5), Ok(Some(1)), "往已有的榜上交照样行");
+        assert!(b.submit("dev-board", "路人", 1.0).is_ok(), "不带账号（开发模式）不限");
+    }
+
+    #[test]
+    fn a_full_owner_table_refuses_new_names_with_its_own_error() {
+        let mut b = Leaderboard::default();
+        for i in 0..MAX_OWNED {
+            b.owners.insert(format!("n{i}"), format!("acct-{i}"));
+        }
+        assert_eq!(b.submit_as("l", Some("acct-new"), "新名字", 1.0), Err(OWNERS_FULL));
+        assert_eq!(b.submit_as("l", Some("acct-0"), "n0", 1.0), Ok(Some(1)), "已经归了的名字照样交");
+        assert_eq!(b.submit_as("l", Some("acct-new"), "n1", 1.0), Err(NAME_TAKEN));
     }
 }

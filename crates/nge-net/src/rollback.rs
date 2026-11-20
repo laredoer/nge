@@ -92,9 +92,10 @@ impl<M: Model> Predictor<M> {
         &self.model
     }
 
-    /// 用 `input` 走到下一个 tick，返回这个 tick。
+    /// 用 `input` 走到下一个 tick，返回这个 tick。tick 到 `u32::MAX` 就停住（和服务端一样不回绕，30 Hz 下要 4.5 年）。
     pub fn predict(&mut self, input: M::Input) -> u32 {
-        self.tick = self.tick.wrapping_add(1);
+        let Some(next) = self.tick.checked_add(1) else { return self.tick };
+        self.tick = next;
         self.prev = self.state.clone();
         self.state = self.model.step(&self.state, input);
         self.history.push_back(Frame { tick: self.tick, input, state: self.state.clone() });
@@ -229,9 +230,12 @@ impl Pacer {
     }
 }
 
-/// 想超前几个 tick：一个往返（输入过去要半个，快照回来是半个旧的）加 2 个的余量。
+/// 超前量在一个往返以外留的余量（tick）。
+pub const LEAD_MARGIN: i64 = 2;
+
+/// 想超前几个 tick：一个往返（输入过去要半个，快照回来是半个旧的）加 `LEAD_MARGIN` 个的余量。上限由调用方按历史长度夹。
 pub fn target_lead(rtt: f64, tick_seconds: f64) -> i64 {
-    (rtt.max(0.0) / tick_seconds).ceil() as i64 + 2
+    (rtt.max(0.0) / tick_seconds).ceil() as i64 + LEAD_MARGIN
 }
 
 #[cfg(test)]
@@ -340,6 +344,14 @@ mod tests {
         }
         assert_eq!(p.reconcile(12, &(2.0, 0.0)), Outcome::Reset);
         assert_eq!(p.stats.resets, 1);
+    }
+
+    #[test]
+    fn the_tick_stops_at_the_end_instead_of_wrapping() {
+        let mut p = Predictor::new(Line, u32::MAX - 1, (0.0, 0.0));
+        assert_eq!(p.predict(1), u32::MAX);
+        assert_eq!(p.predict(1), u32::MAX, "到头了：停住，不回绕");
+        assert_eq!(p.state().0, 1.0);
     }
 
     #[test]

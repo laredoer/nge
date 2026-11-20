@@ -1,7 +1,8 @@
 //! 鉴权：服务端用密钥给账号签 token（HMAC-SHA256），客户端连上时拿 token 和一个「证明」换进房间。
 //!
 //! - 凭据（发给玩家的那一串）是 `v1.<声明>.<签名>.<会话密钥>`；线上只发前三段（token），会话密钥不出客户端。
-//! - 声明是 `{ sub, name, exp }`：账号、显示的名字、过期时间（Unix 秒）。签名 = HMAC(密钥, 声明)。
+//! - 声明是 `{ sub, name, iat, exp }`：账号、显示的名字、签发和过期时间（Unix 秒）。签名 = HMAC(密钥, 声明)。
+//!   有效期（`exp - iat`）不能超过 `MAX_TTL`：签的时候就拒，校验时也按签发时间算（长的 token 不会过一阵子变得能用）。
 //! - 会话密钥 = HMAC(密钥, 声明)（换一个前缀），服务端随时能从 token 算回来，不用存。
 //! - 每条连接服务端先发一个不重复的随机数（`Challenge`），客户端回 `Hello` 时带上 HMAC(会话密钥, 随机数 + 房间名)。
 //!   抓到一次握手原样重发没用：下一条连接的随机数不一样；只抓到 token 也没用：没有会话密钥算不出证明。
@@ -46,6 +47,8 @@ pub struct Claims {
     pub sub: String,
     /// 显示的名字（房间里、排行榜上）。
     pub name: String,
+    /// 签发时间，Unix 秒。
+    pub iat: u64,
     /// 过期时间，Unix 秒。
     pub exp: u64,
 }
@@ -63,6 +66,8 @@ pub enum AuthError {
     BadClaims,
     /// 握手的证明对不上（重放的、房间不对、没有会话密钥）。
     BadProof,
+    /// 环境变量里的密钥不是 UTF-8。
+    NotUnicode,
 }
 
 impl std::fmt::Display for AuthError {
@@ -74,6 +79,7 @@ impl std::fmt::Display for AuthError {
             Self::Expired => "token 过期了",
             Self::BadClaims => "token 的内容不合规",
             Self::BadProof => "握手证明不对",
+            Self::NotUnicode => "密钥不是 UTF-8",
         };
         f.write_str(why)
     }
@@ -100,11 +106,17 @@ impl Secret {
         Ok(Self(bytes))
     }
 
-    /// 从环境变量读：没设是 `Ok(None)`，设了但太短是错。
+    /// 从环境变量读：没设是 `Ok(None)`，设了但太短、不是 UTF-8 是错。
     pub fn from_env(var: &str) -> Result<Option<Self>, AuthError> {
-        match std::env::var(var) {
+        Self::from_var(std::env::var(var))
+    }
+
+    /// `std::env::var` 的结果 → 密钥。
+    pub fn from_var(value: Result<String, std::env::VarError>) -> Result<Option<Self>, AuthError> {
+        match value {
             Ok(v) => Self::new(v.into_bytes()).map(Some),
-            Err(_) => Ok(None),
+            Err(std::env::VarError::NotPresent) => Ok(None),
+            Err(std::env::VarError::NotUnicode(_)) => Err(AuthError::NotUnicode),
         }
     }
 
@@ -116,13 +128,17 @@ impl Secret {
         out
     }
 
-    /// 签一张凭据（给玩家的整串，含会话密钥）。
+    /// 签一张凭据（给玩家的整串，含会话密钥）。`verify` 会拒的（有效期不对、token 太长）这里就不签。
     pub fn issue(&self, claims: &Claims) -> Result<String, AuthError> {
         check_claims(claims)?;
+        check_ttl(claims)?;
         let body = postcard::to_stdvec(claims).map_err(|_| AuthError::BadClaims)?;
         let sig = mac(&self.0, &[TAG_SIGN, &body]).finalize().into_bytes();
-        let key = self.session_key(&body);
-        Ok(format!("{VERSION}.{}.{}.{}", B64.encode(&body), B64.encode(sig), B64.encode(key)))
+        let token = format!("{VERSION}.{}.{}", B64.encode(&body), B64.encode(sig));
+        if token.len() > MAX_TOKEN {
+            return Err(AuthError::BadClaims);
+        }
+        Ok(format!("{token}.{}", B64.encode(self.session_key(&body))))
     }
 
     /// 校验握手：token 的签名、有效期，以及对这条连接的随机数和房间名的证明。`now` 是 Unix 秒。
@@ -140,9 +156,11 @@ impl Secret {
         mac(&self.0, &[TAG_SIGN, &body]).verify_slice(&sig).map_err(|_| AuthError::BadSignature)?;
         let claims: Claims = postcard::from_bytes(&body).map_err(|_| AuthError::Malformed)?;
         check_claims(&claims)?;
+        check_ttl(&claims)?;
         if now >= claims.exp {
             return Err(AuthError::Expired);
         }
+        // 签发时间写在未来的也管住：从现在算也不能超过上限
         if claims.exp - now > MAX_TTL {
             return Err(AuthError::BadClaims);
         }
@@ -156,7 +174,7 @@ impl Secret {
     }
 }
 
-/// 客户端手里的凭据：线上发的 token 和只在本地用的会话密钥。`Debug` 不打印密钥。
+/// 客户端手里的凭据：线上发的 token 和只在本地用的会话密钥。`Debug` 不打印 token 和密钥。
 #[derive(Clone, PartialEq, Eq)]
 pub struct Credential {
     pub token: String,
@@ -165,7 +183,7 @@ pub struct Credential {
 
 impl std::fmt::Debug for Credential {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Credential({})", self.token)
+        write!(f, "Credential({} 字节)", self.token.len())
     }
 }
 
@@ -186,6 +204,14 @@ impl Credential {
 fn check_claims(c: &Claims) -> Result<(), AuthError> {
     let ok = clean_text(&c.sub, MAX_SUB).is_some_and(|s| s == c.sub) && clean_text(&c.name, MAX_NAME).is_some_and(|n| n == c.name);
     if ok { Ok(()) } else { Err(AuthError::BadClaims) }
+}
+
+/// 有效期：过期时间在签发时间之后，相差不超过 `MAX_TTL`。
+fn check_ttl(c: &Claims) -> Result<(), AuthError> {
+    match c.exp.checked_sub(c.iat) {
+        Some(ttl) if ttl > 0 && ttl <= MAX_TTL => Ok(()),
+        _ => Err(AuthError::BadClaims),
+    }
 }
 
 fn mac(key: &[u8], parts: &[&[u8]]) -> HmacSha256 {
@@ -210,7 +236,7 @@ mod tests {
     }
 
     fn claims() -> Claims {
-        Claims { sub: "acct-1".into(), name: "小红".into(), exp: NOW + 3600 }
+        Claims { sub: "acct-1".into(), name: "小红".into(), iat: NOW, exp: NOW + 3600 }
     }
 
     fn hello(cred: &Credential, nonce: &[u8; NONCE], room: &str) -> (String, Vec<u8>) {
@@ -224,6 +250,7 @@ mod tests {
         let (token, proof) = hello(&cred, &NONCE_A, "arena");
         assert_eq!(s.verify(&token, &NONCE_A, "arena", &proof, NOW), Ok(claims()));
         assert!(!format!("{cred:?}").contains(&B64.encode(cred.key)), "Debug 不打印会话密钥");
+        assert!(!format!("{cred:?}").contains(cred.token.split('.').nth(1).unwrap()), "Debug 也不打印 token");
         assert!(!format!("{s:?}").contains("test-secret"), "Debug 不打印密钥");
     }
 
@@ -241,9 +268,53 @@ mod tests {
         assert_eq!(s.verify(&token, &NONCE_A, "r", &proof, NOW + 3600), Err(AuthError::Expired), "到点就过期");
         assert!(s.verify(&token, &NONCE_A, "r", &proof, NOW + 3599).is_ok());
         let forever = Claims { exp: NOW + MAX_TTL + 10, ..claims() };
-        let cred = Credential::parse(&s.issue(&forever).unwrap()).unwrap();
+        let cred = Credential::parse(&unchecked(&s, &forever)).unwrap();
         let (token, proof) = hello(&cred, &NONCE_A, "r");
         assert_eq!(s.verify(&token, &NONCE_A, "r", &proof, NOW), Err(AuthError::BadClaims), "有效期长得离谱");
+        // 过了一阵子、离过期不到上限了也不收：按签发时间算，不按现在
+        assert_eq!(s.verify(&token, &NONCE_A, "r", &proof, NOW + 86_400), Err(AuthError::BadClaims), "长的 token 过一阵子也不变得能用");
+        let backwards = Claims { iat: NOW + 10, exp: NOW + 5, ..claims() };
+        let cred = Credential::parse(&unchecked(&s, &backwards)).unwrap();
+        let (token, proof) = hello(&cred, &NONCE_A, "r");
+        assert_eq!(s.verify(&token, &NONCE_A, "r", &proof, NOW), Err(AuthError::BadClaims), "过期时间早于签发时间");
+        // 签发时间写在未来：有效期本身没超，从现在算超了
+        let future = Claims { iat: NOW + 86_400, exp: NOW + 86_400 + MAX_TTL, ..claims() };
+        let cred = Credential::parse(&s.issue(&future).unwrap()).unwrap();
+        let (token, proof) = hello(&cred, &NONCE_A, "r");
+        assert_eq!(s.verify(&token, &NONCE_A, "r", &proof, NOW), Err(AuthError::BadClaims), "从现在算超过上限");
+    }
+
+    /// 绕过 `issue` 的检查签一张（模拟以前的版本或者别的工具签出来的）。
+    fn unchecked(s: &Secret, claims: &Claims) -> String {
+        let body = postcard::to_stdvec(claims).unwrap();
+        let sig = mac(&s.0, &[TAG_SIGN, &body]).finalize().into_bytes();
+        format!("{VERSION}.{}.{}.{}", B64.encode(&body), B64.encode(sig), B64.encode(s.session_key(&body)))
+    }
+
+    #[test]
+    fn issue_refuses_what_verify_would_refuse() {
+        let s = secret();
+        assert_eq!(s.issue(&Claims { exp: NOW + MAX_TTL + 1, ..claims() }), Err(AuthError::BadClaims), "有效期超过上限");
+        assert!(s.issue(&Claims { exp: NOW + MAX_TTL, ..claims() }).is_ok(), "刚好上限");
+        assert_eq!(s.issue(&Claims { exp: NOW, ..claims() }), Err(AuthError::BadClaims), "签出来就过期");
+        // 字符数没超、字节数超了：4 字节的字符
+        let wide = Claims { sub: "\u{20000}".repeat(MAX_SUB), name: "\u{20000}".repeat(MAX_NAME), ..claims() };
+        assert_eq!(s.issue(&wide), Err(AuthError::BadClaims), "签出来的 token 超过 {MAX_TOKEN} 字节，用不了");
+        let narrow = Claims { sub: "a".repeat(MAX_SUB), name: "n".repeat(MAX_NAME), ..claims() };
+        let full = s.issue(&narrow).unwrap();
+        let cred = Credential::parse(&full).unwrap();
+        assert!(cred.token.len() <= MAX_TOKEN);
+        assert!(s.verify(&cred.token, &NONCE_A, "r", &cred.prove(&NONCE_A, "r"), NOW).is_ok(), "签得出来的都能用");
+    }
+
+    #[test]
+    fn secrets_from_the_environment() {
+        use std::env::VarError;
+        assert!(Secret::from_var(Err(VarError::NotPresent)).unwrap().is_none(), "没设");
+        assert!(Secret::from_var(Ok("0123456789abcdef".into())).unwrap().is_some());
+        assert_eq!(Secret::from_var(Ok("short".into())).err(), Some(AuthError::WeakSecret));
+        let garbled = std::ffi::OsString::from("x");
+        assert_eq!(Secret::from_var(Err(VarError::NotUnicode(garbled))).err(), Some(AuthError::NotUnicode), "设了但不是 UTF-8：报错，不当没设");
     }
 
     #[test]

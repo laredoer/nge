@@ -6,7 +6,8 @@ use std::collections::VecDeque;
 use super::delta::{InputMsg, WorldSnapshot, apply};
 use super::{DT, Hero, World, step};
 use crate::proto::PeerId;
-use crate::rollback::{MAX_STEPS, Model, Pacer, Predictor, Stats, target_lead};
+use super::room::MAX_LEAD;
+use crate::rollback::{HISTORY, MAX_STEPS, Model, Pacer, Predictor, Stats, target_lead};
 
 /// 留几个解出来的快照（服务端可能拿其中任何一个当基准）。
 pub const BOOK: usize = 64;
@@ -18,6 +19,13 @@ pub const VIEW_LAG: u32 = 3;
 const CATCH_UP: i64 = 3;
 /// 超前得比想要的多这么多：先停着等服务端追上来。
 const TOO_FAR: i64 = 15;
+/// 想要的超前最多几个 tick：再加上 `TOO_FAR` 的容忍也要留在预测的历史里（不然每个快照都找不到当时的预测，只能从头来），
+/// 也不超过服务端收输入的超前上限。往返超过大约 1.6 秒时超前量就停在这里，输入晚到、服务端沿用旧输入，客户端靠回滚对上。
+pub const MAX_TARGET_LEAD: i64 = min(HISTORY as i64 - TOO_FAR - 5, MAX_LEAD as i64);
+
+const fn min(a: i64, b: i64) -> i64 {
+    if a < b { a } else { b }
+}
 
 /// 角色的预测模型：只比自己预测得了的字段（被拍的次数是服务端改的，不算误差）。
 #[derive(Debug, Clone, Copy)]
@@ -96,7 +104,7 @@ impl ArenaClient {
         let latest = self.latest?;
         let p = self.predictor.as_mut()?;
         let lead = p.tick() as i64 - latest as i64;
-        let target = target_lead(rtt, DT as f64);
+        let target = target_lead(rtt, DT as f64).min(MAX_TARGET_LEAD);
         let mut steps = self.pacer.advance(dt, DT as f64, lead, target);
         if lead + CATCH_UP < target {
             steps = (steps + (target - lead) as u32).min(2 * MAX_STEPS);
@@ -147,7 +155,7 @@ impl ArenaClient {
 mod tests {
     use super::*;
     use crate::arena::{button, spawn};
-    use crate::arena::room::ArenaRoom;
+    use crate::arena::room::{ArenaRoom, MAX_REWIND};
     use crate::simnet::SimNet;
 
     /// 一个服务端、两个客户端，中间是模拟网络；客户端 60 帧每秒，服务端 30 tick 每秒。
@@ -180,6 +188,11 @@ mod tests {
 
         /// 走 `seconds` 秒，`input(客户端, 时间)` 给按键。
         fn run(&mut self, seconds: f64, input: impl Fn(usize, f64) -> u8) {
+            self.run_with(seconds, |i, now, _| input(i, now));
+        }
+
+        /// 同 `run`，按键还能看客户端自己（比如它看到的世界）。
+        fn run_with(&mut self, seconds: f64, mut input: impl FnMut(usize, f64, &ArenaClient) -> u8) {
             let frame = 1.0 / 60.0;
             let end = self.now + seconds;
             while self.now < end {
@@ -199,7 +212,8 @@ mod tests {
                     for s in self.down[i].recv(self.now) {
                         c.receive(&s);
                     }
-                    if let Some(m) = c.frame(frame, input(i, self.now), self.rtt) {
+                    let keys = input(i, self.now, c);
+                    if let Some(m) = c.frame(frame, keys, self.rtt) {
                         self.up[i].send(self.now, m);
                     }
                 }
@@ -280,6 +294,53 @@ mod tests {
     }
 
     #[test]
+    fn a_huge_round_trip_does_not_reset_over_and_over() {
+        // 往返 3 秒：想要的超前比历史还长；夹住以后只是输入晚到被服务端沿用旧的（回滚），不会每个快照都从头来
+        let mut rig = Rig::new(1.5, 0.0, 0.0);
+        rig.run(4.0, |_, _| 0);
+        rig.run(6.0, Rig::wander);
+        rig.run(8.0, |_, _| 0);
+        for c in &rig.clients {
+            assert!(c.stats().resets <= 2, "{:?}", c.stats());
+            assert!(c.lead().unwrap() <= MAX_TARGET_LEAD + TOO_FAR, "超前 {}", c.lead().unwrap());
+        }
+        rig.assert_converged();
+    }
+
+    /// 客户端 `c` 现在看到的远端世界：最新快照往前 `VIEW_LAG` 个 tick（和它发给服务端的 `view` 一样）。
+    fn seen(c: &ArenaClient) -> Option<&World> {
+        let view = c.latest?.saturating_sub(VIEW_LAG);
+        c.book.iter().find(|(t, _)| *t == view).map(|(_, w)| w)
+    }
+
+    /// 1 站着；2 从右边往左跑，穿过 1 继续跑开。1 在自己看到 2 刚要出拍人范围（左边 36..46）时按拍。
+    /// 服务端算到那个 tick 时 2 早跑远了，只有回溯到 1 看到的那一刻才拍得中。
+    fn tag_a_runner(round_trip: f64) -> (u16, i64) {
+        let mut rig = Rig::new(round_trip / 2.0, 0.0, 0.0);
+        rig.run(1.0, |_, _| 0);
+        let mut lead = 0;
+        rig.run_with(3.0, |i, _, c| {
+            if i == 1 {
+                return button::LEFT;
+            }
+            lead = lead.max(c.lead().unwrap_or(0));
+            let Some(w) = seen(c) else { return 0 };
+            let dx = w[&2].x - w[&1].x;
+            if (-46.0..=-36.0).contains(&dx) && w[&2].vx < 0.0 { button::TAG } else { 0 }
+        });
+        rig.run(1.0, |_, _| 0);
+        (rig.room.world()[&2].tagged, lead)
+    }
+
+    #[test]
+    fn lag_compensation_covers_a_200ms_round_trip() {
+        let (tagged, lead) = tag_a_runner(0.2);
+        assert_eq!(tagged, 1, "往返 200 ms（超前 {lead} 个 tick）：拍中");
+        assert!(lead as u32 + VIEW_LAG <= MAX_REWIND, "要回溯 {} 个 tick，上限 {MAX_REWIND}", lead as u32 + VIEW_LAG);
+        assert_eq!(tag_a_runner(0.3).0, 1, "往返 300 ms：还在上限以内");
+    }
+
+    #[test]
     fn deltas_without_their_base_are_dropped_and_old_ones_ignored() {
         let mut room = ArenaRoom::new();
         room.join(1);
@@ -288,7 +349,7 @@ mod tests {
         let second = room.step().remove(0).1;
         assert!(c.receive(&second).is_some());
         assert!(c.receive(&first).is_none(), "比已经有的旧");
-        let orphan = WorldSnapshot { tick: 10, base: Some(9), ack: None, entities: vec![], removed: vec![] };
+        let orphan = WorldSnapshot { tick: 10, base: Some(9), entities: vec![], removed: vec![] };
         assert!(c.receive(&orphan).is_none());
         assert_eq!(c.dropped, 1);
         assert_eq!(c.world().unwrap().0, 2);

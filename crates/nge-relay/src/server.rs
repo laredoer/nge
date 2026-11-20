@@ -136,7 +136,7 @@ pub async fn serve_on(mut acceptor: impl Accept, config: Config, live: Live) -> 
     let outbox = config.outbox.max(1);
     let permits = Arc::new(Semaphore::new(config.max_conns.max(1)));
     let locked = config.auth.is_some();
-    let hub_logic = Hub::new(config);
+    let hub_logic = Hub::new(config).map_err(io::Error::other)?;
     let scores = hub_logic.scores();
     tokio::spawn(run_hub(hub_logic, inbox));
     let ids = Arc::new(Mutex::new(Ids::default()));

@@ -22,6 +22,8 @@ web-time.workspace = true
 hmac = "0.12"
 sha2 = "0.10"
 base64 = "0.22"
+# 名字里看不见的格式字符（Cf 类）不收
+unicode-properties = { version = "0.1", default-features = false, features = ["general-category"] }
 bevy_ecs = { workspace = true, optional = true }
 nge-ecs = { workspace = true, optional = true }
 nge-core = { workspace = true, optional = true }

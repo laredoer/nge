@@ -51,8 +51,12 @@ pub struct Remotes {
 impl Remotes {
     /// 本地时间 `local`（毫秒）收到 `from` 的快照。
     pub(crate) fn receive(&mut self, from: PeerId, snapshot: &Snapshot, local: f64) {
+        self.receive_at(from, snapshot.seq, snapshot.t as f64, &snapshot.items, local);
+    }
+
+    /// 同 `receive`，时间戳 `t`（毫秒）不受 `u32` 限制（权威房间按 tick 算，开久了超过 `u32`）。
+    pub(crate) fn receive_at(&mut self, from: PeerId, seq: u32, t: f64, items: &[Item], local: f64) {
         let peer = self.peers.entry(from).or_default();
-        let t = snapshot.t as f64;
         if let Some((last_t, last_local)) = peer.last {
             // 比本地过去的时间还往前跳了很多：伪造的，丢掉（不让它把时钟和缓冲带偏）
             if t - last_t > (local - last_local).max(0.0) + MAX_JUMP {
@@ -64,12 +68,12 @@ impl Remotes {
             }
         }
         peer.last = Some((t, local));
-        peer.clock.observe(local, snapshot.t as f64);
-        for item in snapshot.items.iter().take(MAX_ITEMS) {
+        peer.clock.observe(local, t);
+        for item in items.iter().take(MAX_ITEMS) {
             if !peer.buffers.contains_key(&item.key) && peer.buffers.len() >= MAX_KEYS {
                 continue;
             }
-            let sample = Sample { seq: snapshot.seq, t: snapshot.t as f64, pos: [item.x, item.y], rotation: item.rotation };
+            let sample = Sample { seq, t, pos: [item.x, item.y], rotation: item.rotation };
             peer.buffers.entry(item.key.clone()).or_default().push(sample);
         }
     }

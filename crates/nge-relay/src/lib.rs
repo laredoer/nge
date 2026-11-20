@@ -5,6 +5,7 @@ pub mod http;
 pub mod hub;
 pub mod scores;
 pub mod server;
+pub mod startup;
 
 pub use hub::{Config, Hub};
 pub use server::{Live, Running, serve, serve_on, spawn};

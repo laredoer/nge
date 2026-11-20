@@ -1,6 +1,6 @@
 //! 客户端状态机：连中继、握手、心跳、断线后按退避重连、维护房间成员。时间由调用方给（秒），连接由注入的 `connector` 建。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 
 use crate::backoff::Backoff;
 use crate::limit::TokenBucket;
@@ -11,6 +11,8 @@ use crate::proto::{self, ClientMsg, ErrorCode, HelloAuth, MAX_JSON, MAX_KEY, MAX
 
 /// 多久发一次心跳（秒）。
 pub const PING_INTERVAL: f64 = 2.0;
+/// 往返时间取最近几次心跳的中位数。
+pub const RTT_SAMPLES: usize = 5;
 /// 多久没收到任何东西算断了（秒）。
 pub const SILENCE_TIMEOUT: f64 = 10.0;
 /// 用户消息每秒最多几条、最多攒几条。
@@ -19,14 +21,26 @@ pub const MESSAGE_BURST: f64 = 30.0;
 /// 房间满了以后多久再试（秒）。
 pub const ROOM_FULL_RETRY: f64 = 30.0;
 
-/// 连到哪：中继地址、房间、自己的名字、房间的模式、鉴权的凭据（`auth::Credential` 的整串）。
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// 连到哪：中继地址、房间、自己的名字、房间的模式、鉴权的凭据（`auth::Credential` 的整串，含会话密钥：`Debug` 不打印）。
+#[derive(Clone, PartialEq, Eq)]
 pub struct Target {
     pub url: String,
     pub room: String,
     pub name: String,
     pub mode: Mode,
     pub token: Option<String>,
+}
+
+impl std::fmt::Debug for Target {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Target")
+            .field("url", &self.url)
+            .field("room", &self.room)
+            .field("name", &self.name)
+            .field("mode", &self.mode)
+            .field("token", &self.token.as_ref().map(|_| "…"))
+            .finish()
+    }
 }
 
 impl Target {
@@ -90,8 +104,9 @@ pub struct NetClient {
     stopped: bool,
     /// 带着凭据、还在等服务端的随机数：等到了再发 `Hello`。
     awaiting_challenge: bool,
-    /// 最近一次心跳的往返（秒）。
+    /// 最近几次心跳的往返的中位数（秒）。
     rtt: Option<f64>,
+    rtt_samples: VecDeque<f64>,
     /// 等回 `Pong` 的那次心跳是什么时候发的。
     ping_sent: Option<f64>,
 }
@@ -114,6 +129,7 @@ impl NetClient {
             stopped: false,
             awaiting_challenge: false,
             rtt: None,
+            rtt_samples: VecDeque::new(),
             ping_sent: None,
         }
     }
@@ -347,7 +363,13 @@ impl NetClient {
             }
             RelayMsg::Pong => {
                 if let Some(sent) = self.ping_sent.take() {
-                    self.rtt = Some((now - sent).max(0.0));
+                    if self.rtt_samples.len() >= RTT_SAMPLES {
+                        self.rtt_samples.pop_front();
+                    }
+                    self.rtt_samples.push_back((now - sent).max(0.0));
+                    let mut sorted: Vec<f64> = self.rtt_samples.iter().copied().collect();
+                    sorted.sort_by(f64::total_cmp);
+                    self.rtt = Some(sorted[(sorted.len() - 1) / 2]);
                 }
             }
             RelayMsg::Challenge { nonce, required } => self.challenged(&nonce, required),
@@ -632,7 +654,7 @@ mod tests {
     fn credentials_wait_for_the_challenge_and_prove_this_connection() {
         use crate::auth::{Claims, Secret};
         let secret = Secret::new(b"client-test-secret-0123456789".to_vec()).unwrap();
-        let cred = secret.issue(&Claims { sub: "acct".into(), name: "小红".into(), exp: 2_000_000_000 }).unwrap();
+        let cred = secret.issue(&Claims { sub: "acct".into(), name: "小红".into(), iat: 1_999_990_000, exp: 2_000_000_000 }).unwrap();
         let fake = FakeRelay::default();
         let mut c = client(&fake);
         c.set_target(Some(Target { mode: Mode::Authority, token: Some(cred.clone()), ..target("arena") }));
@@ -670,6 +692,15 @@ mod tests {
     }
 
     #[test]
+    fn debug_hides_the_token() {
+        let t = Target { token: Some("v1.body.sig.session-key".into()), ..target("r") };
+        let shown = format!("{t:?}");
+        assert!(!shown.contains("session-key") && !shown.contains("body"), "{shown}");
+        assert!(shown.contains("token: Some(") && shown.contains("\"r\""), "{shown}");
+        assert!(format!("{:?}", target("r")).contains("token: None"));
+    }
+
+    #[test]
     fn pongs_measure_the_round_trip() {
         let fake = FakeRelay::default();
         let mut c = online(&fake);
@@ -682,12 +713,28 @@ mod tests {
         fake.relay(RelayMsg::Pong);
         c.update(PING_INTERVAL + 1.0);
         assert!((c.rtt().unwrap() - 0.08).abs() < 1e-9, "没发心跳时的 Pong 不算");
+        // 取最近几次的中位数：偶尔一次卡顿不把超前量带跑，一直变慢才跟着变
+        let mut at = PING_INTERVAL + 1.0;
+        let mut ping = |c: &mut NetClient, took: f64| {
+            at += PING_INTERVAL;
+            c.update(at);
+            fake.relay(RelayMsg::Pong);
+            c.update(at + took);
+            c.rtt().unwrap()
+        };
+        assert!((ping(&mut c, 0.9) - 0.08).abs() < 1e-9, "一次卡顿不算");
+        assert!((ping(&mut c, 0.08) - 0.08).abs() < 1e-9);
+        let mut last = 0.0;
+        for _ in 0..4 {
+            last = ping(&mut c, 0.3);
+        }
+        assert!((last - 0.3).abs() < 1e-9, "一直慢：跟上 {last}");
     }
 
     #[test]
     fn world_snapshots_reach_authority_rooms_only_and_scores_are_sent() {
         use crate::arena::delta::WorldSnapshot;
-        let world = WorldSnapshot { tick: 3, base: None, ack: None, entities: vec![], removed: vec![] };
+        let world = WorldSnapshot { tick: 3, base: None, entities: vec![], removed: vec![] };
         let fake = FakeRelay::default();
         let mut c = online(&fake);
         fake.relay(RelayMsg::World(world.clone()));

@@ -2346,6 +2346,7 @@ dependencies = [
  "sha2",
  "tokio",
  "tokio-tungstenite",
+ "unicode-properties",
  "ureq",
  "wasm-bindgen",
  "wasm-bindgen-futures",
@@ -2441,12 +2442,14 @@ name = "nge-relay"
 version = "0.1.0"
 dependencies = [
  "futures-util",
+ "getrandom 0.3.4",
  "log",
  "nge-net",
  "serde",
  "serde_json",
  "tokio",
  "tokio-tungstenite",
+ "unicode-normalization",
 ]
 
 [[package]]

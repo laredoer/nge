@@ -5,7 +5,7 @@ use serde::Deserialize;
 /// 远端精灵 id 的前缀。
 pub const REMOTE_PREFIX: &str = "net:";
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Clone, PartialEq, Deserialize)]
 pub struct NetNode {
     /// 中继地址；不写时用环境变量 `NGE_RELAY`，再没有就是 `ws://127.0.0.1:9100`。
     pub url: Option<String>,
@@ -25,6 +25,23 @@ pub struct NetNode {
     pub token: Option<String>,
     /// 权威模式里自己的角色的精灵 id：位置由预测写。
     pub predict: Option<String>,
+}
+
+/// `token` 含会话密钥，`Debug` 不打印。
+impl std::fmt::Debug for NetNode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NetNode")
+            .field("url", &self.url)
+            .field("room", &self.room)
+            .field("name", &self.name)
+            .field("sync", &self.sync)
+            .field("rate", &self.rate)
+            .field("delay", &self.delay)
+            .field("mode", &self.mode)
+            .field("token", &self.token.as_ref().map(|_| "…"))
+            .field("predict", &self.predict)
+            .finish()
+    }
 }
 
 /// `net:<成员>:<key>` → (成员, key)。
@@ -130,6 +147,14 @@ mod tests {
         for bad in ["player", "net:", "net:x:player", "net:1:", "net:-1:p", "net:1"] {
             assert_eq!(parse_remote(bad), None, "{bad}");
         }
+    }
+
+    #[test]
+    fn debug_hides_the_token() {
+        let node: NetNode = serde_json::from_value(serde_json::json!({ "room": "r", "token": "v1.body.sig.session-key" })).unwrap();
+        let shown = format!("{node:?}");
+        assert!(!shown.contains("session-key") && !shown.contains("body"), "{shown}");
+        assert!(shown.contains("room"), "别的字段照样打 {shown}");
     }
 
     #[cfg(feature = "net")]

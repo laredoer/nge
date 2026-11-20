@@ -11,7 +11,7 @@ use serde::Serialize;
 use crate::arena::client::ArenaClient;
 use crate::arena::{TICK_MS, World, button};
 use crate::plugin::{NET, Net, NetWire};
-use crate::proto::{Item, PeerId, Snapshot};
+use crate::proto::{Item, PeerId};
 use crate::sync::Remotes;
 
 /// 权威房间里远端角色的 key：TSX 用 `remoteId(成员, "hero")` 声明。
@@ -81,10 +81,11 @@ pub fn input_of(actions: &Actions) -> u8 {
 
 /// 收到的快照解出来以后：别人的角色喂给插值缓冲（时间戳是服务端的 tick）。
 pub(crate) fn feed(remotes: &mut Remotes, me: PeerId, tick: u32, world: &World, local_ms: f64) {
-    let t = (tick as f64 * TICK_MS) as u32;
+    // 用 f64 的毫秒：u32 的毫秒 50 天就到头
+    let t = tick as f64 * TICK_MS;
     for (&id, hero) in world.iter().filter(|(id, _)| **id != me) {
         let item = Item { key: ARENA_KEY.to_owned(), x: hero.x, y: hero.y, rotation: 0.0 };
-        remotes.receive(id, &Snapshot { seq: tick, t, items: vec![item] }, local_ms);
+        remotes.receive_at(id, tick, t, &[item], local_ms);
     }
 }
 
@@ -193,6 +194,19 @@ mod tests {
         let last = stats.last().unwrap();
         assert_eq!((last["rollbacks"].clone(), last["tagged"].clone()), (json!(0), json!(0)), "{last}");
         assert!(last["tick"].as_u64().unwrap() > 30 && last["lead"].as_i64().unwrap() > 0, "{last}");
+    }
+
+    #[test]
+    fn remote_heroes_keep_moving_after_fifty_days() {
+        // 50 天的 tick 换成毫秒超过 u32：时间戳不能卡在上限
+        let tick = (50.0 * 24.0 * 3600.0 * crate::arena::TICK_HZ as f64) as u32;
+        let mut remotes = Remotes::default();
+        let at = |x: f32| World::from([(2, crate::arena::Hero { x, ..spawn(2) })]);
+        for i in 0..6u32 {
+            feed(&mut remotes, 1, tick + i, &at(100.0 + i as f32 * 10.0), i as f64 * TICK_MS);
+        }
+        let shown = remotes.state(2, ARENA_KEY, 5.0 * TICK_MS, TICK_MS * 2.0).unwrap();
+        assert!((shown.pos[0] - 130.0).abs() < 1.0, "按 tick 插值，在 2 个 tick 以前的位置 {:?}", shown.pos);
     }
 
     /// 声明了 move / jump / tag 的绑定表。

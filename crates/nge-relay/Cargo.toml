@@ -23,6 +23,9 @@ log.workspace = true
 tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-thread", "net", "sync", "time", "macros", "io-util"] }
 tokio-tungstenite = { version = "0.28", default-features = false, features = ["handshake"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+getrandom = "0.3"
+# 排行榜名字的归属按 NFKC + 小写比
+unicode-normalization = "0.1"
 
 [dev-dependencies]
 nge-net = { workspace = true, features = ["client"] }

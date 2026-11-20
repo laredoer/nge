@@ -34,13 +34,9 @@ fn main() {
             std::process::exit(2);
         }
     }
-    // 鉴权要显式选：有密钥就鉴权，`--dev` 才不鉴权，两个都没有或者都有都不起
-    config.auth = match (Secret::from_env(SECRET_ENV), dev) {
-        (Ok(Some(_)), true) => fail(&format!("{SECRET_ENV} 和 --dev 只能二选一")),
-        (Ok(Some(secret)), false) => Some(secret),
-        (Ok(None), true) => None,
-        (Ok(None), false) => fail(&format!("没有鉴权密钥：设环境变量 {SECRET_ENV}（至少 16 字节），或者本机开发加 --dev 不鉴权\n{USAGE}")),
-        (Err(e), _) => fail(&format!("{SECRET_ENV} 不能用: {e}")),
+    config.auth = match nge_relay::startup::choose_auth(Secret::from_env(SECRET_ENV), dev) {
+        Ok(auth) => auth,
+        Err(why) => fail(&format!("{why}\n{USAGE}")),
     };
     let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
         Ok(r) => r,

@@ -51,8 +51,6 @@ pub struct WorldSnapshot {
     pub tick: u32,
     /// 和哪个 tick 比的；`None` 是全量。
     pub base: Option<u32>,
-    /// 服务端用到的你的最新输入的 tick。
-    pub ack: Option<u32>,
     pub entities: Vec<EntityDelta>,
     pub removed: Vec<PeerId>,
 }
@@ -219,9 +217,9 @@ mod tests {
         let w: World = (1..=8).map(|id| (id, spawn(id))).collect();
         let (entities, removed) = diff(Some(&w), &w);
         assert!(entities.is_empty() && removed.is_empty());
-        let still = encode(&RelayMsg::World(WorldSnapshot { tick: 100, base: Some(99), ack: Some(100), entities, removed }));
+        let still = encode(&RelayMsg::World(WorldSnapshot { tick: 100, base: Some(99), entities, removed }));
         let (full, _) = diff(None, &w);
-        let whole = encode(&RelayMsg::World(WorldSnapshot { tick: 100, base: None, ack: Some(100), entities: full, removed: vec![] }));
+        let whole = encode(&RelayMsg::World(WorldSnapshot { tick: 100, base: None, entities: full, removed: vec![] }));
         assert!(still.len() < 12 && whole.len() > 8 * 20, "增量 {} 字节，全量 {} 字节", still.len(), whole.len());
     }
 
@@ -234,7 +232,7 @@ mod tests {
     }
 
     fn snap(entities: Vec<EntityDelta>) -> WorldSnapshot {
-        WorldSnapshot { tick: 5, base: None, ack: None, entities, removed: vec![] }
+        WorldSnapshot { tick: 5, base: None, entities, removed: vec![] }
     }
 
     #[test]

@@ -102,6 +102,10 @@ pub enum ErrorCode {
     WrongMode,
     /// 名字归别的账号了（交成绩时）。
     NameTaken,
+    /// 排行榜的名字归属表满了，新名字交不了成绩。
+    ScoresFull,
+    /// 这个账号建的新榜够多了。
+    TooManyBoards,
 }
 
 /// 客户端之间的消息。
@@ -199,10 +203,13 @@ pub fn decode_payload(bytes: &[u8]) -> Result<Payload, DecodeError> {
     Ok(payload)
 }
 
-/// 名字、房间名：去掉两头空白，不能是空的、不能有控制字符、不超过 `max` 个字符。
+/// 名字、房间名：去掉两头空白，不能是空的、不能有控制字符（Cc）和看不见的格式字符（Cf：零宽、方向控制、BOM 等，
+/// 能拿来做出看着和别人一样的名字），不超过 `max` 个字符。
 pub fn clean_text(s: &str, max: usize) -> Option<String> {
+    use unicode_properties::{GeneralCategory, UnicodeGeneralCategory};
     let s = s.trim();
-    (!s.is_empty() && s.chars().count() <= max && !s.chars().any(char::is_control)).then(|| s.to_owned())
+    let hidden = |c: char| c.is_control() || c.general_category() == GeneralCategory::Format;
+    (!s.is_empty() && s.chars().count() <= max && !s.chars().any(hidden)).then(|| s.to_owned())
 }
 
 fn is_key(s: &str) -> bool {
@@ -263,7 +270,7 @@ mod tests {
             RelayMsg::Error(ErrorCode::RoomFull),
             RelayMsg::Error(ErrorCode::Unauthorized),
             RelayMsg::Challenge { nonce: [3; NONCE], required: true },
-            RelayMsg::World(WorldSnapshot { tick: 3, base: Some(2), ack: None, entities: vec![], removed: vec![1] }),
+            RelayMsg::World(WorldSnapshot { tick: 3, base: Some(2), entities: vec![], removed: vec![1] }),
             RelayMsg::Ranked { board: "b".into(), rank: Some(2) },
         ];
         for m in relay {
@@ -349,5 +356,9 @@ mod tests {
         assert_eq!(clean_text("a\nb", 4), None);
         assert_eq!(clean_text("五个字的名", 4), None, "按字符数，不按字节");
         assert_eq!(clean_text("四个字名", 4), Some("四个字名".into()));
+        // 看不见的格式字符（零宽、方向控制、BOM）：能拿来冒充别人，不收
+        for sneaky in ["小\u{200b}红", "\u{202e}abc", "a\u{feff}", "a\u{2066}b", "a\u{00ad}b"] {
+            assert_eq!(clean_text(sneaky, 8), None, "{sneaky:?}");
+        }
     }
 }

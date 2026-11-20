@@ -11,7 +11,7 @@ use nge_net::auth::{NONCE, Secret};
 use nge_net::limit::TokenBucket;
 use nge_net::proto::{self, ClientMsg, ErrorCode, HelloAuth, MAX_NAME, MAX_ROOM, Mode, PROTOCOL_VERSION, Peer, PeerId, RelayMsg};
 
-use crate::scores::{Leaderboard, NAME_TAKEN};
+use crate::scores::{Leaderboard, NAME_TAKEN, OWNERS_FULL, TOO_MANY_BOARDS};
 
 pub type ConnId = u32;
 
@@ -79,18 +79,10 @@ pub struct Hub {
 }
 
 impl Hub {
-    pub fn new(config: Config) -> Self {
-        let since = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
-        Self {
-            config,
-            conns: HashMap::new(),
-            rooms: BTreeMap::new(),
-            arenas: BTreeMap::new(),
-            scores: Arc::default(),
-            unix_base: since.as_secs(),
-            nonce_seed: since.as_nanos() as u64,
-            nonces: 0,
-        }
+    /// 时钟早于 1970 年、拿不到系统随机数时报错（见 `startup::boot`）。
+    pub fn new(config: Config) -> Result<Self, String> {
+        let (unix_base, nonce_seed) = crate::startup::boot(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH), crate::startup::os_random())?;
+        Ok(Self { config, conns: HashMap::new(), rooms: BTreeMap::new(), arenas: BTreeMap::new(), scores: Arc::default(), unix_base, nonce_seed, nonces: 0 })
     }
 
     /// 改「`now` 为 0 时」的 Unix 秒（测试用）。
@@ -298,8 +290,15 @@ impl Hub {
         let result = self.scores.lock().unwrap_or_else(|e| e.into_inner()).submit_as(board, conn.owner.as_deref(), &conn.score_name, score);
         match result {
             Ok(rank) => vec![reply(id, &RelayMsg::Ranked { board: board.to_owned(), rank: rank.map(|r| r as u32) })],
-            Err(why) if why == NAME_TAKEN => vec![reply(id, &RelayMsg::Error(ErrorCode::NameTaken))],
-            Err(_) => vec![reply(id, &RelayMsg::Error(ErrorCode::BadFrame))],
+            Err(why) => {
+                let code = match why {
+                    NAME_TAKEN => ErrorCode::NameTaken,
+                    OWNERS_FULL => ErrorCode::ScoresFull,
+                    TOO_MANY_BOARDS => ErrorCode::TooManyBoards,
+                    _ => ErrorCode::BadFrame,
+                };
+                vec![reply(id, &RelayMsg::Error(code))]
+            }
         }
     }
 
@@ -346,7 +345,7 @@ mod tests {
     use nge_net::proto::encode;
 
     fn hub() -> Hub {
-        Hub::new(Config { room_size: 3, max_frame: 256, rate: 10.0, burst: 5.0, max_dropped: 20, ..Config::default() })
+        Hub::new(Config { room_size: 3, max_frame: 256, rate: 10.0, burst: 5.0, max_dropped: 20, ..Config::default() }).unwrap()
     }
 
     fn hello(room: &str, name: &str) -> Vec<u8> {
@@ -519,7 +518,7 @@ mod tests {
 
     #[test]
     fn same_names_in_a_room_get_a_number() {
-        let mut h = Hub::new(Config { room_size: 8, ..Config::default() });
+        let mut h = Hub::new(Config { room_size: 8, ..Config::default() }).unwrap();
         join(&mut h, 1, "r", "a");
         assert_eq!(join(&mut h, 2, "r", "a")[1], (1, Some(RelayMsg::Joined(peer(2, "a#2")))));
         assert_eq!(join(&mut h, 3, "r", "a")[1].1, Some(RelayMsg::Joined(peer(3, "a#3"))));
@@ -543,11 +542,11 @@ mod tests {
     }
 
     fn locked() -> Hub {
-        Hub::new(Config { room_size: 4, auth: Some(secret()), ..Config::default() }).with_unix_base(NOW)
+        Hub::new(Config { room_size: 4, auth: Some(secret()), ..Config::default() }).unwrap().with_unix_base(NOW)
     }
 
     fn credential(sub: &str, name: &str, exp: u64) -> nge_net::auth::Credential {
-        let claims = nge_net::auth::Claims { sub: sub.into(), name: name.into(), exp };
+        let claims = nge_net::auth::Claims { sub: sub.into(), name: name.into(), iat: exp - 60, exp };
         nge_net::auth::Credential::parse(&secret().issue(&claims).unwrap()).unwrap()
     }
 
@@ -593,7 +592,7 @@ mod tests {
         let nonce = challenge(&mut h, 4);
         assert_eq!(decoded(h.frame(4, &signed_hello("r", Mode::Relay, &cred, &nonce), 61.0))[0], (4, Some(RelayMsg::Error(ErrorCode::Unauthorized))));
         // 伪造：别的密钥签的
-        let fake = nge_net::auth::Credential::parse(&Secret::new(b"not-the-server-secret-0123456789".to_vec()).unwrap().issue(&nge_net::auth::Claims { sub: "acct-1".into(), name: "小红".into(), exp: NOW + 60 }).unwrap()).unwrap();
+        let fake = nge_net::auth::Credential::parse(&Secret::new(b"not-the-server-secret-0123456789".to_vec()).unwrap().issue(&nge_net::auth::Claims { sub: "acct-1".into(), name: "小红".into(), iat: NOW, exp: NOW + 60 }).unwrap()).unwrap();
         let nonce = challenge(&mut h, 5);
         assert_eq!(decoded(h.frame(5, &signed_hello("r", Mode::Relay, &fake, &nonce), 0.0))[0], (5, Some(RelayMsg::Error(ErrorCode::Unauthorized))));
         // 房间里的人看到的是 token 里的名字
@@ -618,6 +617,21 @@ mod tests {
         h.frame(2, &signed_hello("r", Mode::Relay, &b, &nonce), 0.0);
         assert_eq!(decoded(h.frame(2, &score("l1", 1.0), 0.1)), vec![(2, Some(RelayMsg::Error(ErrorCode::NameTaken)))]);
         assert_eq!(h.scores().lock().unwrap().top("l1")[0].score, 12.5);
+        // 名字归属表满了、建的新榜太多了：各有各的错误码
+        {
+            let scores = h.scores();
+            let mut board = scores.lock().unwrap();
+            // 前面交 l1 时已经建了一个
+            for i in 1..crate::scores::MAX_NEW_BOARDS {
+                board.submit_as(&format!("b{i}"), Some("acct-1"), "小红", 1.0).unwrap();
+            }
+        }
+        assert_eq!(decoded(h.frame(1, &score("one-more", 1.0), 0.1)), vec![(1, Some(RelayMsg::Error(ErrorCode::TooManyBoards)))]);
+        let c = credential("acct-3", "小刚", NOW + 60);
+        let nonce = challenge(&mut h, 4);
+        h.frame(4, &signed_hello("r", Mode::Relay, &c, &nonce), 0.0);
+        h.scores().lock().unwrap().fill_owners_for_tests();
+        assert_eq!(decoded(h.frame(4, &score("l1", 1.0), 0.1)), vec![(4, Some(RelayMsg::Error(ErrorCode::ScoresFull)))]);
         // 没进房间不能交
         challenge(&mut h, 3);
         assert_eq!(decoded(h.frame(3, &score("l1", 1.0), 0.1)), vec![(3, Some(RelayMsg::Error(ErrorCode::NotJoined)))]);

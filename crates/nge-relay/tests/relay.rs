@@ -152,7 +152,7 @@ fn a_locked_relay_lets_signed_clients_into_an_authority_room() {
     let exp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() + 600;
     let signed = |secret: &Secret, sub: &str, name: &str| {
         let mut c = NetClient::new(Box::new(nge_net::link::connect));
-        let token = secret.issue(&Claims { sub: sub.into(), name: name.into(), exp }).unwrap();
+        let token = secret.issue(&Claims { sub: sub.into(), name: name.into(), iat: exp - 600, exp }).unwrap();
         c.set_target(Some(Target { mode: Mode::Authority, token: Some(token), ..Target::relay(format!("ws://{addr}"), "arena", "写什么都行") }));
         c
     };
