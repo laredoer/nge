@@ -43,6 +43,11 @@ fn next(kinds: &[TileKind], cols: usize, c: usize, r: usize) -> Option<(usize, u
     ((nl - want).abs() < EPS && ((nrr - nl) - g).abs() < EPS).then_some((nc, nr))
 }
 
+/// 两行（上、下）之间有没有一条坡上相邻的两格分在两行（坡跨过这两行中间的接缝）。
+pub(crate) fn crosses(two_rows: &[TileKind], cols: usize) -> bool {
+    (0..cols).any(|c| matches!(next(two_rows, cols, c, 0), Some((_, 1))) || matches!(next(two_rows, cols, c, 1), Some((_, 0))))
+}
+
 /// 斜坡格并成的块，和被并进去的实心格（这些格子不再单独合并成矩形）。
 /// 一条直线上连着的斜坡格并成一块，底边一直到最低那一格的底；中间盖住的格子都得是实心的，不是的地方断开成几段。
 pub(crate) fn slope_pieces(kinds: &[TileKind], cols: usize) -> (Vec<SlopePiece>, Vec<bool>) {

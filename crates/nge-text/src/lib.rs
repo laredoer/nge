@@ -86,6 +86,10 @@ pub struct TextBox(pub Vec2);
 #[derive(Component, Debug, Clone, Copy, Default)]
 pub struct ScreenText;
 
+/// 性能面板和曲线（PostUpdate）：曲线按相机贴在屏幕上，挪相机的系统要排在它前面。
+#[derive(bevy_ecs::schedule::SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PerfDrawn;
+
 /// 注册字体资源和文字渲染器。要放在 2D / 3D 渲染插件后面，文字才会画在最上面。
 pub struct TextPlugin;
 
@@ -96,7 +100,7 @@ impl Plugin for TextPlugin {
             .init_resource::<PerfOverlay>()
             .init_resource::<PerfGraph>()
             .add_systems(Update, floating::float)
-            .add_systems(PostUpdate, (perf::perf_overlay, perf_graph::perf_graph)).add_renderer(renderer::TextRenderer::default());
+            .add_systems(PostUpdate, (perf::perf_overlay, perf_graph::perf_graph).in_set(PerfDrawn)).add_renderer(renderer::TextRenderer::default());
     }
 }
 

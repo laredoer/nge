@@ -470,7 +470,7 @@ impl ShadowGpu {
             let map = if p.local { &self.local } else { &self.dir };
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("shadow"),
-                timestamp_writes: timers.get(i).and_then(Option::as_ref).map(nge_ecs::PassTimer::writes),
+                timestamp_writes: timers.get(i).and_then(Option::as_ref).and_then(nge_ecs::PassTimer::writes),
                 color_attachments: &[],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: &map.layers[p.layer],

@@ -50,6 +50,8 @@ pub struct PerfEvent {
     /// 不支持、还没读回时是 `null`。
     pub gpu_ms: Option<f32>,
     pub gpu_supported: bool,
+    /// pass 太多没量全：`gpuMs` 是下限。
+    pub gpu_truncated: bool,
     pub draws: u32,
     pub instances: u32,
     pub entities: u32,
@@ -73,6 +75,7 @@ impl From<&PerfReport> for PerfEvent {
             wait_ms: r.wait_ms,
             gpu_ms: r.gpu_ms,
             gpu_supported: r.gpu_supported,
+            gpu_truncated: r.gpu_truncated,
             draws: r.draws,
             instances: r.instances,
             entities: r.entities,
@@ -85,12 +88,13 @@ impl From<&PerfReport> for PerfEvent {
     }
 }
 
-/// 声明变了才写开关，Rust 自己开关的不会被每帧覆盖；声明去掉时都关掉。
-pub(crate) fn sync_perf(scene: Res<Scene>, mut overlay: ResMut<PerfOverlay>, mut graph: ResMut<PerfGraph>, mut events: ResMut<PerfEvents>, mut last: Local<Option<Option<PerfNode>>>) {
-    if *last == Some(scene.perf) {
+/// 声明变了才写开关，Rust 自己开关的不会被每帧覆盖；声明去掉时都关掉。一开始当作没写：
+/// Rust 启动时打开的面板不会被第一帧没写 `perf` 的场景关掉。
+pub(crate) fn sync_perf(scene: Res<Scene>, mut overlay: ResMut<PerfOverlay>, mut graph: ResMut<PerfGraph>, mut events: ResMut<PerfEvents>, mut last: Local<Option<PerfNode>>) {
+    if *last == scene.perf {
         return;
     }
-    *last = Some(scene.perf);
+    *last = scene.perf;
     let node = scene.perf.unwrap_or_default();
     overlay.0 = node.panel;
     graph.0 = node.graph;
@@ -132,6 +136,15 @@ mod tests {
         assert!(on(&app));
         frame(&mut app, Some(json!({ "sprites": [] })));
         assert!(!on(&app), "去掉声明就关");
+    }
+
+    #[test]
+    fn a_panel_rust_opened_survives_a_first_scene_without_perf() {
+        let mut app = app();
+        app.world_mut().resource_mut::<PerfOverlay>().0 = true;
+        app.world_mut().resource_mut::<PerfGraph>().0 = true;
+        frame(&mut app, Some(json!({ "sprites": [] })));
+        assert!(app.world().resource::<PerfOverlay>().0 && app.world().resource::<PerfGraph>().0);
     }
 
     #[test]

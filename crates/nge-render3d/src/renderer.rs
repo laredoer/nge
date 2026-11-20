@@ -233,7 +233,7 @@ impl Renderer for MeshRenderer {
         let timer = nge_ecs::pass_timer(world, "网格");
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("meshes"),
-            timestamp_writes: timer.as_ref().map(nge_ecs::PassTimer::writes),
+            timestamp_writes: timer.as_ref().and_then(nge_ecs::PassTimer::writes),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: target,
                 depth_slice: None,
@@ -279,7 +279,7 @@ impl Renderer for MeshRenderer {
         let timer = nge_ecs::pass_timer(world, "软粒子");
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("soft billboards"),
-            timestamp_writes: timer.as_ref().map(nge_ecs::PassTimer::writes),
+            timestamp_writes: timer.as_ref().and_then(nge_ecs::PassTimer::writes),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: target, depth_slice: None, resolve_target: None, ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store } })],
             // 只读：同一张深度纹理同时绑在 billboards 的 bind group 里
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment { view: depth, depth_ops: None, stencil_ops: None }),
@@ -293,7 +293,7 @@ impl Renderer for MeshRenderer {
         let timer = nge_ecs::pass_timer(world, "调试线");
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("lines"),
-            timestamp_writes: timer.as_ref().map(nge_ecs::PassTimer::writes),
+            timestamp_writes: timer.as_ref().and_then(nge_ecs::PassTimer::writes),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: target, depth_slice: None, resolve_target: None, ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store } })],
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                 view: depth,

@@ -355,11 +355,17 @@ fn sprites_out_of_view_are_culled_but_counted() {
 
 /// 一直画，直到 GPU 时间读回来（最多 15 秒）；返回最后看到的（支不支持、最近一帧）。
 fn gpu_times(gfx: &Gfx) -> (bool, Option<nge_ecs::GpuTimes>) {
+    gpu_times_with(gfx, |_| {})
+}
+
+/// 同 [`gpu_times`]，先对 app 做点什么（加后处理、加渲染器）。
+fn gpu_times_with(gfx: &Gfx, setup: impl Fn(&mut App) + Send + Sync + 'static) -> (bool, Option<nge_ecs::GpuTimes>) {
     let seen = std::sync::Arc::new(std::sync::Mutex::new((false, None)));
     let out = seen.clone();
     let factory = nge_ecs::factory(move || {
         let mut app = App::new();
         app.add_plugins(Render2dPlugin);
+        setup(&mut app);
         app.add_systems(Startup, |mut commands: Commands| {
             commands.spawn((Sprite::color(Vec2::splat(16.0), Vec4::ONE), Transform2d::default()));
         });
@@ -407,6 +413,53 @@ fn gpu_time_is_read_back_without_waiting_when_timestamps_are_supported() {
     let times = times.expect("15 秒内读回来了");
     assert_eq!(times.passes.iter().map(|p| p.0).collect::<Vec<_>>(), ["精灵"]);
     assert!(times.total_ms >= 0.0 && times.total_ms < 1000.0, "{times:?}");
+}
+
+/// 两个后处理里一个没有这个着色器（跳过）：只量真的画了的那一遍，没有没写过的查询。
+#[test]
+fn only_post_passes_that_ran_are_timed() {
+    let Some(gfx) = gfx_with(wgpu::Features::TIMESTAMP_QUERY) else { return eprintln!("没有可用 GPU，跳过") };
+    if !gfx.device.features().contains(wgpu::Features::TIMESTAMP_QUERY) {
+        return eprintln!("GPU 不支持时间戳，跳过");
+    }
+    let (_, times) = gpu_times_with(&gfx, |app| {
+        let effect = |shader: &str| nge_render2d::PostEffect { shader: shader.into(), params: Vec4::ZERO, layer: nge_render2d::PostLayer::Screen };
+        app.insert_resource(nge_render2d::PostEffects(vec![effect("no-such-shader"), effect("vignette")]));
+    });
+    let times = times.expect("15 秒内读回来了");
+    assert_eq!(times.passes.iter().map(|p| p.0).collect::<Vec<_>>(), ["精灵", "后处理"], "{times:?}");
+    assert!(!times.truncated);
+}
+
+/// 一帧开的 pass 比上限多：多出的不量，记成不全。
+struct ManyPasses;
+
+impl nge_ecs::Renderer for ManyPasses {
+    fn render(&mut self, world: &mut World, _gfx: &Gfx, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView) {
+        for _ in 0..nge_ecs::MAX_PASSES + 6 {
+            let timer = nge_ecs::pass_timer(world, "空");
+            let _ = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("空"),
+                timestamp_writes: timer.as_ref().and_then(nge_ecs::PassTimer::writes),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: target, depth_slice: None, resolve_target: None, ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store } })],
+                ..Default::default()
+            });
+        }
+    }
+}
+
+#[test]
+fn passes_over_the_limit_are_dropped_and_flagged() {
+    let Some(gfx) = gfx_with(wgpu::Features::TIMESTAMP_QUERY) else { return eprintln!("没有可用 GPU，跳过") };
+    if !gfx.device.features().contains(wgpu::Features::TIMESTAMP_QUERY) {
+        return eprintln!("GPU 不支持时间戳，跳过");
+    }
+    let (_, times) = gpu_times_with(&gfx, |app| {
+        app.add_renderer(ManyPasses);
+    });
+    let times = times.expect("15 秒内读回来了");
+    assert_eq!(times.passes.len(), nge_ecs::MAX_PASSES as usize);
+    assert!(times.truncated);
 }
 
 #[test]

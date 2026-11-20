@@ -127,7 +127,7 @@ impl PostChain {
                     };
                     let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                         label: Some("post"),
-                        timestamp_writes: timers.get(i).and_then(Option::as_ref).map(nge_ecs::PassTimer::writes),
+                        timestamp_writes: timers.get(i).and_then(Option::as_ref).and_then(nge_ecs::PassTimer::writes),
                         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                             view: &output,
                             depth_slice: None,

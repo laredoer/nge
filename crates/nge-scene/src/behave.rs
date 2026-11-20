@@ -61,7 +61,7 @@ pub(crate) fn tap(
     camera2d: Query<&Camera2d>,
     models: Query<(&SceneId, &Transform3d, &Model3d), With<Tappable>>,
     camera: Query<(&Camera3d, &Transform3d), With<SceneCamera>>,
-    maps: Query<(&SceneId, &crate::tilemap::TileTap)>,
+    maps: Query<(&SceneId, &nge_render2d::TileLayer), With<crate::tilemap::TileTap>>,
     mut outbox: ResMut<Outbox>,
 ) {
     for p in input.pointers_pressed() {
@@ -93,7 +93,7 @@ pub(crate) fn tap(
             continue;
         }
         // 写了 tap 的瓦片地图（点在空格上不算）和 z < 0 的精灵按 z 一起排，z 大的先；一样高时精灵先
-        let tile = maps.iter().filter_map(|(id, m)| Some((id, m.z, m.at(p.world, &cam2d)?))).max_by(|a, b| a.1.total_cmp(&b.1));
+        let tile = maps.iter().filter_map(|(id, m)| Some((id, m.z, crate::tilemap::tapped_cell(m, p.world, &cam2d)?))).max_by(|a, b| a.1.total_cmp(&b.1));
         match (tile, top_sprite(true)) {
             (Some((id, z, (cell, frame))), back) if back.is_none_or(|(_, bz)| z > bz) => {
                 outbox.send(TAP, &Tap { id: id.0.clone(), x: p.world.x, y: p.world.y, cell: Some(cell), frame: Some(frame), ..Tap::default() });

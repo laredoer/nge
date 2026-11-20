@@ -33,6 +33,8 @@ pub(crate) struct Item {
     pub pipe: u32,
     /// 遮罩：不管 z 多少都先画。
     pub mask: bool,
+    /// 瓦片地图的格子：和精灵同 z 时先画（在精灵下面），不看贴图号。
+    pub tile: bool,
     pub instance: Instance,
 }
 
@@ -44,10 +46,10 @@ pub(crate) struct Batch {
     pub range: Range<u32>,
 }
 
-/// 排序并合批，结果写进 `instances` / `batches`（复用分配）。遮罩排最前，z 相同时按纹理分组。
+/// 排序并合批，结果写进 `instances` / `batches`（复用分配）。遮罩排最前，z 相同时瓦片在前，再按纹理分组。
 /// 管线号不参与排序（它按着色器第一次用到的先后分，会变），只在换管线时断开一批，同 z 同纹理的先后还是原来的顺序。
 pub(crate) fn batch(items: &mut [Item], instances: &mut Vec<Instance>, batches: &mut Vec<Batch>) {
-    items.sort_by(|a, b| b.mask.cmp(&a.mask).then(a.instance.rotation_z[1].total_cmp(&b.instance.rotation_z[1])).then(a.texture.cmp(&b.texture)).then(a.normal.cmp(&b.normal)));
+    items.sort_by(|a, b| b.mask.cmp(&a.mask).then(a.instance.rotation_z[1].total_cmp(&b.instance.rotation_z[1])).then(b.tile.cmp(&a.tile)).then(a.texture.cmp(&b.texture)).then(a.normal.cmp(&b.normal)));
     instances.clear();
     batches.clear();
     for (i, item) in items.iter().enumerate() {
@@ -66,7 +68,7 @@ mod tests {
 
     fn item(texture: u32, z: f32, x: f32) -> Item {
         let instance = Instance { pos: [x, 0.0], rotation_z: [0.0, z], ..bytemuck::Zeroable::zeroed() };
-        Item { texture: TextureId::new(texture), normal: TextureId::WHITE, pipe: 0, mask: false, instance }
+        Item { texture: TextureId::new(texture), normal: TextureId::WHITE, pipe: 0, mask: false, tile: false, instance }
     }
 
     fn run(mut items: Vec<Item>) -> (Vec<Instance>, Vec<Batch>) {
@@ -93,6 +95,14 @@ mod tests {
         let t = TextureId::new(1);
         let b = |pipe, range| Batch { texture: t, normal: TextureId::WHITE, pipe, range };
         assert_eq!(batches, vec![b(3, 0..1), b(2, 1..2), b(1, 2..3), b(2, 3..4)], "换管线就断开");
+    }
+
+    #[test]
+    fn tiles_go_under_sprites_of_the_same_z_whatever_the_texture() {
+        let tile = |texture: u32, x: f32| Item { tile: true, ..item(texture, 0.0, x) };
+        let (instances, _) = run(vec![item(1, 0.0, 0.0), tile(5, 1.0), item(9, -1.0, 2.0), tile(2, 3.0)]);
+        let xs: Vec<f32> = instances.iter().map(|i| i.pos[0]).collect();
+        assert_eq!(xs, vec![2.0, 3.0, 1.0, 0.0], "z 小的先；同 z 瓦片先（按贴图），精灵后");
     }
 
     #[test]

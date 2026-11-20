@@ -251,8 +251,10 @@ impl Plugin for ScenePlugin {
             // 拖尾读这一帧最后的位置：物理、跟随都改完以后
             .configure_sets(
                 PostUpdate,
-                nge_particles::Particles3dSimulated.after(PhysicsStepped).after(nge_physics3d::Physics3dStepped).after(attach::attach).after(behave::follow),
+                nge_particles::Particles3dSimulated.after(PhysicsStepped).after(nge_physics3d::Physics3dStepped).after(attach::attach).after(behave::follow).after(match2d::match_2d),
             )
+            // 粒子按视野裁剪、曲线贴在屏幕上：用这一帧挪完的相机
+            .configure_sets(PostUpdate, (nge_particles::ParticlesSimulated, nge_text::PerfDrawn).after(camera::camera_rig))
             .add_systems(PostUpdate, effects::lighting.after(PhysicsStepped).after(behave::follow).after(camera::camera_rig))
             .add_systems(PostUpdate, (behave::follow, physics::collide.after(PhysicsStepped), audio::listen.after(camera::camera_rig).before(nge_audio::AudioUpdated), camera::camera_rig.after(PhysicsStepped), match2d::match_2d.after(camera::camera_rig)));
     }

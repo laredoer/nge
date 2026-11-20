@@ -778,6 +778,8 @@ export interface PerfEvent {
   /** 设备不支持时间戳、还没读回时是 null。 */
   gpuMs: number | null;
   gpuSupported: boolean;
+  /** pass 太多、后面的没量：`gpuMs` 是下限。 */
+  gpuTruncated: boolean;
   draws: number;
   instances: number;
   entities: number;

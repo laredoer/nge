@@ -251,6 +251,19 @@ mod tests {
     }
 
     #[test]
+    fn particles_are_culled_against_the_camera_after_it_moved_this_frame() {
+        let mut app = app();
+        frame(&mut app, Some(json!({ "camera": { "follow": "p" }, "sprites": [{ "id": "p" }] })));
+        let world = app.world_mut();
+        world.query_filtered::<&mut nge_render2d::Transform2d, bevy_ecs::query::With<nge_render2d::Sprite>>().iter_mut(world).for_each(|mut t| t.translation.x = 5000.0);
+        let emitter = nge_particles::ParticleEmitter { lifetime: (10.0, 10.0), speed: (0.0, 0.0), ..nge_particles::ParticleEmitter::burst(7) };
+        world.spawn((emitter, nge_render2d::Transform2d::from_xy(5000.0, 0.0)));
+        tick(&mut app, 0.016);
+        assert_eq!(camera(&mut app).position.x, 5000.0);
+        assert!(app.world().resource::<nge_render2d::SpriteInstances>().len() >= 7, "相机这一帧跟到了 5000，那里的粒子要画");
+    }
+
+    #[test]
     fn follow_uses_where_physics_draws_the_sprite() {
         let mut app = app();
         frame(&mut app, Some(json!({ "camera": { "follow": "p" }, "sprites": [{ "id": "p", "x": 30 }] })));

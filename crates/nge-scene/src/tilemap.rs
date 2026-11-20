@@ -147,31 +147,23 @@ impl TilemapNode {
     }
 }
 
-/// 点地图用：地图在哪、每格是什么帧（只给 `tap` 的地图挂）。
-#[derive(Component, Debug, Clone, PartialEq)]
-pub(crate) struct TileTap {
-    pub origin: Vec2,
-    pub tile: f32,
-    pub cols: usize,
-    pub data: Vec<i32>,
-    pub z: f32,
-    pub parallax: Option<nge_render2d::Parallax>,
-}
+/// 点地图用的标记（只给 `tap` 的地图挂）：地图在哪、每格是什么帧都从 `TileLayer` 读。
+#[derive(Component, Debug, Clone, Copy, PartialEq)]
+pub(crate) struct TileTap;
 
-impl TileTap {
-    /// 画面上的世界坐标 `p` 落在哪一格（列，行）和那一格的帧号；地图外、空格是 `None`。
-    pub fn at(&self, p: Vec2, camera: &nge_render2d::Camera2d) -> Option<([i32; 2], i32)> {
-        let origin = nge_render2d::drawn(&Transform2d::from_xy(self.origin.x, self.origin.y), None, self.parallax.as_ref(), camera).translation;
-        let local = Vec2::new(p.x - origin.x, origin.y - p.y) / self.tile;
-        let (c, r) = (local.x.floor(), local.y.floor());
-        let rows = self.data.len() / self.cols.max(1);
-        if !(c >= 0.0 && r >= 0.0 && (c as usize) < self.cols && (r as usize) < rows) {
-            return None;
-        }
-        let (c, r) = (c as usize, r as usize);
-        let frame = self.data[r * self.cols + c];
-        (frame >= 0).then_some(([c as i32, r as i32], frame))
+/// 画面上的世界坐标 `p` 落在地图的哪一格（列，行）和那一格的帧号；地图外、空格是 `None`。
+pub(crate) fn tapped_cell(layer: &nge_render2d::TileLayer, p: Vec2, camera: &nge_render2d::Camera2d) -> Option<([i32; 2], i32)> {
+    let origin = layer.origin();
+    let parallax = layer.parallax.map(nge_render2d::Parallax);
+    let origin = nge_render2d::drawn(&Transform2d::from_xy(origin.x, origin.y), None, parallax.as_ref(), camera).translation;
+    let local = Vec2::new(p.x - origin.x, origin.y - p.y) / layer.tile();
+    let (c, r) = (local.x.floor(), local.y.floor());
+    if !(c >= 0.0 && r >= 0.0) {
+        return None;
     }
+    let (c, r) = (c as usize, r as usize);
+    let frame = layer.frame(c, r)?;
+    (frame >= 0).then_some(([c as i32, r as i32], frame))
 }
 
 fn default_friction() -> f32 {
@@ -265,23 +257,23 @@ fn only_cells_changed(a: &TilemapNode, b: &TilemapNode) -> bool {
     a.data.len() == b.data.len() && shape(a) == shape(b) && rules(a) == rules(b)
 }
 
-pub(crate) type MapParts<'a> = (&'a mut nge_render2d::TileLayer, Option<&'a mut nge_ai::NavGrid>, Option<&'a mut nge_ai::GroundMap>, Option<&'a mut TileTap>, &'a mut crate::tile_chunks::TileBodies);
+pub(crate) type MapParts<'a, 'w> = (&'a mut nge_render2d::TileLayer, Option<Mut<'w, nge_ai::NavGrid>>, Option<Mut<'w, nge_ai::GroundMap>>, &'a mut crate::tile_chunks::TileBodies);
 
 pub(crate) fn sync_tilemaps(
     mut commands: Commands,
     scene: Res<Scene>,
     mut assets: SceneAssets,
     nodes: Query<(Entity, &Declared<TilemapNode>)>,
-    mut maps: Query<(&mut nge_render2d::TileLayer, Option<&mut nge_ai::NavGrid>, Option<&mut nge_ai::GroundMap>, Option<&mut TileTap>, &mut crate::tile_chunks::TileBodies)>,
+    mut maps: Query<(&mut nge_render2d::TileLayer, Option<Mut<nge_ai::NavGrid>>, Option<Mut<nge_ai::GroundMap>>, &mut crate::tile_chunks::TileBodies)>,
 ) {
     sync_list(&mut commands, &scene.tilemaps, &nodes, |commands, map, before, node| {
         // 只改了格子：按块局部改（见 docs/big-scene-perf.md）
         if let Some(before) = before.filter(|b| only_cells_changed(b, node))
-            && let Ok((mut layer, mut nav, mut ground, mut tap, mut bodies)) = maps.get_mut(map)
+            && let Ok((mut layer, nav, ground, mut bodies)) = maps.get_mut(map)
         {
             let cols = node.cols as usize;
             let edits = before.data.iter().zip(&node.data).enumerate().filter(|(_, (a, b))| a != b).map(|(i, (_, &f))| (i % cols, i / cols, f));
-            let parts: MapParts = (&mut layer, nav.as_deref_mut(), ground.as_deref_mut(), tap.as_deref_mut(), &mut bodies);
+            let parts: MapParts = (&mut layer, nav, ground, &mut bodies);
             crate::tile_chunks::edit_map(commands, map, node, parts, edits);
             return;
         }
@@ -340,7 +332,7 @@ fn build_map(commands: &mut Commands, assets: &mut SceneAssets, map: Entity, nod
         entity.insert(ground);
     }
     if node.tap {
-        entity.insert(TileTap { origin, tile, cols, data: data.to_vec(), z: node.z, parallax });
+        entity.insert(TileTap);
     }
     let bodies = crate::tile_chunks::TileBodies::build(commands, map, node, data, chunk);
     commands.entity(map).insert(bodies);

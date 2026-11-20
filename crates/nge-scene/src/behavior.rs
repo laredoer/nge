@@ -377,8 +377,9 @@ pub(crate) fn run(
     }
     let dt = time.delta;
     let changed: Vec<Entity> = maps.iter().filter(|(_, m)| m.is_changed()).map(|(e, _)| e).collect();
-    // 地图改了先用旧图，后台 / 节流重建（见 docs/big-scene-perf.md）
-    graphs.begin(|e| maps.contains(e), &changed);
+    let rebuilt: Vec<Entity> = maps.iter().filter(|(_, m)| m.is_added()).map(|(e, _)| e).collect();
+    // 只改了格子先用旧图，后台 / 节流重建；整张重建的当场建（见 docs/big-scene-perf.md）
+    graphs.begin(|e| maps.contains(e), &changed, &rebuilt);
     let now = time.elapsed;
     let targets: HashMap<&str, Vec2> = ids.iter().map(|(id, t)| (id.0.as_str(), t.translation)).collect();
     let gravity = physics.gravity().y.abs();
@@ -408,7 +409,8 @@ pub(crate) fn run(
         // 脚下有站的地方的那张图；都没有就用第一张盖住角色的
         let mut graph_of = |e: Entity, m: &GroundMap| {
             let walker = walker(&agent, m.tile, gravity, max_slope);
-            let key = (e, [walker.reach.height, walker.reach.distance, walker.half, walker.height, walker.max_slope, m.tile].map(f32::to_bits));
+            let size = [m.origin.x.to_bits(), m.origin.y.to_bits(), m.terrain.cols() as u32, m.terrain.rows() as u32];
+            let key = (e, [walker.reach.height, walker.reach.distance, walker.half, walker.height, walker.max_slope, m.tile].map(f32::to_bits), size);
             graphs.get(key, &m.terrain, walker, now)
         };
         let covering: Vec<(&GroundMap, Arc<GroundGraph>)> =

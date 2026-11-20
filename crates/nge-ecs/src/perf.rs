@@ -36,6 +36,8 @@ pub struct PerfReport {
     pub gpu_ms: Option<f32>,
     /// 设备支持时间戳（不支持时面板写「不支持」）。
     pub gpu_supported: bool,
+    /// 窗口里有读回的帧 pass 超过上限、没量全：GPU 时间是下限（面板写「≥」）。
+    pub gpu_truncated: bool,
     pub cull: CullStats,
 }
 
@@ -101,6 +103,7 @@ pub struct Perf {
     gpu_sum: f32,
     gpu_frames: u32,
     gpu_supported: bool,
+    gpu_truncated: bool,
     cull: CullStats,
 }
 
@@ -115,12 +118,13 @@ impl Perf {
         self.particles = alive;
     }
 
-    /// 记下这一帧的 GPU 时间（`None` 是没读回）和设备支不支持时间戳。
-    pub fn gpu(&mut self, ms: Option<f32>, supported: bool) {
+    /// 记下这一帧的 GPU 时间（`None` 是没读回；`true` 是没量全）和设备支不支持时间戳。
+    pub fn gpu(&mut self, ms: Option<(f32, bool)>, supported: bool) {
         self.gpu_supported = supported;
-        if let Some(ms) = ms.filter(|ms| ms.is_finite() && *ms >= 0.0) {
+        if let Some((ms, truncated)) = ms.filter(|(ms, _)| ms.is_finite() && *ms >= 0.0) {
             self.gpu_sum += ms;
             self.gpu_frames += 1;
+            self.gpu_truncated |= truncated;
         }
     }
 
@@ -157,6 +161,7 @@ impl Perf {
             particles: self.particles,
             gpu_ms: (self.gpu_frames > 0).then(|| self.gpu_sum / self.gpu_frames as f32),
             gpu_supported: self.gpu_supported,
+            gpu_truncated: self.gpu_truncated,
             cull: self.cull,
         });
         *self = Self { report: self.report, gpu_supported: self.gpu_supported, ..Self::default() };
@@ -220,24 +225,24 @@ mod tests {
         let mut perf = Perf::default();
         perf.gpu(None, true);
         perf.record(frame(0.2), 0, 0, || 0);
-        perf.gpu(Some(2.0), true);
+        perf.gpu(Some((2.0, false)), true);
         perf.record(frame(0.2), 0, 0, || 0);
-        perf.gpu(Some(4.0), true);
+        perf.gpu(Some((4.0, true)), true);
         perf.cull(CullStats { chunks: [3, 90], ..Default::default() });
         perf.record(frame(0.2), 0, 0, || 0);
         let r = *perf.report().unwrap();
-        assert_eq!((r.gpu_ms, r.gpu_supported, r.cull.chunks), (Some(3.0), true, [3, 90]));
+        assert_eq!((r.gpu_ms, r.gpu_supported, r.gpu_truncated, r.cull.chunks), (Some(3.0), true, true, [3, 90]), "有一帧没量全就记下限");
         for _ in 0..3 {
             perf.record(frame(0.2), 0, 0, || 0);
         }
         let r = *perf.report().unwrap();
-        assert_eq!((r.gpu_ms, r.gpu_supported), (None, true), "这个窗口没读回");
+        assert_eq!((r.gpu_ms, r.gpu_supported, r.gpu_truncated), (None, true, false), "这个窗口没读回");
     }
 
     #[test]
     fn unsupported_gpu_time_reports_none() {
         let mut perf = Perf::default();
-        perf.gpu(Some(f32::NAN), false);
+        perf.gpu(Some((f32::NAN, false)), false);
         perf.record(frame(0.6), 0, 0, || 0);
         let r = *perf.report().unwrap();
         assert_eq!((r.gpu_ms, r.gpu_supported), (None, false));

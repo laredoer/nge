@@ -222,6 +222,7 @@ impl Renderer for SpriteRenderer {
                     normal: normal.unwrap_or(TextureId::WHITE),
                     pipe: pipe(module, mode, depth),
                     mask: mode == Mode::Write,
+                    tile: false,
                     instance: Instance {
                         pos: pos.into(),
                         size: size.into(),
@@ -236,7 +237,7 @@ impl Renderer for SpriteRenderer {
         }
         for &(texture, ref range) in &tile_draws {
             for &instance in &self.tiles[range.clone()] {
-                self.items.push(Item { texture, normal: TextureId::WHITE, pipe: pipe(0, Mode::Normal, depth), mask: false, instance });
+                self.items.push(Item { texture, normal: TextureId::WHITE, pipe: pipe(0, Mode::Normal, depth), mask: false, tile: true, instance });
             }
         }
         // 同一张图的额外实例通常是连着放的（一个发射器一批），只在图变了时重新查区域
@@ -253,6 +254,7 @@ impl Renderer for SpriteRenderer {
                 normal: TextureId::WHITE,
                 pipe: pipe(0, Mode::Normal, depth),
                 mask: false,
+                tile: false,
                 instance: Instance {
                     pos: sprite.position.into(),
                     size: sprite.size.into(),
@@ -343,7 +345,7 @@ impl Renderer for SpriteRenderer {
         let timer = nge_ecs::pass_timer(world, "精灵");
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("sprites"),
-            timestamp_writes: timer.as_ref().map(nge_ecs::PassTimer::writes),
+            timestamp_writes: timer.as_ref().and_then(nge_ecs::PassTimer::writes),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: &draw_to,
                 depth_slice: None,

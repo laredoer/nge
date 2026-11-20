@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 
 use crate::testing::{app, frame};
 use crate::tile_chunks::{TileBodies, band_colliders};
-use crate::tilemap::{TileSolid, TileTap, TilemapNode};
+use crate::tilemap::{TileSolid, TilemapNode};
 
 /// 20 列 12 行、每格 10、一条 4 行：底下两行实心（帧 0），中间一行单向平台（帧 1），一块斜坡（帧 2）。
 fn data() -> Vec<i32> {
@@ -54,14 +54,15 @@ fn set_tiles_rebuilds_only_the_band_it_touches() {
     frame(&mut app, None);
     assert_eq!(rebuilt(&mut app).1, 2, "两条各重建一次");
     let after = solid_entities(&mut app);
-    let kept = before.iter().filter(|e| after.contains(e)).count();
-    assert_eq!(kept, 1, "第 1 条（只有单向平台那一块）的碰撞体没动");
+    let gone: Vec<&Entity> = before.iter().filter(|e| !after.contains(e)).collect();
+    // 底下两行原来是一整块，挖了一格变成两块；第 1 条、斜坡没动
+    assert_eq!(gone.len(), 1, "只有变了的那块换了实体 {gone:?}");
+    assert_eq!(after.len(), before.len() + 3, "底下两行从一块拆成三块，第 0 条多一块");
     let world = app.world_mut();
-    let (layer, nav, ground, tap) = world.query::<(&TileLayer, &NavGrid, &GroundMap, &TileTap)>().single(world).unwrap();
+    let (layer, nav, ground) = world.query::<(&TileLayer, &NavGrid, &GroundMap)>().single(world).unwrap();
     assert_eq!((layer.frame(4, 11), layer.frame(7, 1)), (Some(-1), Some(0)));
     assert!(nav.grid.open((4, 11)) && !nav.grid.open((7, 1)), "导航网格跟着改");
     assert_eq!((ground.terrain.at((4, 11)), ground.terrain.at((7, 1))), (Ground::Empty, Ground::Solid));
-    assert_eq!((tap.data[11 * 20 + 4], tap.data[20 + 7]), (-1, 0), "点地图的数据跟着改");
 }
 
 #[test]
@@ -173,4 +174,268 @@ fn rule_changes_still_rebuild_the_whole_map_and_drop_set_tiles_edits() {
     let world = app.world_mut();
     let layer = world.query::<&TileLayer>().single(world).unwrap();
     assert_eq!(layer.frame(0, 0), Some(-1), "整张重建回到声明的样子");
+}
+
+/// 45° 上坡（帧 2）从 (0, 7) 斜着爬到 (5, 2)，坡下实心（帧 0），右边是一块平台。
+fn slope_map() -> (usize, usize, Vec<i32>) {
+    let (cols, rows) = (12, 8);
+    let mut d = vec![-1; cols * rows];
+    for i in 0..6 {
+        let r = 7 - i;
+        d[r * cols + i] = 2;
+        for rr in r + 1..rows {
+            d[rr * cols + i] = 0;
+        }
+    }
+    for c in 6..cols {
+        for r in 2..rows {
+            d[r * cols + c] = 0;
+        }
+    }
+    (cols, rows, d)
+}
+
+fn slope_node(cols: usize, d: &[i32], chunk: u32) -> Value {
+    json!({ "id": "m", "texture": "grid", "tile": 10, "cols": cols, "chunk": chunk, "data": d, "solid": [0], "slopes": [{ "frame": 2, "left": 0, "right": 1 }] })
+}
+
+#[test]
+fn slopes_across_seams_build_the_same_colliders_as_one_band() {
+    let (cols, _, d) = slope_map();
+    let built = |chunk: u32| {
+        let mut app = app();
+        frame(&mut app, Some(json!({ "tilemaps": [slope_node(cols, &d, chunk)] })));
+        colliders(&mut app)
+    };
+    let one = built(64);
+    assert_eq!(built(4), one, "坡跨过第 4 行的接缝：两条合成一组，坡不被切开");
+    assert_eq!(one.iter().filter(|c| c.contains("Slope")).count(), 1);
+}
+
+#[test]
+fn edits_that_join_or_split_a_slope_across_a_seam_match_a_fresh_map() {
+    let (cols, _, d) = slope_map();
+    // 先把跨接缝的那一格（第 3 列第 4 行）挖掉：坡断成两段，两条分开
+    let mut cut = d.clone();
+    cut[4 * cols + 3] = -1;
+    let fresh = |data: &[i32]| {
+        let mut app = app();
+        frame(&mut app, Some(json!({ "tilemaps": [slope_node(cols, data, 4)] })));
+        colliders(&mut app)
+    };
+    let mut app = app();
+    frame(&mut app, Some(json!({ "tilemaps": [slope_node(cols, &d, 4)] })));
+    let groups = |app: &mut nge_ecs::App| {
+        let world = app.world_mut();
+        world.query::<&TileBodies>().single(world).unwrap().groups()
+    };
+    assert_eq!(groups(&mut app), 1);
+    app.command("setTiles", &json!({ "id": "m", "tiles": [[3, 4, -1]] }));
+    frame(&mut app, None);
+    assert_eq!(groups(&mut app), 2, "坡断开，两条分开");
+    assert_eq!(colliders(&mut app), fresh(&cut));
+    app.command("setTiles", &json!({ "id": "m", "tiles": [[3, 4, 2]] }));
+    frame(&mut app, None);
+    assert_eq!(groups(&mut app), 1, "接上以后又合成一组");
+    assert_eq!(colliders(&mut app), fresh(&d));
+    // 接缝上面那一格（第 4 列第 3 行，上一条的最后一行）挖掉、再填回
+    let mut above = d.clone();
+    above[3 * cols + 4] = -1;
+    app.command("setTiles", &json!({ "id": "m", "tiles": [[4, 3, -1]] }));
+    frame(&mut app, None);
+    assert_eq!(groups(&mut app), 2, "从上面断开也分开");
+    assert_eq!(colliders(&mut app), fresh(&above));
+    app.command("setTiles", &json!({ "id": "m", "tiles": [[4, 3, 2]] }));
+    frame(&mut app, None);
+    assert_eq!(groups(&mut app), 1);
+    assert_eq!(colliders(&mut app), fresh(&d));
+}
+
+#[test]
+fn a_box_slides_down_a_slope_the_same_whatever_the_chunk() {
+    let (cols, rows) = (40usize, 26usize);
+    let mut d = vec![-1; cols * rows];
+    // 下坡（左 1 右 0）从 (0, 2) 到 (21, 23)，坡下实心；底下两行是地面
+    for i in 0..22 {
+        let r = 2 + i;
+        d[r * cols + i] = 2;
+        for rr in r + 1..rows {
+            d[rr * cols + i] = 0;
+        }
+    }
+    for c in 22..cols {
+        for r in 24..rows {
+            d[r * cols + c] = 0;
+        }
+    }
+    let run = |chunk: u32| {
+        let mut app = app();
+        let map = json!({ "id": "m", "texture": "grid", "tile": 10, "cols": cols, "chunk": chunk, "data": d, "solid": [0], "friction": 0,
+            "slopes": [{ "frame": 2, "left": 1, "right": 0 }] });
+        let ball = json!({ "id": "b", "w": 6, "h": 6, "x": 5, "y": -16, "body": { "friction": 0 } });
+        frame(&mut app, Some(json!({ "tilemaps": [map], "sprites": [ball] })));
+        (0..60)
+            .map(|_| {
+                frame(&mut app, None);
+                let world = app.world_mut();
+                world.query::<(&crate::SceneId, &Transform2d)>().iter(world).find(|(id, _)| id.0 == "b").unwrap().1.translation
+            })
+            .collect::<Vec<_>>()
+    };
+    let (a, b) = (run(4), run(64));
+    for (i, (p, q)) in a.iter().zip(&b).enumerate() {
+        assert!((*p - *q).length() < 1e-3, "第 {i} 帧：chunk 4 {p}，chunk 64 {q}");
+    }
+    // 一直贴着坡面滑：离坡面（y = -x - 20）的距离不超过半个对角线加一点
+    let off = |t: &glam::Vec2| (t.y + t.x + 20.0) / std::f32::consts::SQRT_2;
+    assert!(a.iter().take_while(|t| t.x < 210.0).all(|t| off(t) < 4.5), "没在接缝上弹起来");
+}
+
+/// 第 4 … 8 行这一条（不从第 0 行开始）的碰撞体位置：斜坡、实心、单向平台都按条的起点往下挪。
+#[test]
+fn a_band_below_the_first_puts_its_colliders_at_their_rows() {
+    let mut d = vec![-1; 6 * 8];
+    d[5 * 6 + 1] = 2;
+    d[6 * 6 + 1] = 0;
+    d[7 * 6 + 1] = 0;
+    d[6 * 6 + 4] = 0;
+    d[5 * 6 + 3] = 1;
+    d[5 * 6 + 4] = 1;
+    let node: TilemapNode = serde_json::from_value(json!({ "id": "m", "texture": "grid", "tile": 10, "cols": 6, "x": 100, "y": 50, "data": d, "solid": [0], "oneWay": [1],
+        "slopes": [{ "frame": 2, "left": 0, "right": 1 }] }))
+    .unwrap();
+    let mut got: Vec<String> = band_colliders(&node, &node.data, 4..8).iter().map(|(at, c)| format!("{at} {:?} {}", c.shape, c.one_way)).collect();
+    got.sort();
+    let mut want = vec![
+        format!("{} {:?} false", glam::Vec2::new(115.0, -5.0), nge_physics2d::Shape::Slope { size: glam::Vec2::new(10.0, 10.0), left: 0.0, right: 1.0 }),
+        format!("{} {:?} false", glam::Vec2::new(115.0, -20.0), nge_physics2d::Shape::Rect(glam::Vec2::new(10.0, 20.0))),
+        format!("{} {:?} false", glam::Vec2::new(145.0, -15.0), nge_physics2d::Shape::Rect(glam::Vec2::new(10.0, 10.0))),
+        format!("{} {:?} true", glam::Vec2::new(140.0, -5.0), nge_physics2d::Shape::Rect(glam::Vec2::new(20.0, 10.0))),
+    ];
+    want.sort();
+    assert_eq!(got, want);
+}
+
+/// 静止压在地面上的球：同一条远处改一格，地面那块碰撞体不换实体，不多发 collide。
+#[test]
+fn far_edits_in_the_same_band_send_no_collide() {
+    let (cols, rows) = (40usize, 8usize);
+    let mut d = vec![-1; cols * rows];
+    d[6 * cols..].fill(0);
+    let mut app = app();
+    let map = json!({ "id": "floor", "texture": "grid", "tile": 10, "cols": cols, "chunk": 4, "data": d, "solid": [0], "collide": true });
+    let ball = json!({ "id": "ball", "w": 10, "x": 25, "y": -40, "body": { "shape": "circle", "collide": true } });
+    frame(&mut app, Some(json!({ "tilemaps": [map], "sprites": [ball] })));
+    for _ in 0..60 {
+        frame(&mut app, None);
+    }
+    app.command("setTiles", &json!({ "id": "floor", "tiles": [[35, 4, 0]] }));
+    let mut events: Vec<(String, Value)> = Vec::new();
+    for _ in 0..5 {
+        events.extend(frame(&mut app, None));
+    }
+    let collides: Vec<&Value> = events.iter().filter(|(n, _)| n == "collide").map(|(_, d)| d).collect();
+    assert!(collides.is_empty(), "{collides:?}");
+}
+
+/// 站在两层叠着的单向板上往下穿，同一帧在同一条远处改一格：两层还是一起穿过去，落到地上。
+#[test]
+fn dropping_through_stacked_planks_survives_a_far_edit() {
+    let (cols, rows) = (20usize, 8usize);
+    let mut d = vec![-1; cols * rows];
+    d[2 * cols..3 * cols].fill(1);
+    d[3 * cols..4 * cols].fill(1);
+    d[7 * cols..].fill(0);
+    let mut app = app();
+    let map = json!({ "id": "m", "texture": "grid", "tile": 10, "cols": cols, "x": -100, "y": 60, "chunk": 4, "data": d, "solid": [0], "oneWay": [1] });
+    let hero = json!({ "id": "hero", "x": 0, "y": 50, "w": 10, "h": 10, "body": { "kind": "character" } });
+    frame(&mut app, Some(json!({ "physics": { "gravity": [0, -1000] }, "tilemaps": [map], "sprites": [hero] })));
+    for _ in 0..10 {
+        frame(&mut app, None);
+    }
+    let y = |app: &mut nge_ecs::App| {
+        let world = app.world_mut();
+        world.query::<(&crate::SceneId, &Transform2d)>().iter(world).find(|(id, _)| id.0 == "hero").unwrap().1.translation.y
+    };
+    assert!((y(&mut app) - 45.0).abs() < 1.0, "站在上面那层板上 {}", y(&mut app));
+    app.command("dropThrough", &json!({ "id": "hero" }));
+    app.command("setTiles", &json!({ "id": "m", "tiles": [[19, 0, 0]] }));
+    for _ in 0..30 {
+        frame(&mut app, None);
+    }
+    assert!((y(&mut app) + 5.0).abs() < 1.0, "两层一起穿下去，落到地上 {}", y(&mut app));
+}
+
+fn change_ticks<C: Component>(app: &mut nge_ecs::App) -> u32 {
+    let world = app.world_mut();
+    let e = world.query_filtered::<Entity, With<C>>().single(world).unwrap();
+    world.entity(e).get_change_ticks::<C>().unwrap().changed.get()
+}
+
+/// 只改了装饰帧、全部越界的 setTiles：地形、导航网格没变，不标改过（寻路图不重建）。
+#[test]
+fn edits_that_leave_the_terrain_alone_do_not_touch_nav_or_ground() {
+    let mut d = vec![-1; 10 * 4];
+    d[30..].fill(0);
+    let node = |d: &[i32]| json!({ "tilemaps": [{ "id": "m", "texture": "grid", "tile": 10, "cols": 10, "data": d, "solid": [0] }] });
+    let mut app = app();
+    frame(&mut app, Some(node(&d)));
+    frame(&mut app, None);
+    let before = (change_ticks::<GroundMap>(&mut app), change_ticks::<NavGrid>(&mut app));
+    d[5] = 5;
+    frame(&mut app, Some(node(&d)));
+    app.command("setTiles", &json!({ "id": "m", "tiles": [[99, 99, 0], [6, 0, 7]] }));
+    frame(&mut app, None);
+    assert_eq!((change_ticks::<GroundMap>(&mut app), change_ticks::<NavGrid>(&mut app)), before);
+    // 真改了地形才标
+    app.command("setTiles", &json!({ "id": "m", "tiles": [[0, 0, 0]] }));
+    frame(&mut app, None);
+    assert!(change_ticks::<GroundMap>(&mut app) > before.0 && change_ticks::<NavGrid>(&mut app) > before.1);
+}
+
+/// 除了 `data` 以外任何一个字段变了都整张重建（`setTiles` 改的格子回到声明的样子）。
+#[test]
+fn every_field_but_data_rebuilds_the_whole_map() {
+    let changes = [
+        ("texture", json!("other")),
+        ("grid", json!([2, 2])),
+        ("tile", json!(12)),
+        ("x", json!(-99)),
+        ("y", json!(61)),
+        ("z", json!(1)),
+        ("parallax", json!(1)),
+        ("tap", json!(false)),
+        ("chunk", json!(8)),
+        ("solid", json!([0, 5])),
+        ("friction", json!(0.9)),
+        ("restitution", json!(0.5)),
+        ("collide", json!(true)),
+        ("oneWay", json!([1, 5])),
+        ("slopes", json!([{ "frame": 2, "left": 0, "right": 0.5 }])),
+        ("animated", json!([{ "frame": 6, "frames": [6, 7], "fps": 2 }])),
+        ("materials", json!([{ "frame": 0, "friction": 0.1 }])),
+    ];
+    for (field, value) in changes {
+        let mut app = app();
+        frame(&mut app, Some(json!({ "tilemaps": [node(&data())] })));
+        app.command("setTiles", &json!({ "id": "m", "tiles": [[0, 0, 0]] }));
+        frame(&mut app, None);
+        let mut m = node(&data());
+        m[field] = value;
+        frame(&mut app, Some(json!({ "tilemaps": [m] })));
+        let world = app.world_mut();
+        let layer = world.query::<&TileLayer>().single(world).unwrap();
+        assert_eq!(layer.frame(0, 0), Some(-1), "改了 {field} 整张重建");
+    }
+}
+
+#[test]
+fn set_tiles_on_an_invalid_map_changes_nothing() {
+    let mut app = app();
+    frame(&mut app, Some(json!({ "tilemaps": [{ "id": "bad", "texture": "grid", "tile": 0, "cols": 4, "data": vec![-1; 8] }] })));
+    app.command("setTiles", &json!({ "id": "bad", "tiles": [[0, 0, 0]] }));
+    frame(&mut app, None);
+    assert_eq!(app.world_mut().query::<&TileLayer>().iter(app.world()).count(), 0);
+    let message = "setTiles：瓦片地图 \"bad\" 本身无效（cols 是 0 或 tile 不是正数），没建出来，改不了".to_string();
+    assert!(!crate::lenient::warn_once(message), "提示说清是地图本身无效，不是没有这个 id");
 }

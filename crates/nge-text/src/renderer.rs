@@ -163,7 +163,7 @@ impl Renderer for TextRenderer {
         let load = frame.color_load(clear);
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("text"),
-            timestamp_writes: timer.as_ref().map(nge_ecs::PassTimer::writes),
+            timestamp_writes: timer.as_ref().and_then(nge_ecs::PassTimer::writes),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: target,
                 depth_slice: None,

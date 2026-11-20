@@ -517,6 +517,19 @@ mod tests {
     }
 
     #[test]
+    fn a_tile_one_cell_past_the_edge_is_drawn_two_cells_past_is_not() {
+        // 视野 x 135 … 195：第 20 列（200 … 210）离右边一格以内，在下一块里；第 21 列远了
+        let mut frames = vec![-1; 100 * 100];
+        frames[15 * 100 + 20] = 0;
+        frames[15 * 100 + 21] = 0;
+        let mut l = layer(frames, Vec::new());
+        let mut out = Vec::new();
+        let (_, stats) = l.draw(&sized(165.0, -150.0, 60.0), None, 0.0, &region, &mut out);
+        assert_eq!(stats.tiles, 1);
+        assert_eq!(out[0].pos, [205.0, -155.0]);
+    }
+
+    #[test]
     fn drawn_tiles_carry_the_parallax_offset() {
         let mut l = full();
         let mut out = Vec::new();

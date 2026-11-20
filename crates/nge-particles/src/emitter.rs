@@ -238,6 +238,16 @@ mod tests {
     }
 
     #[test]
+    fn particles_just_past_the_edge_still_show_their_size() {
+        let mut app = app();
+        // 视野到 x = 50；中心在 53、边长 8 的粒子左边到 49，还压在视野里
+        app.world_mut().spawn((ParticleEmitter { lifetime: (10.0, 10.0), speed: (0.0, 0.0), size: (8.0, 8.0), ..ParticleEmitter::burst(5) }, Transform2d::from_xy(53.0, 0.0)));
+        app.world_mut().spawn((ParticleEmitter { lifetime: (10.0, 10.0), speed: (0.0, 0.0), size: (8.0, 8.0), ..ParticleEmitter::burst(7) }, Transform2d::from_xy(55.0, 0.0)));
+        app.tick(VIEWPORT, 0.016);
+        assert_eq!(app.world().resource::<SpriteInstances>().len(), 5);
+    }
+
+    #[test]
     fn rate_accumulates_fractions() {
         let mut app = app();
         app.world_mut().spawn(ParticleEmitter { lifetime: (10.0, 10.0), ..ParticleEmitter::continuous(30.0) });
