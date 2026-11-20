@@ -5,10 +5,10 @@ use glam::{EulerRot, Quat, Vec2, Vec3, Vec4};
 use nge_particles::ParticleEmitter;
 use nge_render2d::Transform2d;
 use nge_ecs::Interleave;
-use nge_render3d::{AmbientLight, Animator, BoneSocket, Camera3d, DirectionalLight, GltfModel, MaterialShader3d, MaterialStyleOverride, Model3d, PointLight, Pose, ShadowPriority, Shadows, SpotLight, Transform3d};
+use nge_render3d::{AmbientLight, Animator, BoneLookAt, BoneSocket, Camera3d, DirectionalLight, GltfModel, MaterialShader3d, MaterialStyleOverride, Model3d, PointLight, Pose, ShadowPriority, Shadows, SpotLight, Transform3d};
 use nge_text::{ScreenText, Text2d};
 
-use crate::attach::{Attach, SceneSocket};
+use crate::attach::{Attach, SceneLookAt, SceneSocket};
 use crate::behave::{Follow, Spin, Tappable};
 use crate::match2d::Match2d;
 use crate::nodes::{AmbientNode, Camera3dNode, EmitterNode, LightKind, LightNode, ModelNode, Particles, TextNode};
@@ -180,6 +180,21 @@ pub(crate) fn sync_models(
                     log::warn!("模型 {:?} 写了 params 没写 shader：params 不起作用", node.id);
                 }
                 entity.remove::<MaterialShader3d>();
+            }
+        }
+        match &node.look_at {
+            Some(look) => {
+                entity.insert(SceneLookAt {
+                    bone: look.bone.clone(),
+                    target: look.target.clone(),
+                    point: look.point.map(Vec3::from),
+                    weight: look.weight,
+                    max_angle: look.max_angle.to_radians(),
+                    speed: look.speed,
+                });
+            }
+            None => {
+                entity.remove::<(SceneLookAt, BoneLookAt)>();
             }
         }
         crate::nav3d::apply_nav(&mut entity, before, node);

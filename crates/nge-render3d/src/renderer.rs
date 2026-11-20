@@ -60,8 +60,10 @@ impl Plugin for Render3dPlugin {
             // 状态机（见 docs/anim-graph.md）
             .add_message::<nge_anim::AnimEvent>()
             .add_systems(PostUpdate, crate::graph_pose::animate_graphs.in_set(nge_anim::Animated))
-            // 骨骼挂点（在所有骨骼动画与状态机更新完 Pose 之后同步世界变换）
-            .add_systems(PostUpdate, crate::socket::update_bone_sockets.in_set(crate::socket::SocketsUpdated).after(animate).after(crate::graph_pose::animate_graphs))
+            // 程序化骨骼注视（在骨骼动画之后、骨骼挂点之前叠加到 Pose 上）
+            .add_systems(PostUpdate, crate::lookat::apply_bone_look_at.in_set(crate::lookat::LookAtApplied).after(animate).after(crate::graph_pose::animate_graphs))
+            // 骨骼挂点（在所有骨骼动画与程序化注视更新完 Pose 之后同步世界变换）
+            .add_systems(PostUpdate, crate::socket::update_bone_sockets.in_set(crate::socket::SocketsUpdated).after(animate).after(crate::graph_pose::animate_graphs).after(crate::lookat::LookAtApplied))
             .init_resource::<crate::billboards::Billboards>()
             .add_systems(PreUpdate, crate::billboards::clear_billboards)
             // 调试画线（见 docs/gameplay3d.md）

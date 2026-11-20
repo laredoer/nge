@@ -273,8 +273,10 @@ export interface BarNode {
   id: string;
   /** 0 到 1，超出截断；不写或 NaN 当 0。 */
   value?: number;
-  /** 跟着这个精灵（id）画的位置走，x / y 变成相对它的偏移；找不到就藏起来。 */
+  /** 跟着这个精灵或 3D 模型（id）画的位置走，x / y 变成相对它的偏移；找不到或在 3D 相机背后就藏起来。 */
   follow?: string;
+  /** 跟随 3D 模型时在 3D 世界里往上抬的高度。 */
+  lift?: number;
   x?: number;
   y?: number;
   /** 默认 32 × 4。 */
@@ -294,8 +296,10 @@ export interface BarNode {
 export interface BubbleNode {
   id: string;
   text: string;
-  /** 跟着这个精灵走，x / y 是相对它的偏移；位置是气泡的底边中点。 */
+  /** 跟着这个精灵或 3D 模型走，x / y 是相对它的偏移；位置是气泡的底边中点。 */
   follow?: string;
+  /** 跟随 3D 模型时在 3D 世界里往上抬的高度。 */
+  lift?: number;
   x?: number;
   y?: number;
   /** 固定在屏幕上（对话框）：x / y 是屏幕坐标（左上角原点，y 朝下），位置是气泡的顶边中点。 */
@@ -387,6 +391,24 @@ export interface ModelNode {
   params?: [number, number, number, number];
   /** 3D 导航网格寻路代理：跟随目标 3D 模型、沿路点循环巡逻或前往指定 3D 坐标。 */
   nav?: NavAgent3dNode;
+  /** 程序化骨骼注视：让指定骨骼在动画基础上平滑转向目标 3D 模型或世界坐标。 */
+  lookAt?: LookAtNode;
+}
+
+/** `ModelNode.lookAt`：3D 程序化骨骼注视配置。 */
+export interface LookAtNode {
+  /** glTF 骨骼/节点名（如 "head"、"body"、"armR"）。 */
+  bone: string;
+  /** 注视的目标 3D 模型 id（与 point 二选一）。 */
+  target?: string;
+  /** 注视的固定 3D 世界坐标 `[x, y, z]`。 */
+  point?: [number, number, number];
+  /** 混合权重 0–1，默认 1。 */
+  weight?: number;
+  /** 最大偏转角（度），默认 60。 */
+  maxAngle?: number;
+  /** 转向平滑速度（弧度 / 秒），默认 8。 */
+  speed?: number;
 }
 
 /** `scene.navmesh3d`：从指定 3D 地面模型与静态碰撞体自动构建 3D 导航网格。 */

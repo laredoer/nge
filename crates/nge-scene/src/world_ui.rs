@@ -7,9 +7,12 @@ use nge_ecs::{Outbox, Screen, Time};
 use std::sync::LazyLock;
 
 use nge_render2d::{Camera2d, DrawAt, Parallax, Sprite, Transform2d, Unlit, drawn};
+use nge_render3d::{Camera3d, Transform3d};
 use nge_text::{Anchor, ScreenText, Text2d, TextBox};
 use serde::{Deserialize, Serialize};
 
+use crate::SceneCamera;
+use crate::nodes::ModelNode;
 use crate::protocol::{Color, Scene, SpriteNode};
 use crate::resolve::SceneAssets;
 use crate::sync::{Declared, Node, SceneId, sync_list};
@@ -30,8 +33,11 @@ pub struct BarNode {
     /// 0 到 1。不写或 `null` 当 0：JS 里算出 NaN 时 JSON 里是 `null`，不能让整个场景解析失败。
     #[serde(default)]
     pub value: Option<f32>,
-    /// 跟着哪个精灵；x / y 变成相对它的偏移。
+    /// 跟着哪个精灵或 3D 模型；x / y 变成相对它的偏移。
     pub follow: Option<String>,
+    /// 跟随 3D 模型时在世界空间往上抬的高度。
+    #[serde(default)]
+    pub lift: f32,
     #[serde(default)]
     pub x: f32,
     #[serde(default)]
@@ -56,6 +62,9 @@ pub struct BubbleNode {
     pub id: String,
     pub text: String,
     pub follow: Option<String>,
+    /// 跟随 3D 模型时在世界空间往上抬的高度。
+    #[serde(default)]
+    pub lift: f32,
     #[serde(default)]
     pub x: f32,
     #[serde(default)]
@@ -265,35 +274,55 @@ pub(crate) fn type_text(time: Res<Time>, mut texts: Query<(&SceneId, &mut Typing
 
 type Followed<'w, 's> =
     Query<'w, 's, (&'static SceneId, &'static Transform2d, Option<&'static DrawAt>, Option<&'static Parallax>), (With<Declared<SpriteNode>>, Without<UiPart>)>;
+type Followed3d<'w, 's> = Query<'w, 's, (&'static SceneId, &'static Transform3d), With<Declared<ModelNode>>>;
 
-/// 精灵画在哪（含插值和视差）。
-fn sprite_at(sprites: &Followed, camera: &Camera2d, id: &str) -> Option<Vec2> {
-    sprites.iter().find(|(s, ..)| s.0 == id).map(|(_, t, d, p)| drawn(t, d, p, camera).translation)
+/// 先查 2D 精灵（含插值和视差），找不到再把 3D 模型（加 `lift` 抬高）投影到屏幕并换算到 2D 世界坐标。
+fn follow_at(sprites: &Followed, models: &Followed3d, camera2d: &Camera2d, camera3d: Option<(&Camera3d, &Transform3d)>, screen: Vec2, id: &str, lift: f32) -> Option<Vec2> {
+    if let Some(p) = sprites.iter().find(|(s, ..)| s.0 == id).map(|(_, t, d, p)| drawn(t, d, p, camera2d).translation) {
+        return Some(p);
+    }
+    if screen.y <= 0.0 {
+        return None;
+    }
+    let (cam3d, cam3d_t) = camera3d?;
+    let (_, model_t) = models.iter().find(|(s, _)| s.0 == id)?;
+    let vp = cam3d.view_proj(cam3d_t, screen.x / screen.y);
+    let clip = vp * (model_t.translation + glam::Vec3::Y * lift).extend(1.0);
+    if clip.w <= 0.0 {
+        return None;
+    }
+    let ndc = clip.truncate() / clip.w;
+    let screen_pt = Vec2::new((ndc.x + 1.0) * 0.5 * screen.x, (1.0 - ndc.y) * 0.5 * screen.y);
+    Some(camera2d.screen_to_world(screen, screen_pt))
 }
 
-/// 条的位置跟着精灵，值往目标过渡，填充靠左。
+/// 条的位置跟着精灵或 3D 模型，值往目标过渡，填充靠左。
 pub(crate) fn place_bars(
     time: Res<Time>,
+    screen: Res<Screen>,
     camera: Query<&Camera2d>,
+    camera3d: Query<(&Camera3d, &Transform3d), With<SceneCamera>>,
     sprites: Followed,
+    models: Followed3d,
     mut bars: Query<(&Declared<BarNode>, &mut BarState, &mut Transform2d), (Without<UiPart>, Without<Declared<SpriteNode>>)>,
     mut parts: Query<(&mut Sprite, &mut Transform2d), (With<UiPart>, Without<Declared<SpriteNode>>)>,
 ) {
     let camera = camera.iter().next().copied().unwrap_or_default();
+    let cam3d = camera3d.iter().next();
     for (Declared(node), mut state, mut t) in &mut bars {
         let target = fraction(node.value.unwrap_or(0.0));
         let k = if node.smooth > 0.0 { 1.0 - (-time.delta / node.smooth).exp() } else { 1.0 };
         state.shown += (target - state.shown) * k;
         let offset = Vec2::new(node.x, node.y);
         let at = match &node.follow {
-            Some(id) => sprite_at(&sprites, &camera, id).map(|p| p + offset),
+            Some(id) => follow_at(&sprites, &models, &camera, cam3d, screen.size, id, node.lift).map(|p| p + offset),
             None => Some(offset),
         }
         .unwrap_or(OFFSCREEN);
         (t.translation, t.z) = (at, node.z);
         if let Ok((mut sprite, mut fill)) = parts.get_mut(state.fill) {
             let (full, h) = (node.w.max(0.0), node.h.max(0.0));
-        let w = full * state.shown;
+            let w = full * state.shown;
             sprite.size = Some(Vec2::new(w, h));
             sprite.color = color_or(node.color, &BAR_COLOR);
             (fill.translation, fill.z) = (at + Vec2::new((w - full) / 2.0, 0.0), node.z + FILL_ABOVE);
@@ -301,22 +330,25 @@ pub(crate) fn place_bars(
     }
 }
 
-/// 气泡：字放在跟随点上方，背景框按量出来的文字框撑开。屏幕气泡的背景框按相机换到世界里。
+/// 气泡：字放在跟随点（2D 精灵或 3D 模型投影）上方，背景框按量出来的文字框撑开。屏幕气泡的背景框按相机换到世界里。
 pub(crate) fn place_bubbles(
     screen: Res<Screen>,
     camera: Query<&Camera2d>,
+    camera3d: Query<(&Camera3d, &Transform3d), With<SceneCamera>>,
     sprites: Followed,
+    models: Followed3d,
     mut bubbles: Query<(&Declared<BubbleNode>, &BubbleBack, Option<&TextBox>, &mut Transform2d), (Without<UiPart>, Without<Declared<SpriteNode>>)>,
     mut parts: Query<(&mut Sprite, &mut Transform2d), (With<UiPart>, Without<Declared<SpriteNode>>)>,
 ) {
     let camera = camera.iter().next().copied().unwrap_or_default();
+    let cam3d = camera3d.iter().next();
     for (Declared(node), back, text_box, mut t) in &mut bubbles {
         let padding = node.padding.max(0.0);
         let frame = text_box.map_or(Vec2::ZERO, |b| b.0 + Vec2::splat(padding * 2.0));
         let offset = Vec2::new(node.x, node.y);
         let at = match (&node.follow, node.screen) {
             (_, true) => Some(offset),
-            (Some(id), false) => sprite_at(&sprites, &camera, id).map(|p| p + offset),
+            (Some(id), false) => follow_at(&sprites, &models, &camera, cam3d, screen.size, id, node.lift).map(|p| p + offset),
             (None, false) => Some(offset),
         };
         let Ok((mut sprite, mut back_t)) = parts.get_mut(back.0) else { continue };
@@ -539,5 +571,34 @@ mod tests {
         app.world_mut().resource_mut::<Time>().scale = 0.0;
         frame(&mut app, None);
         assert_eq!(bubble(&mut app, "say").0.visible, Some(1), "暂停时不走");
+    }
+
+    #[test]
+    fn bars_and_bubbles_project_3d_models_and_hide_behind_camera() {
+        let mut app = app();
+        frame(&mut app, Some(json!({
+            "camera3d": { "x": 0, "y": 0, "z": 10 },
+            "models": [
+                { "id": "boss", "model": "asset:/@t/crate.glb", "x": 0, "y": 0, "z": 0 },
+                { "id": "behind", "model": "asset:/@t/crate.glb", "x": 0, "y": 0, "z": 20 },
+            ],
+            "bars": [
+                { "id": "hp", "follow": "boss", "lift": 2, "value": 0.75, "smooth": 0 },
+                { "id": "back_hp", "follow": "behind", "value": 1, "smooth": 0 },
+            ],
+            "bubbles": [
+                { "id": "say", "follow": "boss", "lift": 2, "text": "hello", "padding": 0 },
+                { "id": "back_say", "follow": "behind", "text": "hidden" },
+            ],
+        })));
+        tick(&mut app, 0.016);
+        let (hp_pos, ..) = bar(&mut app, "hp");
+        let (back_hp_pos, ..) = bar(&mut app, "back_hp");
+        assert!(hp_pos.x.abs() < 1e-3 && hp_pos.y > 0.0, "3D 模型加 lift 后应投影到屏幕上方：{hp_pos:?}");
+        assert!(back_hp_pos.x < -1e5, "相机背后的 3D 模型血条应隐藏：{back_hp_pos:?}");
+        let (_, say_pos, _, _) = bubble(&mut app, "say");
+        let (_, back_say_pos, _, _) = bubble(&mut app, "back_say");
+        assert!(say_pos.x.abs() < 1e-3 && say_pos.y > 0.0, "3D 模型气泡应投影到屏幕上方：{say_pos:?}");
+        assert!(back_say_pos.x < -1e5, "相机背后的 3D 模型气泡应隐藏：{back_say_pos:?}");
     }
 }

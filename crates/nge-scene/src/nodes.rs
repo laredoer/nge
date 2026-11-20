@@ -171,6 +171,38 @@ pub struct ModelNode {
     /// 3D 导航网格寻路代理（跟随目标模型、多点巡逻或前往目标坐标）。
     #[serde(default)]
     pub nav: Option<crate::nav3d::NavAgent3dNode>,
+    /// 程序化骨骼注视：让指定骨骼在动画基础上平滑转向目标 3D 模型或世界坐标。
+    #[serde(default, rename = "lookAt")]
+    pub look_at: Option<LookAtNode>,
+}
+
+/// 3D 程序化骨骼注视配置。
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LookAtNode {
+    /// glTF 骨骼/节点名（如 `"head"`、`"body"`、`"armR"`）。
+    pub bone: String,
+    /// 注视的目标 3D 模型 id（与 `point` 二选一）。
+    pub target: Option<String>,
+    /// 注视的固定 3D 世界坐标 `[x, y, z]`。
+    pub point: Option<[f32; 3]>,
+    /// 混合权重 `0..=1`，默认 1。
+    #[serde(default = "one")]
+    pub weight: f32,
+    /// 最大偏转角（度），默认 60。
+    #[serde(default = "default_look_max_angle")]
+    pub max_angle: f32,
+    /// 转向平滑速度（弧度 / 秒），默认 8。
+    #[serde(default = "default_look_speed")]
+    pub speed: f32,
+}
+
+fn default_look_max_angle() -> f32 {
+    60.0
+}
+
+fn default_look_speed() -> f32 {
+    8.0
 }
 
 /// 3D 骨骼挂点：把当前模型挂到目标 3D 模型的指定骨骼/节点上。

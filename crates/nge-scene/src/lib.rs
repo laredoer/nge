@@ -78,7 +78,7 @@ pub use joints::{JointKindName, JointNode, MotorNode};
 pub use joints3d::{Joint3dKindName, Joint3dNode};
 pub use level::{LEVEL_START, LevelStart};
 pub use nav3d::{NavAgent3d, NavAgent3dNode, NavMesh3dNode};
-pub use nodes::{AmbientNode, AnchorName, BURST, Burst, Camera3dNode, EmitterNode, FLOAT_TEXT, FloatText, LightKind, LightNode, ModelNode, Particles, SocketNode, TextNode};
+pub use nodes::{AmbientNode, AnchorName, BURST, Burst, Camera3dNode, EmitterNode, FLOAT_TEXT, FloatText, LightKind, LightNode, LookAtNode, ModelNode, Particles, SocketNode, TextNode};
 pub use net::{NetNode, REMOTE_PREFIX, parse_remote};
 pub use physics::{BodyKind, BodyNode, COLLIDE, Collide, DROP_THROUGH, DROPPED, DropThrough, Dropped, PUSH, PhysicsNode, Push, ShapeName};
 pub use physics3d::{Body3dKind, ModelBody, Physics3dNode, Shape3dName};
@@ -230,8 +230,8 @@ impl Plugin for ScenePlugin {
             .add_event(CHASE)
             .add_event(TYPED)
             .add_systems(Update, world_ui::type_text)
-            // 跟随插值过的位置；屏幕气泡用这一帧的相机
-            .add_systems(PostUpdate, (world_ui::place_bars, world_ui::place_bubbles).after(PhysicsStepped).after(camera::camera_rig))
+            // 跟随插值过的位置；3D 模型头顶条/气泡用这一帧最终的 3D 相机投影
+            .add_systems(PostUpdate, (world_ui::place_bars, world_ui::place_bubbles).after(PhysicsStepped).after(camera::camera_rig).after(camera3d_rig::Camera3dRigUpdated))
             .add_message::<LevelStart>()
             // 预制体、预加载、换关过场（见 docs/scene-flow.md）
             .init_asset::<prefab::SceneFile>()
@@ -253,17 +253,20 @@ impl Plugin for ScenePlugin {
             .add_systems(PreUpdate, level::switch_level.run_if(transition::scene_ready).before(sync::sync_sprites))
             .add_systems(PreUpdate, synced.run_if(transition::scene_ready).after(level::switch_level).before(PointerWorld))
             .add_systems(PreUpdate, match2d::match_2d.after(sync_nodes::sync_camera3d).after(camera::sync_camera).before(PointerWorld))
-            .add_systems(Update, (behave::spin, behave::tap, behave::burst, behave::float_text, physics::push, physics::drop_through, tile_chunks::set_tiles, audio::play_sound, anim::animate, attach::resolve_sockets))
+            .add_systems(Update, (behave::spin, behave::tap, behave::burst, behave::float_text, physics::push, physics::drop_through, tile_chunks::set_tiles, audio::play_sound, anim::animate, attach::resolve_sockets, attach::resolve_look_at))
             .add_systems(Update, (nav3d::sync_navmesh3d, nav3d::step_nav_agents).chain())
             // 补间最后写，盖过 spin / push 这一帧的改动
             .add_systems(Update, (anim::start_tweens, anim::tween).chain().after(behave::spin).after(physics::push))
             // 精灵和关节都同步完了再连：关节可以在精灵之后才出现，反过来也行
             .add_systems(PostUpdate, joints::resolve.before(PhysicsStepped))
             .add_systems(PostUpdate, attach::attach.after(PhysicsStepped).before(behave::follow))
-            // 骨骼挂点等 3D 物理与 attach 挪完后再算最终世界变换，避免武器/配饰滞后一帧
+            // 程序化骨骼注视与骨骼挂点等 3D 物理与 attach 挪完后再算，保证同帧零滞后
             .configure_sets(
                 PostUpdate,
-                nge_render3d::SocketsUpdated.after(PhysicsStepped).after(nge_physics3d::Physics3dStepped).after(attach::attach),
+                (
+                    nge_render3d::LookAtApplied.after(PhysicsStepped).after(nge_physics3d::Physics3dStepped).after(attach::attach),
+                    nge_render3d::SocketsUpdated.after(PhysicsStepped).after(nge_physics3d::Physics3dStepped).after(attach::attach),
+                ),
             )
             // 拖尾读这一帧最后的位置：物理、挂点、跟随都改完以后
             .configure_sets(

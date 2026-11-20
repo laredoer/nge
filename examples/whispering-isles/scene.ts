@@ -1,5 +1,5 @@
 // 风语群岛 3D 开放世界场景声明：动态昼夜天空、PCSS 级联软阴影、地形 trimesh、物理遗迹门、浮空石台与 3D 粒子。
-import type { Emitter3dNode, Joint3dNode, LightNode, ModelNode, PostNode, Scene, SkyNode, FogNode } from "../../ts/nge";
+import type { BarNode, BubbleNode, Emitter3dNode, Joint3dNode, LightNode, ModelNode, PostNode, Scene, SkyNode, FogNode } from "../../ts/nge";
 import world from "./world.json";
 
 export type TimeOfDay = 0 | 1 | 2 | 3; // 0 晨曦 · 1 晴空 · 2 暮霞 · 3 星夜
@@ -175,7 +175,7 @@ export function worldScene(
       z: 0,
       style: waterStyle,
     },
-    // 玩家探索者（带 idle / walk 动画 + 可实时切换的自定义 3D 着色器）与曲面滑翔伞
+    // 玩家探索者（带 idle / walk 动画 + 程序化骨骼注视风灵伙伴 + 可实时切换的自定义 3D 着色器）与曲面滑翔伞
     {
       id: "explorer",
       model: "asset:/@whispering-isles/explorer.glb",
@@ -183,6 +183,7 @@ export function worldScene(
       y: world.spawn.y,
       z: world.spawn.z,
       animation: { clip: "idle", loop: true },
+      lookAt: { bone: "body", target: "camp-sentinel", maxAngle: 65, weight: 0.95, speed: 8 },
       body: { kind: "character", shape: "capsule", r: 12, h: 24, slope: 48, step: 22, snap: 10 },
       ...(quality.fx3d !== "off"
         ? { shader: quality.fx3d, params: quality.fx3d === "aura" ? [0.35, 1.45, 1.85, 1.35] : [0.25, 0.95, 1.45, 1.25] }
@@ -225,6 +226,7 @@ export function worldScene(
       z: 175,
       scale: 1.25,
       animation: { clip: "float", loop: true },
+      lookAt: { bone: "wisp", target: "explorer", maxAngle: 75, weight: 1.0, speed: 10 },
       nav: {
         patrol: [
           [-65, 28, 185],
@@ -509,6 +511,32 @@ export function worldScene(
     post,
     physics3d: { gravity: [0, -981, 0] },
     audio: { preload: Object.values(SOUNDS) },
+    // 3D 世界 UI 实战：头顶跟随 3D 模型的能量条与打字机对话气泡
+    bars: [
+      {
+        id: "sentinel-bar",
+        follow: "camp-sentinel",
+        lift: 20,
+        value: 0.88,
+        w: 44,
+        h: 5,
+        color: "#fbbf24",
+        back: "#000000a8",
+      } satisfies BarNode,
+    ],
+    bubbles: [
+      {
+        id: "wisp-talk",
+        follow: "wind-wisp",
+        lift: 18,
+        text: awakened.size === 0 ? "去点亮前方的古代圣坛吧！" : `已唤醒 ${awakened.size}/${SHRINES.length} 座圣坛 ✨`,
+        size: 13,
+        color: "#e0faff",
+        back: "#082436c8",
+        padding: 6,
+        typing: 16,
+      } satisfies BubbleNode,
+    ],
     models,
     joints3d,
     emitters3d,

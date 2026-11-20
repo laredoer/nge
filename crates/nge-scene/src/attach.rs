@@ -76,6 +76,54 @@ pub(crate) fn resolve_sockets(
     }
 }
 
+/// 场景层声明的 3D 骨骼注视（按目标模型 id 或固定世界坐标解析为 [`nge_render3d::BoneLookAt`]）。
+#[derive(Component, Debug, Clone, PartialEq)]
+pub(crate) struct SceneLookAt {
+    pub bone: String,
+    pub target: Option<String>,
+    pub point: Option<Vec3>,
+    pub weight: f32,
+    pub max_angle: f32,
+    pub speed: f32,
+}
+
+/// `Update`：按目标模型的 `SceneId` 把 [`SceneLookAt`] 同步到 [`nge_render3d::BoneLookAt`]，保留平滑插值状态。
+pub(crate) fn resolve_look_at(
+    mut commands: Commands,
+    mut lookers: Query<(Entity, &SceneLookAt, Option<&mut nge_render3d::BoneLookAt>)>,
+    models: Query<(Entity, &crate::sync::SceneId, &Transform3d), With<Declared<crate::nodes::ModelNode>>>,
+) {
+    if lookers.is_empty() {
+        return;
+    }
+    for (entity, cfg, current) in &mut lookers {
+        let target_pos = cfg
+            .target
+            .as_deref()
+            .and_then(|name| models.iter().find(|(e, id, _)| *e != entity && id.0 == name).map(|(_, _, t)| t.translation))
+            .or(cfg.point);
+        let Some(pos) = target_pos else { continue };
+        match current {
+            Some(mut old) => {
+                if old.bone != cfg.bone {
+                    old.bone = cfg.bone.clone();
+                }
+                old.target = pos;
+                old.weight = cfg.weight;
+                old.max_angle = cfg.max_angle;
+                old.speed = cfg.speed;
+            }
+            None => {
+                let mut comp = nge_render3d::BoneLookAt::new(cfg.bone.clone(), pos);
+                comp.weight = cfg.weight;
+                comp.max_angle = cfg.max_angle;
+                comp.speed = cfg.speed;
+                commands.entity(entity).insert(comp);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;

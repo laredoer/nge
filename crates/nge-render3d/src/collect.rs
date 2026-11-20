@@ -186,10 +186,10 @@ pub(crate) fn collect(world: &mut World, draws: &mut Vec<Draw>, joints: &mut Vec
         items.push((mesh.mesh, mesh.material, t.matrix(), None, padded(weights.map_or(&[][..], |w| &w.0)), style.map(|s| s.0), shader.map(|s| s.name.clone()), shader.map_or([0.0; 4], |s| s.params.into())));
     }
     // 先建查询再借资源（建查询要 &mut World）
-    let mut models = world.query::<(&Model3d, &Transform3d, Option<&Pose>, Has<crate::Animator>, Has<nge_anim::AnimGraph>, Option<&MaterialStyleOverride>, Option<&MaterialShader3d>)>();
+    let mut models = world.query::<(&Model3d, &Transform3d, Option<&Pose>, Has<crate::Animator>, Has<nge_anim::AnimGraph>, Has<crate::lookat::BoneLookAt>, Option<&MaterialStyleOverride>, Option<&MaterialShader3d>)>();
     let assets = world.resource::<Assets3d>();
-    for (model, t, pose, animator, graph, style_override, shader) in models.iter(world) {
-        let playing = animator || graph;
+    for (model, t, pose, animator, graph, look_at, style_override, shader) in models.iter(world) {
+        let playing = animator || graph || look_at;
         let Some(model) = assets.model(model.0) else { continue };
         let m = t.matrix();
         let skeleton = &model.skeleton;
