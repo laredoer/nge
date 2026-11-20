@@ -2,18 +2,22 @@
 //! 相机跟在角色后上方；平台按时间来回挪；调试视图开着时角色往下打一条射线、往前扫一个球；C 开关级联染色（见 docs/render3d-quality.md）。
 
 use bevy_ecs::prelude::*;
+use nge_audio::{Audio, Bus, EffectSpec};
 use nge_ecs::glam::{Quat, Vec3};
 use nge_ecs::{Input, Time};
 use nge_physics3d::{CharacterState3d, Physics3d, Physics3dDebug, QueryFilter, QueryShape, Velocity};
 use nge_render3d::{Camera3d, Shadows, Transform3d};
 use nge_scene::SceneId;
 
-/// 试验场的角色和平台（lab.json 里的 id）。
+/// 试验场的角色、平台和绕圈发声体（lab.json 里的 id）。
 pub const LAB_HERO: &str = "lab-hero";
 pub const LAB_PLATFORM: &str = "lab-platform";
+pub const LAB_ORBITER: &str = "lab-orbiter";
 
 /// 开关级联染色的键。
 const CASCADE_KEY: &str = "KeyC";
+/// 开关水下效果器链的键（见 docs/audio-3d.md）。
+const UNDERWATER_KEY: &str = "KeyU";
 /// 走的速度（point / s），起跳速度（重力 981 时跳 100 多高）。
 const SPEED: f32 = 220.0;
 const JUMP: f32 = 450.0;
@@ -24,22 +28,27 @@ const CAMERA_BACK: Vec3 = Vec3::new(0.0, 220.0, 420.0);
 /// 平台左右挪多远、来回一趟几秒。
 const PLATFORM_REACH: f32 = 150.0;
 const PLATFORM_PERIOD: f32 = 6.0;
+/// 绕圈发声体的圆心、半径与一圈秒数。
+const ORBIT_CENTER: Vec3 = Vec3::new(0.0, 90.0, -80.0);
+const ORBIT_RADIUS: f32 = 260.0;
+const ORBIT_PERIOD: f32 = 5.0;
 /// 调试时往下打多远、往前扫多远、扫的球多大。
 const PROBE_DOWN: f32 = 200.0;
 const PROBE_FORWARD: f32 = 120.0;
 const PROBE_BALL: f32 = 10.0;
 
-/// 角色的起点（第一次见到时的位置）、朝哪边（停下来时保持）。
+/// 角色的起点（第一次见到时的位置）、朝哪边（停下来时保持）、水下效果器开关。
 #[derive(Resource, Debug)]
 pub(crate) struct Lab {
     spawn: Option<(Entity, Vec3)>,
     facing: Vec3,
     platform: Option<(Entity, Vec3)>,
+    underwater: bool,
 }
 
 impl Default for Lab {
     fn default() -> Self {
-        Self { spawn: None, facing: Vec3::NEG_Z, platform: None }
+        Self { spawn: None, facing: Vec3::NEG_Z, platform: None, underwater: false }
     }
 }
 
@@ -106,6 +115,36 @@ pub(crate) fn probe(debug: Res<Physics3dDebug>, physics: Res<Physics3d>, lab: Re
     let me = QueryFilter::default().exclude(entity);
     physics.raycast(t.translation, Vec3::NEG_Y, PROBE_DOWN, me);
     physics.cast_shape(QueryShape::Ball(PROBE_BALL), t.translation, Quat::IDENTITY, lab.facing, PROBE_FORWARD, me);
+}
+
+/// 绕圈发声体按时间绕场地中心转圈（给 3D 左右声像与多普勒演示用，见 docs/audio-3d.md）。
+pub(crate) fn orbit_sound_source(time: Res<Time>, mut orbiters: Query<(&SceneId, &mut Transform3d), Without<Camera3d>>) {
+    let Some((_, mut t)) = orbiters.iter_mut().find(|(id, _)| id.0 == LAB_ORBITER) else { return };
+    let angle = (time.elapsed as f32 / ORBIT_PERIOD) * std::f32::consts::TAU;
+    t.translation = ORBIT_CENTER + Vec3::new(angle.cos() * ORBIT_RADIUS, 0.0, angle.sin() * ORBIT_RADIUS);
+}
+
+/// 试验场里按 U 开关「水下」效果器链（低通 500 Hz 加混响），离开试验场时恢复。
+pub(crate) fn underwater_effects(input: Res<Input>, mut lab: ResMut<Lab>, mut audio: ResMut<Audio>, ids: Query<&SceneId>) {
+    if !ids.iter().any(|id| id.0 == LAB_HERO) {
+        if lab.underwater {
+            lab.underwater = false;
+            audio.set_effects(Bus::Sfx, &[], 0.3);
+        }
+        return;
+    }
+    if input.key_pressed(UNDERWATER_KEY) {
+        lab.underwater = !lab.underwater;
+        if lab.underwater {
+            let chain = [
+                EffectSpec::Lowpass { cutoff: 500.0, q: std::f32::consts::FRAC_1_SQRT_2 },
+                EffectSpec::Reverb { room: 0.7, damping: 0.5, mix: 0.35 },
+            ];
+            audio.set_effects(Bus::Sfx, &chain, 0.3);
+        } else {
+            audio.set_effects(Bus::Sfx, &[], 0.3);
+        }
+    }
 }
 
 /// 试验场里按 C 开关级联染色（近到远红、绿、蓝），离开试验场时关掉。

@@ -87,6 +87,24 @@ export const LAB_SMOKE: Emitter3dNode = {
   lit: true,
 };
 
+/** 篝火火苗（配指数衰减的环境声，见 docs/audio-3d.md）。 */
+export const LAB_CAMPFIRE: Emitter3dNode = {
+  id: "lab-campfire",
+  x: -380,
+  y: 6,
+  z: -240,
+  rate: 40,
+  lifetime: [0.4, 0.85],
+  speed: [35, 75],
+  direction: [0, 1, 0],
+  spread: 22,
+  gravity: [0, 30, 0],
+  size: [14, 2],
+  color: ["#ffd96aff", "#ff4a1200"],
+  blend: "add",
+  max: 120,
+};
+
 export function labScene(): Scene {
   return {
     level: LAB_LEVEL,
@@ -104,9 +122,18 @@ export function labScene(): Scene {
     fog: { start: 700, end: 3000, color: "#c9d6e3", sky: 0.6, max: 0.85, height: { base: 0, falloff: 0.02, density: 0.0008 } },
     shadows: { filter: "pcss", sunSize: 1.5, softness: 2, blend: 0.15, maxLights: 2 },
     physics3d: { gravity: [0, -981, 0] },
+    // 3D 空间音频演示（见 docs/audio-3d.md）：听者跟着角色，绕圈多普勒、墙后遮挡、篝火指数衰减
+    audio: {
+      listener: { follow: LAB_HERO, space: "3d" },
+      emitters: [
+        { id: "lab-orbit", src: "asset:/@platformer/lab-orbit.wav", space: "3d", follow: "lab-orbiter", doppler: 12, min: 100, max: 1400, volume: 0.45 },
+        { id: "lab-behind-wall", src: "asset:/@platformer/lab-wall.wav", space: "3d", x: 410, y: 45, z: 40, occlusion: true, min: 100, max: 1200, volume: 0.55 },
+        { id: "lab-fire", src: "asset:/@platformer/lab-fire.wav", space: "3d", x: -380, y: 20, z: -240, rolloff: "exponential", min: 80, max: 900, factor: 1.6, volume: 0.6 },
+      ],
+    },
     models: [lab.hero as ModelNode, ...(lab.models as ModelNode[])],
     joints3d: lab.joints3d as Joint3dNode[],
-    emitters3d: [LAB_FIREWORK, LAB_SHOCKWAVE, LAB_SMOKE],
+    emitters3d: [LAB_FIREWORK, LAB_SHOCKWAVE, LAB_SMOKE, LAB_CAMPFIRE],
   };
 }
 

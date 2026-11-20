@@ -97,7 +97,7 @@ lenient!(
     emitters3d => "emitters3d", lights => "lights", bars => "bars", bubbles => "bubbles", joints => "joints",
     joints3d => "joints3d", post => "post", lighting_lights => "lighting.lights", tile_slopes => "tilemaps.slopes",
     tile_animated => "tilemaps.animated", tile_materials => "tilemaps.materials", instances => "instances",
-    set_tiles => "setTiles.tiles";
+    set_tiles => "setTiles.tiles", audio_effects => "audio.buses 的 effects", audio_emitters => "audio.emitters";
     background => "background", camera => "camera", camera3d => "camera3d", ambient => "ambient", physics => "physics",
     physics3d => "physics3d", lighting => "lighting", audio => "audio", time_scale => "timeScale", perf => "perf",
     net => "net", bounds => "camera.bounds", behavior => "sprites.behavior", transition => "transition",

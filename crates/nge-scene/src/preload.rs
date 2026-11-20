@@ -89,6 +89,7 @@ fn collect(scene: &Scene, out: &mut Vec<String>, depth: usize) {
     out.extend(scene.models.iter().map(|m| m.model.clone()));
     if let Some(audio) = &scene.audio {
         out.extend(audio.music.iter().chain(&audio.preload).cloned());
+        out.extend(audio.emitters.iter().map(|e| e.src.clone()));
     }
     out.extend(scene.instances.iter().map(|i| i.prefab.clone()));
     if let Some(t) = &scene.transition {

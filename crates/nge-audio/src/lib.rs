@@ -4,8 +4,18 @@
 //! 下一帧接上；之前的音效丢掉，循环的（音乐）排着等（见 docs/web.md）。
 
 mod audio;
+mod buses;
+mod chain;
+mod dsp;
+pub mod effects;
+pub mod spatial3d;
+pub mod voice3d;
 
-pub use audio::{Audio, Bus, DEFAULT_RANGE, MAX_STARTS_PER_FRAME, MAX_VOICES, Play, Voice, spatial};
+pub use audio::{Audio, DEFAULT_RANGE, MAX_STARTS_PER_FRAME, MAX_VOICES, Play, Voice, spatial};
+pub use buses::Bus;
+pub use effects::EffectSpec;
+pub use spatial3d::{Cone, Emit, Rolloff};
+pub use voice3d::Probe;
 
 use std::io::Cursor;
 use std::sync::Mutex;
@@ -145,7 +155,7 @@ pub(crate) enum Manager {
 }
 
 pub mod prelude {
-    pub use crate::{Audio, AudioPlugin, Bus, Play, Sound, Voice};
+    pub use crate::{Audio, AudioPlugin, Bus, EffectSpec, Emit, Play, Rolloff, Sound, Voice};
 }
 
 /// 测试用的工具。
@@ -180,3 +190,9 @@ pub mod testing {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_3d;
+#[cfg(test)]
+mod tests_dsp;
+#[cfg(test)]
+mod tests_spatial;

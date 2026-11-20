@@ -8,30 +8,30 @@ use super::*;
 use crate::audio::decibels;
 use crate::testing::wav;
 
-const VIEWPORT: Viewport = Viewport { size: [100.0, 100.0], pixels: [100, 100] };
-const BEEP: &str = "asset:/@t/beep.wav";
+pub(crate) const VIEWPORT: Viewport = Viewport { size: [100.0, 100.0], pixels: [100, 100] };
+pub(crate) const BEEP: &str = "asset:/@t/beep.wav";
 const BOOP: &str = "asset:/@t/boop.wav";
 const BAD: &str = "asset:/@t/bad.wav";
 
-fn app() -> App {
+pub(crate) fn app() -> App {
     let source = MemorySource::default().with(BEEP, wav(2.5)).with(BOOP, wav(0.1)).with(BAD, b"not a wav".to_vec());
     let mut app = App::new();
     app.add_plugins(AssetPlugin::new().source(Arc::new(source))).add_plugins(AudioPlugin::mock());
     app
 }
 
-fn load(app: &mut App, uri: &str) -> Handle<Sound> {
+pub(crate) fn load(app: &mut App, uri: &str) -> Handle<Sound> {
     let world = app.world_mut();
     world.resource_scope(|world, mut server: Mut<AssetServer>| server.load(&mut world.resource_mut::<Assets<Sound>>(), uri))
 }
 
 /// 等后台加载完，再走一帧。
-fn settle(app: &mut App) {
+pub(crate) fn settle(app: &mut App) {
     AssetServer::apply(app.world_mut(), true);
     app.tick(VIEWPORT, 0.016);
 }
 
-fn audio(app: &mut App) -> Mut<'_, Audio> {
+pub(crate) fn audio(app: &mut App) -> Mut<'_, Audio> {
     app.world_mut().resource_mut::<Audio>()
 }
 

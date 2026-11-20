@@ -9,6 +9,7 @@ mod anim;
 mod anim_graph;
 mod attach;
 mod audio;
+mod audio3d;
 mod behave;
 mod behavior;
 mod camera;
@@ -65,7 +66,8 @@ pub use behavior::{BEHAVIOR, BLACKBOARD, BehaviorEvent, BehaviorNode, Blackboard
 pub use world_ui::{BarNode, BubbleNode, TYPED, Typed};
 pub use anim_graph::{ANIM_EVENT, ANIM_SET, AnimEventOut, AnimParams, AnimSet, sprite_frame};
 pub use anim::{ANIM_END, AnimEnd, AnimNode, Ease, FrameAnimation, TWEEN, TWEEN_END, Tween, TweenCommand, TweenEnd, TweenProps, Tweens};
-pub use audio::{AudioNode, BusName, BusNode, BusesNode, PlaySound, SOUND};
+pub use audio::{AudioNode, BusName, BusNode, BusesNode, EffectNode, PlaySound, SOUND};
+pub use audio3d::{ConeNode, ListenerNode, OnLost, RolloffName, SoundEmitterNode, SpaceKind, SpaceNode};
 pub use behave::{Spin, Tappable};
 pub use camera::{SHAKE, Shake};
 pub use effects::{Light2dNode, LightingNode, MaskedNode, PostNode};
@@ -185,6 +187,7 @@ impl Plugin for ScenePlugin {
             physics::sync_gravity,
             joints::sync_joints,
             audio::sync_audio,
+            audio3d::sync_sound_emitters,
             effects::sync_effects,
             world_ui::sync_bars,
             world_ui::sync_bubbles,
@@ -193,6 +196,7 @@ impl Plugin for ScenePlugin {
         app.insert_resource(textures)
             .init_resource::<resolve::UriAtlases>()
             .init_resource::<camera::CameraRig>()
+            .init_resource::<audio3d::SoundEmitters>()
             .add_prop(SCENE)
             .add_event(TAP)
             .add_event(scene_perf::PERF)
@@ -256,6 +260,20 @@ impl Plugin for ScenePlugin {
             // 粒子按视野裁剪、曲线贴在屏幕上：用这一帧挪完的相机
             .configure_sets(PostUpdate, (nge_particles::ParticlesSimulated, nge_text::PerfDrawn).after(camera::camera_rig))
             .add_systems(PostUpdate, effects::lighting.after(PhysicsStepped).after(behave::follow).after(camera::camera_rig))
+            // 声源跟着实体、听的人跟着相机：都挪完了再摆，摆完打遮挡的射线，然后音频更新
+            .add_systems(
+                PostUpdate,
+                (audio3d::place_sounds, audio3d::occlude_sounds)
+                    .chain()
+                    .after(PhysicsStepped)
+                    .after(nge_physics3d::Physics3dStepped)
+                    .after(attach::attach)
+                    .after(behave::follow)
+                    .after(camera::camera_rig)
+                    .after(audio::listen)
+                    .after(match2d::match_2d)
+                    .before(nge_audio::AudioUpdated),
+            )
             .add_systems(PostUpdate, (behave::follow, physics::collide.after(PhysicsStepped), audio::listen.after(camera::camera_rig).before(nge_audio::AudioUpdated), camera::camera_rig.after(PhysicsStepped), match2d::match_2d.after(camera::camera_rig)));
     }
 }

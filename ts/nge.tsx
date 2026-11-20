@@ -841,6 +841,71 @@ export interface Scene {
   textures?: Record<string, TextureOptions>;
 }
 
+/** 混音分组上的效果器（见 docs/audio-3d.md）。没写的参数用默认，超出范围的截回去。 */
+export type AudioEffect =
+  | { type: "lowpass"; cutoff: number; q?: number }
+  | { type: "highpass"; cutoff: number; q?: number }
+  | { type: "reverb"; room?: number; damping?: number; mix?: number }
+  | { type: "delay"; time?: number; feedback?: number; mix?: number }
+  | { type: "compressor"; threshold?: number; ratio?: number; attack?: number; release?: number; makeup?: number }
+  | { type: "limiter"; ceiling?: number; release?: number };
+
+/** 锥形指向（度，整个锥的张角）。不写 `direction` 时用跟着的模型的朝向（模型朝 -z）。 */
+export interface SoundCone {
+  inner: number;
+  outer: number;
+  outerGain?: number;
+  direction?: [number, number, number];
+}
+
+/** 声源和 `sound` 命令共用的空间与衰减字段（见 docs/audio-3d.md）。 */
+export interface SoundSpace {
+  /** 默认 "2d"。"3d" 时按 3D 位置和听者朝向算衰减与声像。 */
+  space?: "2d" | "3d";
+  z?: number;
+  /** 跟着这个 id 的精灵（2D）或模型（3D）走；这时 x / y / z 是相对它的偏移。 */
+  follow?: string;
+  /** 跟着的实体没了以后："stop"（默认）淡出停掉，"finish" 留在最后的位置播完。 */
+  onLost?: "stop" | "finish";
+  /** 3D 衰减模型，默认 "inverse"。 */
+  rolloff?: "linear" | "inverse" | "exponential";
+  /** 3D 最近距离（以内不衰减），默认 100。 */
+  min?: number;
+  /** 3D 最远距离（以外静音），默认 2000。 */
+  max?: number;
+  /** 3D 衰减系数，默认 1。 */
+  factor?: number;
+  cone?: SoundCone;
+  /** 多普勒系数：0 关（默认），1 真实，大于 1 夸张。 */
+  doppler?: number;
+  /** 开启墙体遮挡（被固定刚体挡住时压低音量并加低通）。 */
+  occlusion?: boolean;
+}
+
+/** 声明式的声源：场景里有就响，没了就淡出停掉。 */
+export interface SoundEmitterNode extends SoundSpace {
+  id: string;
+  src: string;
+  x?: number;
+  y?: number;
+  /** 默认 true；false 时出现播一次。 */
+  loop?: boolean;
+  /** 默认 1。 */
+  volume?: number;
+  /** 默认 1。 */
+  pitch?: number;
+  /** 默认 "sfx"。 */
+  bus?: "music" | "sfx" | "ui";
+  /** 出现、消失时淡入淡出的秒数，默认 0.3。 */
+  fade?: number;
+}
+
+/** 听的人放在哪个精灵（2D）或模型（3D）上；不写时在相机上。 */
+export interface SoundListenerNode {
+  follow: string;
+  space?: "2d" | "3d";
+}
+
 /** 背景音乐和总音量。音量是线性的：0 静音，1 原音量。 */
 export interface AudioNode {
   /** 循环播放的背景音乐（`asset:/` 路径）；换了就淡出旧的、淡入新的，去掉就淡出停止。 */
@@ -852,10 +917,18 @@ export interface AudioNode {
   muted?: boolean;
   /** 提前加载的声音，第一次播放时不用等。 */
   preload?: string[];
-  /** 混音分组：背景音乐进 music，`sound` 默认进 sfx。变了才设，0.3 秒过渡过去（见 docs/audio-more.md）。 */
+  /** 混音分组：背景音乐进 music，`sound` 默认进 sfx。变了才设，0.3 秒过渡过去（见 docs/audio-more.md、docs/audio-3d.md）。 */
   buses?: { music?: BusNode; sfx?: BusNode; ui?: BusNode };
   /** 带位置的声音多远就听不见，默认 1000。听的人在 2D 相机的位置。 */
   range?: number;
+  /** 声明式的声源：按 id 增量同步，支持 3D、跟随实体、多普勒与遮挡。 */
+  emitters?: SoundEmitterNode[];
+  /** 听者跟随的精灵 / 模型；不写时 2D 在 2D 相机、3D 在 3D 相机。 */
+  listener?: SoundListenerNode;
+  /** 多普勒用的声速（point / 秒），默认 34300。 */
+  speedOfSound?: number;
+  /** 公用混响总线上的效果器链；不写时默认一个全湿混响。 */
+  sendEffects?: AudioEffect[];
 }
 
 /** 一个混音分组的设置。 */
@@ -866,6 +939,12 @@ export interface BusNode {
   lowpass?: number;
   /** 混响的湿声比例（0 到 1），默认 0。 */
   reverb?: number;
+  /** 效果器链（最多 8 个），接在上面的 lowpass、reverb 后面按顺序处理。 */
+  effects?: AudioEffect[];
+  /** 往公用混响总线送多少（0 到 1），默认 0。 */
+  send?: number;
+  /** 这个分组的设置变了时过渡多久（秒），默认 0.3。 */
+  fade?: number;
 }
 
 /** 点中了可点击的精灵或模型。x / y 是指针的 2D 世界坐标；点中模型时 point 是 3D 命中点。 */
@@ -1127,7 +1206,7 @@ export interface TweenEnd {
  */
 export function sound(
   game: NativeComponentRef | undefined,
-  args: { src: string; volume?: number; pitch?: number; pan?: number; bus?: "music" | "sfx" | "ui"; x?: number; y?: number },
+  args: { src: string; volume?: number; pitch?: number; pan?: number; bus?: "music" | "sfx" | "ui"; x?: number; y?: number } & SoundSpace,
 ) {
   game?.command("sound", args);
 }

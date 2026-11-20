@@ -178,6 +178,31 @@
         "r": 22,
         "density": 0.2
       }
+    },
+    {
+      "id": "lab-orbiter",
+      "model": "asset:/@platformer/lab-ball.glb",
+      "x": 260,
+      "y": 90,
+      "z": -80,
+      "scale": 14
+    },
+    {
+      "id": "lab-wall",
+      "model": "asset:/@platformer/lab-door.glb",
+      "x": 360,
+      "y": 0,
+      "z": 120,
+      "scale": 1.4,
+      "body": {
+        "kind": "fixed",
+        "shape": "box",
+        "size": [
+          160,
+          180,
+          20
+        ]
+      }
     }
   ],
   "joints3d": [

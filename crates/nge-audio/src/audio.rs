@@ -3,16 +3,19 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use bevy_ecs::prelude::*;
-use glam::Vec2;
-use kira::effect::filter::{FilterBuilder, FilterHandle};
-use kira::effect::reverb::{ReverbBuilder, ReverbHandle};
+use glam::{Vec2, Vec3};
 use kira::sound::PlaybackState;
 use kira::sound::static_sound::{StaticSoundData, StaticSoundHandle};
-use kira::track::{MainTrackHandle, TrackBuilder, TrackHandle};
-use kira::{Decibels, Mix, Panning, Tween};
+use kira::track::MainTrackHandle;
+use kira::{Decibels, Panning, Tween};
 use nge_assets::{Assets, Handle, LoadState};
+use nge_ecs::Time;
 use web_time::Instant;
 
+use crate::buses::{Bus, BusState, BusTrack, SendBus, default_send_effects, own_track};
+use crate::effects::EffectSpec;
+use crate::spatial3d::{Emit, doppler};
+use crate::voice3d::{DOPPLER_FADE, Ears, MAX_OCCLUSION_TRACKS, Motion, OCCLUSION_BUDGET, Occlusion, OwnTrack, RATE_EPSILON, SPEED_OF_SOUND};
 use crate::{Manager, Sound};
 
 /// 同时发声的上限（循环的声音不算）。超出时新的音效直接丢掉。
@@ -24,47 +27,6 @@ pub const MAX_STARTS_PER_FRAME: u8 = 4;
 pub const DEFAULT_RANGE: f32 = 1000.0;
 /// 听的人或声音挪了以后，音量和声像用多久过渡过去。
 const SPATIAL_FADE: f32 = 0.05;
-/// 低通滤波的截止频率范围（赫兹）。
-const CUTOFF: (f32, f32) = (20.0, 20000.0);
-
-/// 混音分组。每组一条子轨道，上面串着低通滤波和混响（见 docs/audio-more.md）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub enum Bus {
-    Music,
-    #[default]
-    Sfx,
-    Ui,
-}
-
-impl Bus {
-    pub const ALL: [Bus; 3] = [Bus::Music, Bus::Sfx, Bus::Ui];
-
-    fn index(self) -> usize {
-        self as usize
-    }
-}
-
-/// 一组的设置：音量（线性）、低通的截止频率（`None` 是关）、混响的湿声比例。
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct BusState {
-    volume: f32,
-    lowpass: Option<f32>,
-    reverb: f32,
-}
-
-impl Default for BusState {
-    fn default() -> Self {
-        Self { volume: 1.0, lowpass: None, reverb: 0.0 }
-    }
-}
-
-struct BusTrack {
-    track: TrackHandle,
-    filter: FilterHandle,
-    /// 不出声的后端（采样率 1）没有：kira 的混响按采样率开缓冲，太小会越界。
-    reverb: Option<ReverbHandle>,
-}
-
 /// 一次播放。音量是线性的（0 = 静音，1 = 原音量），`pitch` 是播放速度（2 = 高八度，限制在 0.1 到 8），`pan` 从 -1（左）到 1（右）。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Play {
@@ -78,11 +40,15 @@ pub struct Play {
     pub bus: Bus,
     /// 在世界里的位置：离听的人越远越小，在左边就偏左（[`spatial`]）。`None` 不按位置。
     pub at: Option<Vec2>,
+    /// 3D 的位置：按 3D 的听者算衰减和左右（见 docs/audio-3d.md）。和 `at` 都写了时用这个。
+    pub at3: Option<Vec3>,
+    /// 衰减、锥形（只对 3D 的）、多普勒、遮挡（2D、3D 都管用）。
+    pub emit: Emit,
 }
 
 impl Default for Play {
     fn default() -> Self {
-        Self { volume: 1.0, pitch: 1.0, pan: 0.0, looped: false, fade_in: 0.0, bus: Bus::Sfx, at: None }
+        Self { volume: 1.0, pitch: 1.0, pan: 0.0, looped: false, fade_in: 0.0, bus: Bus::Sfx, at: None, at3: None, emit: Emit::default() }
     }
 }
 
@@ -106,18 +72,28 @@ impl Play {
 }
 
 /// 正在播（或排队等加载）的一个声音。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Voice(u64);
 
-struct Playing {
+pub(crate) struct Playing {
     handle: StaticSoundHandle,
     looped: bool,
+    pub(crate) bus: Bus,
     /// 自己的音量、声像（没按位置算的）。
     volume: f32,
     pan: f32,
-    at: Option<Vec2>,
-    /// 现在的音量和声像（按位置算过的）。
+    pub(crate) at: Option<Vec2>,
+    pub(crate) at3: Option<Vec3>,
+    pub(crate) emit: Emit,
+    /// 现在的音量和声像（按位置、遮挡算过的）。
     mix: (f32, f32),
+    /// 自己的音高，和现在给 kira 的播放速度（乘过多普勒的）。
+    pitch: f32,
+    pub(crate) rate: f32,
+    motion: Motion,
+    pub(crate) occlusion: Occlusion,
+    /// 开了遮挡的声音自己的子轨道（带低通）；声音没了跟着没。
+    pub(crate) own: Option<OwnTrack>,
     /// 游戏设的音量淡变什么时候结束：按位置更新时不把它缩短。
     fade_until: Option<Instant>,
     /// 测试用：上一次按位置更新用的过渡秒数。
@@ -125,12 +101,25 @@ struct Playing {
     last_fade: f32,
 }
 
+impl Playing {
+    /// 在世界里的位置（2D 的 z 是 0）；不带位置时是 `None`。
+    pub(crate) fn position(&self) -> Option<Vec3> {
+        self.at3.or(self.at.map(|at| at.extend(0.0)))
+    }
+
+    /// 按位置和遮挡算出来的音量、声像。
+    fn placed(&self, ears: &Ears) -> (f32, f32) {
+        let (volume, pan) = ears.mix(self.volume, self.pan, self.at, self.at3, &self.emit);
+        (volume * self.occlusion.mix().0, pan)
+    }
+}
+
 #[derive(Resource)]
 pub struct Audio {
-    manager: Option<Mutex<Manager>>,
+    pub(crate) manager: Option<Mutex<Manager>>,
     next: u64,
-    pending: Vec<(Voice, Handle<Sound>, Play)>,
-    playing: HashMap<Voice, Playing>,
+    pub(crate) pending: Vec<(Voice, Handle<Sound>, Play)>,
+    pub(crate) playing: HashMap<Voice, Playing>,
     /// 已经报过加载失败的声音，每个只 warn 一次。
     failed: HashSet<Handle<Sound>>,
     volume: f32,
@@ -138,10 +127,19 @@ pub struct Audio {
     /// 画面没了、App 进了后台：分组轨道停下，总输出静音（[`Audio::set_suspended`]）。
     suspended: bool,
     /// 三个分组的轨道（没有音频设备时没有）。
-    tracks: Option<Vec<BusTrack>>,
-    buses: [BusState; 3],
-    listener: Vec2,
-    range: f32,
+    pub(crate) tracks: Option<Vec<BusTrack>>,
+    pub(crate) buses: [BusState; 3],
+    /// 混响总线和它上面的链。
+    pub(crate) send_bus: Option<SendBus>,
+    pub(crate) send_effects: Vec<EffectSpec>,
+    /// 听的人：2D 的位置和范围，3D 的位置和右手方向。
+    pub(crate) ears: Ears,
+    /// 2D、3D 的听者各自的速度（多普勒用）。
+    motion: Motion,
+    motion3: Motion,
+    pub(crate) speed_of_sound: f32,
+    /// 这一帧还能给几个声音查遮挡。
+    pub(crate) probes_left: usize,
     /// 等解锁（浏览器）：还没有音频设备，[`crate::unlock`] 之后接上。
     locked: bool,
     /// 接上了解锁来的设备（算在 [`crate::LIVE`] 里）。
@@ -160,9 +158,14 @@ impl Audio {
             muted: false,
             suspended: false,
             tracks: None,
-            buses: [BusState::default(); 3],
-            listener: Vec2::ZERO,
-            range: DEFAULT_RANGE,
+            buses: Default::default(),
+            send_bus: None,
+            send_effects: default_send_effects(),
+            ears: Ears { at: Vec2::ZERO, range: DEFAULT_RANGE, at3: Vec3::ZERO, right: Vec3::X },
+            motion: Motion::default(),
+            motion3: Motion::default(),
+            speed_of_sound: SPEED_OF_SOUND,
+            probes_left: OCCLUSION_BUDGET,
             locked: false,
             unlocked: false,
         }
@@ -180,104 +183,35 @@ impl Audio {
         self.locked = false;
         self.unlocked = true;
         crate::LIVE.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        // 效果器链和送出量建轨道时就带上了
         self.add_buses();
         self.apply_master();
         for bus in Bus::ALL {
-            let state = self.buses[bus.index()];
-            self.set_bus_volume(bus, state.volume, 0.0);
-            self.set_lowpass(bus, state.lowpass, 0.0);
-            self.set_reverb(bus, state.reverb, 0.0);
-        }
-    }
-
-    /// 给每个分组建一条子轨道：低通、混响，一开始都是干声。
-    pub(crate) fn add_buses(&mut self) {
-        let Some(manager) = &self.manager else { return };
-        let mut manager = manager.lock().unwrap_or_else(|e| e.into_inner());
-        let mock = matches!(*manager, Manager::Mock(_));
-        let mut tracks = Vec::new();
-        for _ in Bus::ALL {
-            let mut builder = TrackBuilder::new();
-            // 低通一直是全湿，关掉时截止频率在 20000（听不出来）：开关时干湿交叉淡变中间会变响
-            let filter = builder.add_effect(FilterBuilder::new().cutoff(f64::from(CUTOFF.1)).mix(Mix::WET));
-            let reverb = (!mock).then(|| builder.add_effect(ReverbBuilder::new().mix(Mix::DRY)));
-            let track = match &mut *manager {
-                Manager::Device(m) => m.add_sub_track(builder),
-                Manager::Mock(m) => m.add_sub_track(builder),
-            };
-            match track {
-                Ok(track) => tracks.push(BusTrack { track, filter, reverb }),
-                Err(e) => {
-                    log::warn!("建混音分组失败，声音直接进总输出: {e}");
-                    return;
-                }
-            }
-        }
-        self.tracks = Some(tracks);
-    }
-
-    fn track(&mut self, bus: Bus) -> Option<&mut BusTrack> {
-        self.tracks.as_mut().and_then(|t| t.get_mut(bus.index()))
-    }
-
-    pub fn bus_volume(&self, bus: Bus) -> f32 {
-        self.buses[bus.index()].volume
-    }
-
-    /// 分组的音量（线性），`fade` 秒里过渡过去。
-    pub fn set_bus_volume(&mut self, bus: Bus, volume: f32, fade: f32) {
-        let volume = if volume.is_finite() { volume.max(0.0) } else { 1.0 };
-        self.buses[bus.index()].volume = volume;
-        if let Some(t) = self.track(bus) {
-            t.track.set_volume(decibels(volume), tween(fade));
-        }
-    }
-
-    /// 低通的截止频率（赫兹），`None` 是关。
-    pub fn lowpass(&self, bus: Bus) -> Option<f32> {
-        self.buses[bus.index()].lowpass
-    }
-
-    /// 打开（`Some(赫兹)`，截到 20 到 20000）或关掉低通滤波：水下、暂停时的闷声。
-    pub fn set_lowpass(&mut self, bus: Bus, cutoff: Option<f32>, fade: f32) {
-        let cutoff = cutoff.filter(|c| !c.is_nan()).map(|c| c.clamp(CUTOFF.0, CUTOFF.1));
-        self.buses[bus.index()].lowpass = cutoff;
-        if let Some(t) = self.track(bus) {
-            t.filter.set_cutoff(f64::from(cutoff.unwrap_or(CUTOFF.1)), tween(fade));
-        }
-    }
-
-    pub fn reverb(&self, bus: Bus) -> f32 {
-        self.buses[bus.index()].reverb
-    }
-
-    /// 混响的湿声比例（截到 0 到 1），0 等于关掉。
-    pub fn set_reverb(&mut self, bus: Bus, mix: f32, fade: f32) {
-        let mix = if mix.is_finite() { mix.clamp(0.0, 1.0) } else { 0.0 };
-        self.buses[bus.index()].reverb = mix;
-        if let Some(r) = self.track(bus).and_then(|t| t.reverb.as_mut()) {
-            r.set_mix(Mix(mix), tween(fade));
+            let (volume, lowpass, reverb) = (self.buses[bus.index()].volume, self.buses[bus.index()].lowpass, self.buses[bus.index()].reverb);
+            self.set_bus_volume(bus, volume, 0.0);
+            self.set_lowpass(bus, lowpass, 0.0);
+            self.set_reverb(bus, reverb, 0.0);
         }
     }
 
     pub fn listener(&self) -> Vec2 {
-        self.listener
+        self.ears.at
     }
 
     /// 听的人在哪（按位置的声音下一帧跟着变）。
     pub fn set_listener(&mut self, at: Vec2) {
         if at.is_finite() {
-            self.listener = at;
+            self.ears.at = at;
         }
     }
 
     pub fn range(&self) -> f32 {
-        self.range
+        self.ears.range
     }
 
     /// 按位置的声音多远就听不见；不是正数时用默认的 1000。
     pub fn set_range(&mut self, range: f32) {
-        self.range = if range.is_finite() && range > 0.0 { range } else { DEFAULT_RANGE };
+        self.ears.range = if range.is_finite() && range > 0.0 { range } else { DEFAULT_RANGE };
     }
 
     /// 挪一个按位置的声音（不按位置的不管）。
@@ -330,11 +264,23 @@ impl Audio {
             let volume = sane_volume(volume);
             p.volume = volume;
             p.fade_until = Some(Instant::now() + tween(fade).duration);
-            p.mix.0 = match p.at {
-                Some(at) => spatial(volume, p.pan, at, self.listener, self.range).0,
-                None => volume,
-            };
+            p.mix.0 = p.placed(&self.ears).0;
             p.handle.set_volume(decibels(p.mix.0), tween(fade));
+        }
+    }
+
+    /// 改一个声音的音高（播放速度，限制在 0.1 到 8）；多普勒在它上面再乘。
+    pub fn set_voice_pitch(&mut self, voice: Voice, pitch: f32) {
+        if let Some((.., play)) = self.pending.iter_mut().find(|(v, ..)| *v == voice) {
+            play.pitch = pitch;
+        } else if let Some(p) = self.playing.get_mut(&voice) {
+            let pitch = clamp_pitch(pitch);
+            if p.pitch != pitch {
+                // 不带位置的声音没有每帧的更新：这里直接设
+                p.rate = clamp_pitch(p.rate / p.pitch * pitch);
+                p.pitch = pitch;
+                p.handle.set_playback_rate(f64::from(p.rate), tween(DOPPLER_FADE));
+            }
         }
     }
 
@@ -376,13 +322,7 @@ impl Audio {
             return;
         }
         self.suspended = suspended;
-        for bus in self.tracks.iter_mut().flatten() {
-            if suspended {
-                bus.track.pause(tween(0.05));
-            } else {
-                bus.track.resume(tween(0.05));
-            }
-        }
+        self.pause_buses(suspended);
         self.apply_master();
     }
 
@@ -400,11 +340,6 @@ impl Audio {
     #[cfg(test)]
     pub(crate) fn position(&self, voice: Voice) -> Option<f64> {
         self.playing.get(&voice).map(|p| p.handle.position())
-    }
-
-    /// 这个分组的轨道上有几个声音（含正在淡出的；没有音频设备时是 0）。
-    pub fn bus_sounds(&self, bus: Bus) -> usize {
-        self.tracks.as_ref().map_or(0, |t| t[bus.index()].track.num_sounds())
     }
 
     /// 测试用：上一次按位置更新用的过渡秒数。
@@ -478,8 +413,8 @@ fn settings(data: &StaticSoundData, play: &Play, (volume, pan): (f32, f32)) -> S
     if play.looped { data.loop_region(..) } else { data }
 }
 
-/// 开始加载好了的声音（按上限丢掉多的），清理播完的。
-pub(crate) fn update(mut audio: ResMut<Audio>, sounds: Res<Assets<Sound>>) {
+/// 开始加载好了的声音（按上限丢掉多的），清理播完的，带位置的声音跟着听的人和自己的位置更新。
+pub(crate) fn update(mut audio: ResMut<Audio>, sounds: Res<Assets<Sound>>, time: Res<Time>) {
     let audio = &mut *audio;
     if audio.locked {
         match crate::take_unlocked() {
@@ -487,12 +422,21 @@ pub(crate) fn update(mut audio: ResMut<Audio>, sounds: Res<Assets<Sound>>) {
             None => return,
         }
     }
+    audio.collect_chains();
+    audio.probes_left = OCCLUSION_BUDGET;
     audio.playing.retain(|_, p| p.handle.state() != PlaybackState::Stopped);
-    // 按位置的声音：听的人或声音挪了就更新音量和声像
-    let (listener, range) = (audio.listener, audio.range);
+    // 声音不受时间缩放影响：按真实时间算速度和遮挡的过渡
+    let dt = time.real_delta;
+    let ears = audio.ears;
+    audio.motion.step(ears.at.extend(0.0), dt);
+    audio.motion3.step(ears.at3, dt);
+    let (velocity, velocity3, speed_of_sound) = (audio.motion.velocity, audio.motion3.velocity, audio.speed_of_sound);
     for p in audio.playing.values_mut() {
-        let Some(at) = p.at else { continue };
-        let mix = spatial(p.volume, p.pan, at, listener, range);
+        let Some(at) = p.position() else { continue };
+        p.motion.step(at, dt);
+        p.occlusion.step(dt);
+        // 音量和声像：听的人或声音挪了、遮挡变了就更新
+        let mix = p.placed(&ears);
         if mix != p.mix {
             // 游戏设的淡变还没走完：用剩下的时间，不把它缩成 50 ms
             let left = p.fade_until.map_or(0.0, |end| end.saturating_duration_since(Instant::now()).as_secs_f32());
@@ -505,9 +449,25 @@ pub(crate) fn update(mut audio: ResMut<Audio>, sounds: Res<Assets<Sound>>) {
                 p.last_fade = fade;
             }
         }
+        // 多普勒：3D 的声音对 3D 的听者，2D 的对 2D 的
+        let (listener, listener_velocity) = if p.at3.is_some() { (ears.at3, velocity3) } else { (ears.at.extend(0.0), velocity) };
+        let rate = clamp_pitch(p.pitch * doppler(p.motion.velocity, listener_velocity, at, listener, speed_of_sound, p.emit.doppler));
+        if (rate - p.rate).abs() > RATE_EPSILON || (rate == p.pitch && p.rate != p.pitch) {
+            p.handle.set_playback_rate(f64::from(rate), tween(DOPPLER_FADE));
+            p.rate = rate;
+        }
+        // 遮挡的低通
+        if let Some(own) = &mut p.own {
+            let cutoff = p.occlusion.mix().1;
+            if (cutoff - own.cutoff).abs() > 1.0 || (cutoff != own.cutoff && p.occlusion.amount == 0.0) {
+                own.filter.set_cutoff(f64::from(cutoff), tween(SPATIAL_FADE));
+                own.cutoff = cutoff;
+            }
+        }
     }
     let mut starts: HashMap<Handle<Sound>, u8> = HashMap::new();
     let mut voices = audio.playing.values().filter(|p| !p.looped).count();
+    let mut own_tracks = audio.playing.values().filter(|p| p.own.is_some()).count();
     let pending = std::mem::take(&mut audio.pending);
     for (voice, sound, play) in pending {
         let data = match sounds.state(sound) {
@@ -532,21 +492,27 @@ pub(crate) fn update(mut audio: ResMut<Audio>, sounds: Res<Assets<Sound>>) {
             continue;
         }
         let pan = if play.pan.is_nan() { 0.0 } else { play.pan.clamp(-1.0, 1.0) };
-        let play = Play { volume: sane_volume(play.volume), ..play };
-        let mix = match play.at {
-            Some(at) => spatial(play.volume, pan, at, listener, range),
-            None => (play.volume, pan),
-        };
+        let play = Play { volume: sane_volume(play.volume), pitch: clamp_pitch(play.pitch), emit: play.emit.sane(), ..play };
+        let mix = ears.mix(play.volume, pan, play.at, play.at3, &play.emit);
         let data = settings(&data, &play, mix);
-        // 进分组的轨道；没有分组时直接进总输出
-        let started = match audio.tracks.as_mut().and_then(|t| t.get_mut(play.bus.index())) {
-            Some(t) => t.track.play(data).map_err(|e| e.to_string()),
+        let placed = play.at.is_some() || play.at3.is_some();
+        // 进分组的轨道（开了遮挡、带位置的进自己的子轨道）；没有分组时直接进总输出
+        let (started, own) = match audio.tracks.as_mut().and_then(|t| t.get_mut(play.bus.index())) {
+            Some(t) => {
+                let mut own = (play.emit.occlude && placed && own_tracks < MAX_OCCLUSION_TRACKS).then(|| own_track(t)).flatten();
+                let started = match &mut own {
+                    Some(own) => own.track.play(data),
+                    None => t.track.play(data),
+                };
+                (started.map_err(|e| e.to_string()), own)
+            }
             None => {
                 let Some(manager) = &audio.manager else { continue };
-                match &mut *manager.lock().unwrap_or_else(|e| e.into_inner()) {
+                let started = match &mut *manager.lock().unwrap_or_else(|e| e.into_inner()) {
                     Manager::Device(m) => m.play(data).map_err(|e| e.to_string()),
                     Manager::Mock(m) => m.play(data).map_err(|e| e.to_string()),
-                }
+                };
+                (started, None)
             }
         };
         match started {
@@ -555,15 +521,24 @@ pub(crate) fn update(mut audio: ResMut<Audio>, sounds: Res<Assets<Sound>>) {
                     *count += 1;
                     voices += 1;
                 }
+                own_tracks += usize::from(own.is_some());
                 audio.playing.insert(
                     voice,
                     Playing {
                         handle,
                         looped: play.looped,
+                        bus: play.bus,
                         volume: play.volume,
                         pan,
                         at: play.at,
+                        at3: play.at3,
+                        emit: play.emit,
                         mix,
+                        pitch: play.pitch,
+                        rate: play.pitch,
+                        motion: Motion::default(),
+                        occlusion: Occlusion::default(),
+                        own,
                         fade_until: None,
                         #[cfg(test)]
                         last_fade: 0.0,
