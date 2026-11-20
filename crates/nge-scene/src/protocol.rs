@@ -37,6 +37,9 @@ pub struct Scene {
     /// 3D 粒子发射器（见 docs/particles3d.md）。
     #[serde(deserialize_with = "crate::lenient::emitters3d")]
     pub emitters3d: Vec<crate::particles3d::Emitter3dNode>,
+    /// 3D 贴地光环与贴花（古代法阵、范围指示器、脚底阴影）。
+    #[serde(deserialize_with = "crate::lenient::decals3d")]
+    pub decals3d: Vec<crate::decals3d::Decal3dNode>,
     #[serde(deserialize_with = "crate::lenient::camera3d")]
     pub camera3d: Option<Camera3dNode>,
     #[serde(deserialize_with = "crate::lenient::lights")]

@@ -268,14 +268,15 @@ fn move_platforms(time: Res<Time>, mut st: ResMut<ExplorerState>, mut q: Query<(
                 _ => st.plat1_origin.insert((entity, t.translation)).1,
             };
             let p = (elapsed / 7.0) * std::f32::consts::TAU;
-            t.translation = origin + Vec3::new(0.0, 32.0 * p.sin(), 60.0 * p.cos());
+            // 沿山坡倾角斜向往返（向北靠山时升高、向南靠坡底时降低），避免石台切入山体
+            t.translation = origin + Vec3::new(0.0, -28.0 * p.sin(), 55.0 * p.sin());
         } else if id.0 == PLAT_2 {
             let origin = match st.plat2_origin {
                 Some((e, at)) if e == entity => at,
                 _ => st.plat2_origin.insert((entity, t.translation)).1,
             };
             let p = (elapsed / 8.0) * std::f32::consts::TAU;
-            t.translation = origin + Vec3::new(55.0 * p.sin(), 40.0 * p.cos(), 0.0);
+            t.translation = origin + Vec3::new(55.0 * p.sin(), 32.0 * p.cos(), 0.0);
         }
     }
 }

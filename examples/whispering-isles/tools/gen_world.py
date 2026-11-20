@@ -1194,8 +1194,8 @@ def build_world_json():
     camp = {"x": 0, "y": round(terrain_height(0, 220), 1), "z": 220}
     spawn = {"x": 0, "y": round(terrain_height(0, 285) + 28, 1), "z": 285}
     platforms = [
-        {"id": "sky-plat-1", "x": 0, "y": round(terrain_height(0, -410) + 45, 1), "z": -410},
-        {"id": "sky-plat-2", "x": 0, "y": round(terrain_height(0, -560) + 90, 1), "z": -560},
+        {"id": "sky-plat-1", "x": 0, "y": round(terrain_height(0, -410) + 86, 1), "z": -410},
+        {"id": "sky-plat-2", "x": 0, "y": round(terrain_height(0, -560) + 112, 1), "z": -560},
     ]
 
     data = {

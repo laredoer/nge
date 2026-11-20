@@ -1,5 +1,5 @@
 // 风语群岛 3D 开放世界场景声明：动态昼夜天空、PCSS 级联软阴影、地形 trimesh、物理遗迹门、浮空石台与 3D 粒子。
-import type { BarNode, BubbleNode, Emitter3dNode, Joint3dNode, LightNode, ModelNode, PostNode, Scene, SkyNode, FogNode } from "../../ts/nge";
+import type { BarNode, BubbleNode, Decal3dNode, Emitter3dNode, Joint3dNode, LightNode, ModelNode, PostNode, Scene, SkyNode, FogNode } from "../../ts/nge";
 import world from "./world.json";
 
 export type TimeOfDay = 0 | 1 | 2 | 3; // 0 晨曦 · 1 晴空 · 2 暮霞 · 3 星夜
@@ -536,6 +536,27 @@ export function worldScene(
         padding: 6,
         typing: 16,
       } satisfies BubbleNode,
+    ],
+    // 3D 贴地光环与法阵实战：探索者脚底风灵光环 + 5 座圣坛脚下旋转古代符文法阵 + 浮空风灵脚底接触影
+    decals3d: [
+      { id: "hero-ring", kind: "ring", follow: "explorer", size: 46, color: "#48f5ffaa", spin: 28, pulse: 0.08, lift: 2.5 } satisfies Decal3dNode,
+      { id: "wisp-shadow", kind: "shadow", follow: "wind-wisp", size: 28, lift: 2.0 } satisfies Decal3dNode,
+      { id: "sentinel-shadow", kind: "shadow", follow: "camp-sentinel", size: 34, lift: 2.0 } satisfies Decal3dNode,
+      ...SHRINES.map((s): Decal3dNode => {
+        const awake = awakened.has(s.id);
+        return {
+          id: `rune-${s.id}`,
+          kind: "rune",
+          x: s.x,
+          y: s.y,
+          z: s.z,
+          size: awake ? 148 : 118,
+          color: awake ? "#38f2ffdd" : "#ffca58bb",
+          spin: awake ? 26 : 12,
+          pulse: awake ? 0.06 : 0.03,
+          lift: 3.0,
+        };
+      }),
     ],
     models,
     joints3d,

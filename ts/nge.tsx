@@ -475,6 +475,32 @@ export interface TrailNode {
   blend?: Blend;
 }
 
+/** 3D 贴地光环与贴花（`scene.decals3d`）：内置 `ring` / `rune` / `pulse` / `shadow` 程序化纹理，自动贴合地形起伏。 */
+export interface Decal3dNode {
+  id: string;
+  /** 内置图案："ring"（光环）| "rune"（古代法阵）| "pulse"（扩散波纹）| "shadow"（柔和脚底影）。默认 "ring"。 */
+  kind?: "ring" | "rune" | "pulse" | "shadow" | (string & {});
+  /** 跟随目标 3D 模型的 id；不写时使用 (x, y, z) 固定世界坐标。 */
+  follow?: string;
+  x?: number;
+  y?: number;
+  z?: number;
+  /** 贴花直径（世界单位），默认 40。 */
+  size?: number;
+  /** 颜色（"#rrggbb" / "#rrggbbaa"）。 */
+  color?: string;
+  /** 自转速度（度 / 秒），默认 0。 */
+  spin?: number;
+  /** 呼吸脉冲缩放幅度（0–1），默认 0。 */
+  pulse?: number;
+  /** 混合方式："add"（发光叠加）或 "alpha"（普通透明）。 */
+  blend?: Blend;
+  /** 是否按 `NavMesh3d` 自动采样地面高度贴地，默认 true。 */
+  ground?: boolean;
+  /** 离地微抬高度（默认 2.5，防止与地形 Z-fighting）。 */
+  lift?: number;
+}
+
 /** 3D 粒子发射器（见 docs/particles3d.md）：粒子是朝着相机的方片，被模型挡住，自己不挡别的。 */
 export interface Emitter3dNode {
   id: string;
@@ -913,6 +939,8 @@ export interface Scene {
   models?: ModelNode[];
   /** 3D 粒子发射器。 */
   emitters3d?: Emitter3dNode[];
+  /** 3D 贴地光环与贴花（魔法阵、技能圈、脚底投影）。 */
+  decals3d?: Decal3dNode[];
   camera3d?: Camera3dNode;
   lights?: LightNode[];
   ambient?: { color?: string; brightness?: number };

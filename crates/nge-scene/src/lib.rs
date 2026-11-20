@@ -14,6 +14,7 @@ mod behave;
 mod behavior;
 mod camera;
 mod camera3d_rig;
+mod decals3d;
 #[cfg(not(all(feature = "physics3d", feature = "ai", feature = "net")))]
 mod disabled;
 mod ground_graphs;
@@ -73,6 +74,7 @@ pub use audio3d::{ConeNode, ListenerNode, OnLost, RolloffName, SoundEmitterNode,
 pub use behave::{Spin, Tappable};
 pub use camera::{SHAKE, Shake};
 pub use camera3d_rig::Camera3dRigUpdated;
+pub use decals3d::{Decal3dNode, DecalBlend};
 pub use effects::{Light2dNode, LightingNode, MaskedNode, PostNode};
 pub use joints::{JointKindName, JointNode, MotorNode};
 pub use joints3d::{Joint3dKindName, Joint3dNode};
@@ -242,6 +244,7 @@ impl Plugin for ScenePlugin {
             .init_resource::<nge_ai::NavMesh3d>()
             .init_resource::<nav3d::NavMesh3dCache>()
             .init_resource::<camera3d_rig::Camera3dRig>()
+            .init_resource::<decals3d::DecalTextures>()
             .add_command(PRELOAD)
             .add_event(PRELOADED)
             .add_event(TRANSITION)
@@ -291,6 +294,7 @@ impl Plugin for ScenePlugin {
                     .before(nge_audio::AudioUpdated),
             )
             .add_systems(PostUpdate, camera3d_rig::camera3d_rig.in_set(camera3d_rig::Camera3dRigUpdated).after(PhysicsStepped).after(nge_physics3d::Physics3dStepped).after(attach::attach).after(nge_render3d::SocketsUpdated).before(behave::follow))
+            .add_systems(PostUpdate, decals3d::draw_decals3d.after(PhysicsStepped).after(nge_physics3d::Physics3dStepped).after(attach::attach).after(nge_render3d::SocketsUpdated))
             .add_systems(PostUpdate, (behave::follow, physics::collide.after(PhysicsStepped), audio::listen.after(camera::camera_rig).before(nge_audio::AudioUpdated), camera::camera_rig.after(PhysicsStepped), match2d::match_2d.after(camera::camera_rig)));
     }
 }
