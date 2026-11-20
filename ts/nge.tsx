@@ -1296,7 +1296,7 @@ export function gameView<P extends object = {}, E extends object = {}>(
 // 本地化见 docs/localization.md
 export { i18n, missing, plural, resolveLocale, type I18n, type I18nOptions, type Message, type Messages, type Params, type PluralCategory } from "./i18n";
 // 联网见 docs/networking.md
-export { netRoom, netSend, relayHttp, remoteId, type NetEvent, type NetNode, type NetPeer, type NetRoom, type NetStatus } from "./net";
+export { ARENA_KEY, netRoom, netScore, netSend, relayHttp, remoteId, type ArenaLayout, type NetEvent, type NetNode, type NetPeer, type NetRoom, type NetStats, type NetStatus } from "./net";
 export { httpClient, json, type HttpClient, type HttpOptions, type HttpReply, type HttpResult } from "./http";
 export { preloader, transitions, type LoadFailure, type Loading, type Prefab, type PrefabInstance, type PreloadEvent, type Preloader, type TextureOptions, type TransitionEvent, type TransitionNode, type Transitions } from "./flow";
 export { queries3d, type Hit3d, type Queries3d, type Query3dOptions, type Query3dReply, type QueryShape3d } from "./physics3d";

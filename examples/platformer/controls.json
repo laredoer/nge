@@ -14,7 +14,8 @@
       "lang": { "kind": "button", "keys": ["KeyL"] },
       "net": { "kind": "button", "keys": ["KeyN"] },
       "remap": { "kind": "button", "keys": ["KeyK"] },
-      "lab": { "kind": "button", "keys": ["KeyG"] }
+      "lab": { "kind": "button", "keys": ["KeyG"] },
+      "tag": { "kind": "button", "keys": ["KeyJ", "GamepadX"] }
     },
     {
       "move": {

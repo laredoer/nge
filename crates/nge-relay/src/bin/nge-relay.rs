@@ -1,14 +1,22 @@
-//! `cargo run -p nge-relay -- --addr 127.0.0.1:9100 --room-size 8 --max-frame 8192`
+//! `cargo run -p nge-relay -- --dev`（本机开发，不鉴权）
+//! `NGE_AUTH_SECRET=… cargo run -p nge-relay`（要鉴权：token 用 `nge-token` 签）
+//! 其他参数：`--addr 127.0.0.1:9100 --room-size 8 --max-frame 8192 --rate 60 --max-conns 1024`
 
+use nge_net::auth::{SECRET_ENV, Secret};
 use nge_relay::Config;
 
-const USAGE: &str = "用法: nge-relay [--addr 127.0.0.1:9100] [--room-size 8] [--max-frame 8192] [--rate 60] [--max-conns 1024]";
+const USAGE: &str = "用法: nge-relay (--dev | 设环境变量 NGE_AUTH_SECRET) [--addr 127.0.0.1:9100] [--room-size 8] [--max-frame 8192] [--rate 60] [--max-conns 1024]";
 
 fn main() {
     let mut addr = "127.0.0.1:9100".to_owned();
     let mut config = Config::default();
+    let mut dev = false;
     let mut args = std::env::args().skip(1);
     while let Some(flag) = args.next() {
+        if flag == "--dev" {
+            dev = true;
+            continue;
+        }
         let value = args.next();
         let ok = match (flag.as_str(), value.as_deref()) {
             ("--addr", Some(v)) => {
@@ -26,6 +34,14 @@ fn main() {
             std::process::exit(2);
         }
     }
+    // 鉴权要显式选：有密钥就鉴权，`--dev` 才不鉴权，两个都没有或者都有都不起
+    config.auth = match (Secret::from_env(SECRET_ENV), dev) {
+        (Ok(Some(_)), true) => fail(&format!("{SECRET_ENV} 和 --dev 只能二选一")),
+        (Ok(Some(secret)), false) => Some(secret),
+        (Ok(None), true) => None,
+        (Ok(None), false) => fail(&format!("没有鉴权密钥：设环境变量 {SECRET_ENV}（至少 16 字节），或者本机开发加 --dev 不鉴权\n{USAGE}")),
+        (Err(e), _) => fail(&format!("{SECRET_ENV} 不能用: {e}")),
+    };
     let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
         Ok(r) => r,
         Err(e) => {
@@ -35,11 +51,17 @@ fn main() {
     };
     let result = runtime.block_on(async {
         let listener = tokio::net::TcpListener::bind(&addr).await?;
-        println!("中继在 ws://{} 上听着（房间最多 {} 人，排行榜 http://{}/scores）", listener.local_addr()?, config.room_size, listener.local_addr()?);
+        let mode = if config.auth.is_some() { "要鉴权" } else { "开发模式，不鉴权" };
+        println!("中继在 ws://{} 上听着（{mode}，房间最多 {} 人，排行榜 http://{}/scores）", listener.local_addr()?, config.room_size, listener.local_addr()?);
         nge_relay::serve(listener, config).await
     });
     if let Err(e) = result {
         eprintln!("中继停了: {e}");
         std::process::exit(1);
     }
+}
+
+fn fail(why: &str) -> ! {
+    eprintln!("{why}");
+    std::process::exit(2);
 }

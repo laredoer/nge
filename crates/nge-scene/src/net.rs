@@ -19,6 +19,12 @@ pub struct NetNode {
     pub rate: Option<f32>,
     /// 远端显示的延迟（毫秒），默认 100。
     pub delay: Option<f32>,
+    /// 房间的模式：`"relay"`（默认，各自广播自己）或 `"authority"`（服务端跑模拟，见 docs/net-more.md）。
+    pub mode: Option<String>,
+    /// 鉴权的凭据（`nge-token` 签的整串）；不写时原生用环境变量 `NGE_TOKEN`。
+    pub token: Option<String>,
+    /// 权威模式里自己的角色的精灵 id：位置由预测写。
+    pub predict: Option<String>,
 }
 
 /// `net:<成员>:<key>` → (成员, key)。
@@ -35,7 +41,7 @@ pub(crate) use enabled::register;
 mod enabled {
     use bevy_ecs::prelude::*;
     use nge_ecs::{App, PostUpdate, PreUpdate};
-    use nge_net::{DEFAULT_URL, HttpPlugin, KeepOnLeave, Net, NetPlugin, NetSet, NetSync, Remote, Target};
+    use nge_net::{DEFAULT_URL, HttpPlugin, KeepOnLeave, Mode, Net, NetPlugin, NetSet, NetSync, Predicted, Remote, Target};
     use nge_physics2d::PhysicsStepped;
 
     use super::{NetNode, parse_remote};
@@ -65,7 +71,16 @@ mod enabled {
 
     fn target(node: &NetNode) -> Target {
         let url = node.url.clone().or_else(|| std::env::var("NGE_RELAY").ok()).unwrap_or_else(|| DEFAULT_URL.to_owned());
-        Target { url, room: node.room.clone(), name: node.name.clone().unwrap_or_else(|| "player".into()) }
+        let mode = match node.mode.as_deref() {
+            Some("authority") => Mode::Authority,
+            None | Some("relay") => Mode::Relay,
+            Some(other) => {
+                log::warn!("net.mode 只认 relay / authority，{other} 按 relay");
+                Mode::Relay
+            }
+        };
+        let token = node.token.clone().or_else(|| std::env::var("NGE_TOKEN").ok()).filter(|t| !t.trim().is_empty());
+        Target { url, room: node.room.clone(), name: node.name.clone().unwrap_or_else(|| "player".into()), mode, token }
     }
 
     /// 按场景的 `net` 连或断，设好频率和延迟。
@@ -80,10 +95,17 @@ mod enabled {
         }
     }
 
-    /// 给 `sync` 里的精灵加 `NetSync`、给远端精灵加 `Remote`；不在 `sync` 里了的去掉。
-    fn tag(scene: Res<Scene>, entities: Query<(Entity, &SceneId, Has<NetSync>, Has<Remote>)>, mut commands: Commands) {
+    /// 给 `sync` 里的精灵加 `NetSync`、`predict` 的加 `Predicted`、远端精灵加 `Remote`；不再是的去掉。
+    fn tag(scene: Res<Scene>, entities: Query<(Entity, &SceneId, Has<NetSync>, Has<Remote>, Has<Predicted>)>, mut commands: Commands) {
         let sync: &[String] = scene.net.as_ref().map_or(&[], |n| &n.sync);
-        for (entity, id, synced, remote) in &entities {
+        let predict = scene.net.as_ref().and_then(|n| n.predict.as_deref());
+        for (entity, id, synced, remote, predicted) in &entities {
+            let want = predict == Some(id.0.as_str());
+            if want && !predicted {
+                commands.entity(entity).insert(Predicted);
+            } else if !want && predicted {
+                commands.entity(entity).remove::<Predicted>();
+            }
             let want = sync.contains(&id.0);
             if want && !synced {
                 commands.entity(entity).insert(NetSync { key: id.0.clone() });
@@ -153,6 +175,28 @@ mod tests {
 
             frame(&mut app, Some(json!({ "sprites": [{ "id": "me" }] })));
             assert_eq!(app.world().resource::<Net>().status(), Status::Offline, "去掉 net 就断开");
+        }
+
+        #[test]
+        fn authority_mode_token_and_the_predicted_sprite() {
+            use nge_net::{Mode, Predicted};
+            let fake = FakeRelay::default();
+            let mut app = app_with(NetPlugin::new().connector(fake.connector()));
+            let scene = json!({
+                "net": { "url": "ws://relay:1", "room": "arena", "mode": "authority", "token": "v1.a.b.c", "predict": "hero" },
+                "sprites": [{ "id": "hero" }, { "id": "box" }],
+            });
+            frame(&mut app, Some(scene.clone()));
+            let target = app.world().resource::<Net>().target().cloned().unwrap();
+            assert_eq!((target.mode, target.token.as_deref()), (Mode::Authority, Some("v1.a.b.c")));
+            let (hero, other) = (find(&mut app, "hero"), find(&mut app, "box"));
+            assert!(app.world().get::<Predicted>(hero).is_some() && app.world().get::<Predicted>(other).is_none());
+            let mut plain = scene.clone();
+            plain["net"]["mode"] = json!("什么");
+            plain["net"]["predict"] = json!(null);
+            frame(&mut app, Some(plain));
+            assert_eq!(app.world().resource::<Net>().target().unwrap().mode, Mode::Relay, "不认得的按 relay");
+            assert!(app.world().get::<Predicted>(hero).is_none());
         }
 
         #[test]

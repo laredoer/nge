@@ -18,6 +18,10 @@ serde.workspace = true
 postcard = { version = "1", default-features = false, features = ["use-std"] }
 log.workspace = true
 web-time.workspace = true
+# 鉴权的 token 签名（HMAC-SHA256）和编码
+hmac = "0.12"
+sha2 = "0.10"
+base64 = "0.22"
 bevy_ecs = { workspace = true, optional = true }
 nge-ecs = { workspace = true, optional = true }
 nge-core = { workspace = true, optional = true }

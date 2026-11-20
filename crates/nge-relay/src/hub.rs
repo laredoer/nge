@@ -1,10 +1,17 @@
-//! 房间逻辑（纯逻辑，时间由调用方给，单位秒）：加入、转发、进出通知、心跳超时、人数 / 大小 / 频率上限。
-//! 每个调用返回要发的帧和要断的连接，`server` 照着做。
+//! 房间逻辑（纯逻辑，时间由调用方给，单位秒）：加入、转发、进出通知、心跳超时、人数 / 大小 / 频率上限；
+//! 鉴权（配了密钥时 `Hello` 要带 token，见 `nge_net::auth`）、权威房间（`step` 按固定 tick 推进，见 `nge_net::arena`）、
+//! 走连接交的成绩（按身份归属）。每个调用返回要发的帧和要断的连接，`server` 照着做。
 
 use std::collections::{BTreeMap, HashMap};
+use std::sync::{Arc, Mutex};
 
+use nge_net::arena::delta::InputMsg;
+use nge_net::arena::room::ArenaRoom;
+use nge_net::auth::{NONCE, Secret};
 use nge_net::limit::TokenBucket;
-use nge_net::proto::{self, ClientMsg, ErrorCode, MAX_NAME, MAX_ROOM, PROTOCOL_VERSION, Peer, PeerId, RelayMsg};
+use nge_net::proto::{self, ClientMsg, ErrorCode, HelloAuth, MAX_NAME, MAX_ROOM, Mode, PROTOCOL_VERSION, Peer, PeerId, RelayMsg};
+
+use crate::scores::{Leaderboard, NAME_TAKEN};
 
 pub type ConnId = u32;
 
@@ -27,11 +34,13 @@ pub struct Config {
     pub max_conns: usize,
     /// 每条连接最多排几帧待发：排满了当慢客户端踢掉。
     pub outbox: usize,
+    /// 鉴权的密钥：有就要求每条连接带 token；`None` 是本机开发用的免鉴权模式（`nge-relay` 要 `--dev` 才给 `None`）。
+    pub auth: Option<Secret>,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Self { room_size: 8, max_frame: 8 * 1024, rate: 60.0, burst: 120.0, max_dropped: 600, idle_timeout: 10.0, hello_timeout: 5.0, max_conns: 1024, outbox: 256 }
+        Self { room_size: 8, max_frame: 8 * 1024, rate: 60.0, burst: 120.0, max_dropped: 600, idle_timeout: 10.0, hello_timeout: 5.0, max_conns: 1024, outbox: 256, auth: None }
     }
 }
 
@@ -45,6 +54,10 @@ pub enum Out {
 struct Conn {
     room: Option<String>,
     name: String,
+    /// 交成绩用的名字（鉴权时是 token 里的，开发模式是 `Hello` 里的）和账号。
+    owner: Option<String>,
+    score_name: String,
+    nonce: [u8; NONCE],
     opened: f64,
     last: f64,
     bucket: TokenBucket,
@@ -56,17 +69,54 @@ pub struct Hub {
     conns: HashMap<ConnId, Conn>,
     /// 房间名 → 成员（按进来的先后）。
     rooms: BTreeMap<String, Vec<ConnId>>,
+    /// 权威房间：房间名 → 模拟（成员还是记在 `rooms` 里）。
+    arenas: BTreeMap<String, ArenaRoom>,
+    scores: Arc<Mutex<Leaderboard>>,
+    /// `now` 为 0 时的 Unix 秒（判 token 过期）。
+    unix_base: u64,
+    nonce_seed: u64,
+    nonces: u64,
 }
 
 impl Hub {
     pub fn new(config: Config) -> Self {
-        Self { config, conns: HashMap::new(), rooms: BTreeMap::new() }
+        let since = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+        Self {
+            config,
+            conns: HashMap::new(),
+            rooms: BTreeMap::new(),
+            arenas: BTreeMap::new(),
+            scores: Arc::default(),
+            unix_base: since.as_secs(),
+            nonce_seed: since.as_nanos() as u64,
+            nonces: 0,
+        }
     }
 
-    /// 新连接（`id` 也是它在房间里的成员 id）。
-    pub fn connect(&mut self, id: ConnId, now: f64) {
+    /// 改「`now` 为 0 时」的 Unix 秒（测试用）。
+    pub fn with_unix_base(self, unix_base: u64) -> Self {
+        Self { unix_base, ..self }
+    }
+
+    /// 排行榜（HTTP 那边读同一份）。
+    pub fn scores(&self) -> Arc<Mutex<Leaderboard>> {
+        self.scores.clone()
+    }
+
+    /// 新连接（`id` 也是它在房间里的成员 id）：发给它这条连接的随机数。
+    pub fn connect(&mut self, id: ConnId, now: f64) -> Vec<Out> {
         let bucket = TokenBucket::new(self.config.rate, self.config.burst);
-        self.conns.insert(id, Conn { room: None, name: String::new(), opened: now, last: now, bucket, dropped: 0 });
+        self.nonces += 1;
+        let nonce = match &self.config.auth {
+            Some(secret) => secret.nonce(self.nonce_seed, self.nonces),
+            None => {
+                let mut n = [0; NONCE];
+                n[..8].copy_from_slice(&self.nonces.to_le_bytes());
+                n
+            }
+        };
+        self.conns.insert(id, Conn { room: None, name: String::new(), owner: None, score_name: String::new(), nonce, opened: now, last: now, bucket, dropped: 0 });
+        vec![reply(id, &RelayMsg::Challenge { nonce, required: self.config.auth.is_some() })]
     }
 
     /// 过频率限制（二进制帧和文本帧共用一个令牌桶）：`Err` 里是要发的（超频的丢掉不回，连续超出太多踢出）。
@@ -91,9 +141,11 @@ impl Hub {
             return vec![reply(id, &RelayMsg::Error(ErrorCode::TooLarge))];
         }
         match proto::decode_client(bytes, self.config.max_frame) {
-            Ok(ClientMsg::Hello { version, room, name }) => self.hello(id, version, &room, &name),
+            Ok(ClientMsg::Hello { version, room, name, mode, auth }) => self.hello(id, version, &room, &name, mode, auth.as_ref(), now),
             Ok(ClientMsg::Data { to, body }) => self.forward(id, to, body),
             Ok(ClientMsg::Ping) => vec![reply(id, &RelayMsg::Pong)],
+            Ok(ClientMsg::Input(input)) => self.input(id, &input),
+            Ok(ClientMsg::Score { board, score }) => self.score(id, &board, score),
             Err(_) => vec![reply(id, &RelayMsg::Error(ErrorCode::BadFrame))],
         }
     }
@@ -110,10 +162,14 @@ impl Hub {
     pub fn close(&mut self, id: ConnId) -> Vec<Out> {
         let Some(conn) = self.conns.remove(&id) else { return vec![] };
         let Some(room) = conn.room else { return vec![] };
+        if let Some(arena) = self.arenas.get_mut(&room) {
+            arena.leave(id);
+        }
         let members = self.rooms.entry(room.clone()).or_default();
         members.retain(|&m| m != id);
         if members.is_empty() {
             self.rooms.remove(&room);
+            self.arenas.remove(&room);
             return vec![];
         }
         let left = proto::encode(&RelayMsg::Left(id));
@@ -143,6 +199,20 @@ impl Hub {
         out
     }
 
+    /// 权威房间都走一个 tick（服务端按 `nge_net::arena::TICK_HZ` 调），给每个成员发快照。
+    pub fn step(&mut self) -> Vec<Out> {
+        let mut out = Vec::new();
+        for arena in self.arenas.values_mut() {
+            out.extend(arena.step().into_iter().map(|(id, snapshot)| reply(id, &RelayMsg::World(snapshot))));
+        }
+        out
+    }
+
+    /// 权威房间（测试、统计用）。
+    pub fn arena(&self, room: &str) -> Option<&ArenaRoom> {
+        self.arenas.get(room)
+    }
+
     /// 房间里的人（按进来的先后）。
     pub fn members(&self, room: &str) -> Vec<PeerId> {
         self.rooms.get(room).cloned().unwrap_or_default()
@@ -152,21 +222,45 @@ impl Hub {
         self.rooms.len()
     }
 
-    fn hello(&mut self, id: ConnId, version: u16, room: &str, name: &str) -> Vec<Out> {
-        if self.conns.get(&id).is_some_and(|c| c.room.is_some()) {
+    fn hello(&mut self, id: ConnId, version: u16, raw_room: &str, name: &str, mode: Mode, auth: Option<&HelloAuth>, now: f64) -> Vec<Out> {
+        let Some(conn) = self.conns.get(&id) else { return vec![] };
+        if conn.room.is_some() {
             // 已经在房间里了：换房间要重连
             return vec![reply(id, &RelayMsg::Error(ErrorCode::BadFrame))];
         }
         if version != PROTOCOL_VERSION {
             return self.kick(id, ErrorCode::Version);
         }
-        let (Some(room), Some(name)) = (proto::clean_text(room, MAX_ROOM), proto::clean_text(name, MAX_NAME)) else {
+        // 鉴权：名字和账号都以 token 里的为准
+        let (name, owner) = match (&self.config.auth, auth) {
+            (None, _) => (name.to_owned(), None),
+            (Some(_), None) => return self.kick(id, ErrorCode::Unauthorized),
+            (Some(secret), Some(a)) => {
+                let unix = self.unix_base.saturating_add(now.max(0.0) as u64);
+                match secret.verify(&a.token, &conn.nonce, raw_room, &a.proof, unix) {
+                    Ok(claims) => (claims.name, Some(claims.sub)),
+                    Err(e) => {
+                        log::info!("连接 {id} 鉴权没过: {e}");
+                        return self.kick(id, ErrorCode::Unauthorized);
+                    }
+                }
+            }
+        };
+        let (Some(room), Some(name)) = (proto::clean_text(raw_room, MAX_ROOM), proto::clean_text(&name, MAX_NAME)) else {
             return self.kick(id, ErrorCode::BadHello);
         };
         let members = self.rooms.get(&room).cloned().unwrap_or_default();
+        let existing = if self.arenas.contains_key(&room) { Mode::Authority } else { Mode::Relay };
+        if !members.is_empty() && existing != mode {
+            return self.kick(id, ErrorCode::WrongMode);
+        }
         if members.len() >= self.config.room_size {
             return self.kick(id, ErrorCode::RoomFull);
         }
+        if mode == Mode::Authority && !self.arenas.entry(room.clone()).or_default().join(id) {
+            return self.kick(id, ErrorCode::RoomFull);
+        }
+        let score_name = name.clone();
         let name = self.unique_name(&members, name);
         let peers = members.iter().filter_map(|m| self.conns.get(m).map(|c| Peer { id: *m, name: c.name.clone() })).collect();
         let max = u16::try_from(self.config.room_size).unwrap_or(u16::MAX);
@@ -176,9 +270,37 @@ impl Hub {
         if let Some(conn) = self.conns.get_mut(&id) {
             conn.room = Some(room.clone());
             conn.name = name;
+            conn.owner = owner;
+            conn.score_name = score_name;
         }
         self.rooms.entry(room).or_default().push(id);
         out
+    }
+
+    fn input(&mut self, id: ConnId, input: &InputMsg) -> Vec<Out> {
+        let Some(room) = self.conns.get(&id).and_then(|c| c.room.as_ref()) else {
+            return vec![reply(id, &RelayMsg::Error(ErrorCode::NotJoined))];
+        };
+        match self.arenas.get_mut(room) {
+            Some(arena) => {
+                arena.input(id, input);
+                vec![]
+            }
+            None => vec![reply(id, &RelayMsg::Error(ErrorCode::WrongMode))],
+        }
+    }
+
+    /// 交成绩：记在这条连接的身份名下（鉴权时是 token 里的账号和名字）。
+    fn score(&mut self, id: ConnId, board: &str, score: f64) -> Vec<Out> {
+        let Some(conn) = self.conns.get(&id).filter(|c| c.room.is_some()) else {
+            return vec![reply(id, &RelayMsg::Error(ErrorCode::NotJoined))];
+        };
+        let result = self.scores.lock().unwrap_or_else(|e| e.into_inner()).submit_as(board, conn.owner.as_deref(), &conn.score_name, score);
+        match result {
+            Ok(rank) => vec![reply(id, &RelayMsg::Ranked { board: board.to_owned(), rank: rank.map(|r| r as u32) })],
+            Err(why) if why == NAME_TAKEN => vec![reply(id, &RelayMsg::Error(ErrorCode::NameTaken))],
+            Err(_) => vec![reply(id, &RelayMsg::Error(ErrorCode::BadFrame))],
+        }
     }
 
     /// 房间里有人叫这个名字时加编号（`a#2`、`a#3`……），截短了让总长不超过上限。
@@ -228,7 +350,7 @@ mod tests {
     }
 
     fn hello(room: &str, name: &str) -> Vec<u8> {
-        encode(&ClientMsg::Hello { version: PROTOCOL_VERSION, room: room.into(), name: name.into() })
+        encode(&ClientMsg::Hello { version: PROTOCOL_VERSION, room: room.into(), name: name.into(), mode: Mode::Relay, auth: None })
     }
 
     fn data(to: Option<PeerId>, body: &[u8]) -> Vec<u8> {
@@ -311,7 +433,7 @@ mod tests {
     fn bad_hellos_are_turned_away() {
         let mut h = hub();
         h.connect(1, 0.0);
-        let old = encode(&ClientMsg::Hello { version: PROTOCOL_VERSION + 1, room: "r".into(), name: "a".into() });
+        let old = encode(&ClientMsg::Hello { version: PROTOCOL_VERSION + 1, room: "r".into(), name: "a".into(), mode: Mode::Relay, auth: None });
         assert_eq!(decoded(h.frame(1, &old, 0.0)), vec![(1, Some(RelayMsg::Error(ErrorCode::Version))), (1, None)]);
         for (room, name) in [("", "a"), ("r", "  "), ("r", "a\u{0}"), (&*"r".repeat(MAX_ROOM + 1), "a"), ("r", &*"n".repeat(MAX_NAME + 1))] {
             h.connect(2, 0.0);
@@ -413,4 +535,119 @@ mod tests {
         h.close(2);
         assert_eq!(join(&mut h, 7, "r", "a")[1].1, Some(RelayMsg::Joined(peer(7, "a#2"))));
     }
+
+    const NOW: u64 = 1_800_000_000;
+
+    fn secret() -> Secret {
+        Secret::new(b"hub-test-secret-0123456789abcdef".to_vec()).unwrap()
+    }
+
+    fn locked() -> Hub {
+        Hub::new(Config { room_size: 4, auth: Some(secret()), ..Config::default() }).with_unix_base(NOW)
+    }
+
+    fn credential(sub: &str, name: &str, exp: u64) -> nge_net::auth::Credential {
+        let claims = nge_net::auth::Claims { sub: sub.into(), name: name.into(), exp };
+        nge_net::auth::Credential::parse(&secret().issue(&claims).unwrap()).unwrap()
+    }
+
+    /// 连上，拿到随机数。
+    fn challenge(h: &mut Hub, id: ConnId) -> [u8; NONCE] {
+        match decoded(h.connect(id, 0.0)).as_slice() {
+            [(_, Some(RelayMsg::Challenge { nonce, .. }))] => *nonce,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    fn signed_hello(room: &str, mode: Mode, cred: &nge_net::auth::Credential, nonce: &[u8; NONCE]) -> Vec<u8> {
+        let auth = HelloAuth { token: cred.token.clone(), proof: cred.prove(nonce, room) };
+        encode(&ClientMsg::Hello { version: PROTOCOL_VERSION, room: room.into(), name: "随便写".into(), mode, auth: Some(auth) })
+    }
+
+    #[test]
+    fn every_connection_gets_its_own_challenge() {
+        let mut h = hub();
+        let a = decoded(h.connect(1, 0.0));
+        let b = decoded(h.connect(2, 0.0));
+        assert!(matches!(a[0].1, Some(RelayMsg::Challenge { required: false, .. })), "开发模式不要求鉴权");
+        assert_ne!(a, b);
+        let mut l = locked();
+        assert!(matches!(decoded(l.connect(1, 0.0))[0].1, Some(RelayMsg::Challenge { required: true, .. })));
+    }
+
+    #[test]
+    fn with_a_secret_only_valid_signed_hellos_get_in() {
+        let mut h = locked();
+        // 不带 token
+        challenge(&mut h, 1);
+        assert_eq!(decoded(h.frame(1, &hello("r", "a"), 0.0)), vec![(1, Some(RelayMsg::Error(ErrorCode::Unauthorized))), (1, None)]);
+        // 合格的：名字以 token 里的为准
+        let cred = credential("acct-1", "小红", NOW + 60);
+        let nonce = challenge(&mut h, 2);
+        let joined = decoded(h.frame(2, &signed_hello("r", Mode::Relay, &cred, &nonce), 0.0));
+        assert!(matches!(joined[0].1, Some(RelayMsg::Welcome { you: 2, .. })), "{joined:?}");
+        // 重放：把 2 号的握手原样拿到 3 号连接上发
+        challenge(&mut h, 3);
+        assert_eq!(decoded(h.frame(3, &signed_hello("r", Mode::Relay, &cred, &nonce), 0.0)), vec![(3, Some(RelayMsg::Error(ErrorCode::Unauthorized))), (3, None)]);
+        // 过期：服务端的时间走过了 exp
+        let nonce = challenge(&mut h, 4);
+        assert_eq!(decoded(h.frame(4, &signed_hello("r", Mode::Relay, &cred, &nonce), 61.0))[0], (4, Some(RelayMsg::Error(ErrorCode::Unauthorized))));
+        // 伪造：别的密钥签的
+        let fake = nge_net::auth::Credential::parse(&Secret::new(b"not-the-server-secret-0123456789".to_vec()).unwrap().issue(&nge_net::auth::Claims { sub: "acct-1".into(), name: "小红".into(), exp: NOW + 60 }).unwrap()).unwrap();
+        let nonce = challenge(&mut h, 5);
+        assert_eq!(decoded(h.frame(5, &signed_hello("r", Mode::Relay, &fake, &nonce), 0.0))[0], (5, Some(RelayMsg::Error(ErrorCode::Unauthorized))));
+        // 房间里的人看到的是 token 里的名字
+        let nonce = challenge(&mut h, 6);
+        let other = credential("acct-2", "小明", NOW + 60);
+        let joined = decoded(h.frame(6, &signed_hello("r", Mode::Relay, &other, &nonce), 0.0));
+        assert_eq!(joined[1], (2, Some(RelayMsg::Joined(peer(6, "小明")))));
+        assert_eq!(h.members("r"), vec![2, 6]);
+    }
+
+    #[test]
+    fn scores_sent_on_the_connection_belong_to_the_account() {
+        let mut h = locked();
+        let a = credential("acct-1", "小红", NOW + 60);
+        let nonce = challenge(&mut h, 1);
+        h.frame(1, &signed_hello("r", Mode::Relay, &a, &nonce), 0.0);
+        let score = |board: &str, score: f64| encode(&ClientMsg::Score { board: board.into(), score });
+        assert_eq!(decoded(h.frame(1, &score("l1", 12.5), 0.1)), vec![(1, Some(RelayMsg::Ranked { board: "l1".into(), rank: Some(1) }))]);
+        // 另一个账号拿到了同名的 token：交不了
+        let b = credential("acct-2", "小红", NOW + 60);
+        let nonce = challenge(&mut h, 2);
+        h.frame(2, &signed_hello("r", Mode::Relay, &b, &nonce), 0.0);
+        assert_eq!(decoded(h.frame(2, &score("l1", 1.0), 0.1)), vec![(2, Some(RelayMsg::Error(ErrorCode::NameTaken)))]);
+        assert_eq!(h.scores().lock().unwrap().top("l1")[0].score, 12.5);
+        // 没进房间不能交
+        challenge(&mut h, 3);
+        assert_eq!(decoded(h.frame(3, &score("l1", 1.0), 0.1)), vec![(3, Some(RelayMsg::Error(ErrorCode::NotJoined)))]);
+    }
+
+    #[test]
+    fn authority_rooms_step_and_send_snapshots() {
+        let mut h = hub();
+        let arena = |name: &str| encode(&ClientMsg::Hello { version: PROTOCOL_VERSION, room: "arena".into(), name: name.into(), mode: Mode::Authority, auth: None });
+        h.connect(1, 0.0);
+        h.connect(2, 0.0);
+        assert!(matches!(decoded(h.frame(1, &arena("a"), 0.0))[0].1, Some(RelayMsg::Welcome { .. })));
+        h.frame(2, &arena("b"), 0.0);
+        let input = encode(&ClientMsg::Input(InputMsg { first: 1, inputs: vec![nge_net::arena::button::RIGHT], ack: None, view: 0 }));
+        assert_eq!(h.frame(1, &input, 0.0), vec![], "输入不回、不转发");
+        let out = decoded(h.step());
+        assert_eq!(out.len(), 2);
+        assert!(out.iter().all(|(_, m)| matches!(m, Some(RelayMsg::World(w)) if w.tick == 1 && w.entities.len() == 2)), "{out:?}");
+        assert!(h.arena("arena").unwrap().world()[&1].vx > 0.0, "按输入走了");
+        // 模式对不上：进不去；在中继房间里发输入：报错
+        h.connect(3, 0.0);
+        assert_eq!(decoded(h.frame(3, &hello("arena", "c"), 0.0)), vec![(3, Some(RelayMsg::Error(ErrorCode::WrongMode))), (3, None)]);
+        join(&mut h, 4, "plain", "d");
+        assert_eq!(decoded(h.frame(4, &input, 0.0)), vec![(4, Some(RelayMsg::Error(ErrorCode::WrongMode)))]);
+        // 走了的角色从世界里去掉，房间空了权威房间也去掉
+        h.close(2);
+        assert!(!h.arena("arena").unwrap().world().contains_key(&2));
+        h.close(1);
+        assert!(h.arena("arena").is_none());
+        assert!(h.step().is_empty());
+    }
+
 }

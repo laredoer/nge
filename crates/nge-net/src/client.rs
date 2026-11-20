@@ -5,7 +5,9 @@ use std::collections::BTreeMap;
 use crate::backoff::Backoff;
 use crate::limit::TokenBucket;
 use crate::link::{Connector, Frame, Link, LinkEvent, MAX_MESSAGE};
-use crate::proto::{self, ClientMsg, ErrorCode, MAX_JSON, MAX_KEY, MAX_NAME, MAX_ROOM, PROTOCOL_VERSION, Payload, Peer, PeerId, RelayMsg};
+use crate::arena::delta::{InputMsg, WorldSnapshot};
+use crate::auth::Credential;
+use crate::proto::{self, ClientMsg, ErrorCode, HelloAuth, MAX_JSON, MAX_KEY, MAX_NAME, MAX_ROOM, Mode, PROTOCOL_VERSION, Payload, Peer, PeerId, RelayMsg};
 
 /// 多久发一次心跳（秒）。
 pub const PING_INTERVAL: f64 = 2.0;
@@ -17,12 +19,21 @@ pub const MESSAGE_BURST: f64 = 30.0;
 /// 房间满了以后多久再试（秒）。
 pub const ROOM_FULL_RETRY: f64 = 30.0;
 
-/// 连到哪：中继地址、房间、自己的名字。
+/// 连到哪：中继地址、房间、自己的名字、房间的模式、鉴权的凭据（`auth::Credential` 的整串）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Target {
     pub url: String,
     pub room: String,
     pub name: String,
+    pub mode: Mode,
+    pub token: Option<String>,
+}
+
+impl Target {
+    /// 中继模式、不带鉴权。
+    pub fn relay(url: impl Into<String>, room: impl Into<String>, name: impl Into<String>) -> Self {
+        Self { url: url.into(), room: room.into(), name: name.into(), mode: Mode::Relay, token: None }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -44,6 +55,10 @@ pub enum ClientEvent {
     Joined(Peer),
     Left(Peer),
     Payload { from: PeerId, payload: Payload },
+    /// 权威房间的快照。
+    World(WorldSnapshot),
+    /// 交的成绩排第几。
+    Ranked { board: String, rank: Option<u32> },
     /// 断线、中继报错的原因（给日志和界面看）。
     Error(String),
 }
@@ -71,8 +86,14 @@ pub struct NetClient {
     last_ping: f64,
     messages: TokenBucket,
     events: Vec<ClientEvent>,
-    /// 重连也没用（协议版本不对、房间名或名字不合规）：换目标之前不再连。
+    /// 重连也没用（协议版本不对、房间名或名字不合规、鉴权不过）：换目标之前不再连。
     stopped: bool,
+    /// 带着凭据、还在等服务端的随机数：等到了再发 `Hello`。
+    awaiting_challenge: bool,
+    /// 最近一次心跳的往返（秒）。
+    rtt: Option<f64>,
+    /// 等回 `Pong` 的那次心跳是什么时候发的。
+    ping_sent: Option<f64>,
 }
 
 impl NetClient {
@@ -91,6 +112,9 @@ impl NetClient {
             messages: TokenBucket::new(MESSAGE_RATE, MESSAGE_BURST),
             events: Vec::new(),
             stopped: false,
+            awaiting_challenge: false,
+            rtt: None,
+            ping_sent: None,
         }
     }
 
@@ -119,7 +143,7 @@ impl NetClient {
             && !self.stopped
             && self.retry_at.is_none_or(|at| now >= at)
         {
-            if hello_of(target).is_none() {
+            if hello_of(target, None).is_none() {
                 self.stop("房间名或名字不合规（空的、有控制字符），不连");
                 return std::mem::take(&mut self.events);
             }
@@ -151,6 +175,7 @@ impl NetClient {
                 self.lost(format!("{SILENCE_TIMEOUT} 秒没收到中继的消息"), now);
             } else if self.status == Status::Online && now - self.last_ping >= PING_INTERVAL {
                 self.last_ping = now;
+                self.ping_sent = Some(now);
                 self.send(&ClientMsg::Ping);
             }
         }
@@ -179,6 +204,35 @@ impl NetClient {
         }
         self.send_payload(&Payload::Message { kind: kind.to_owned(), json: json.to_owned() }, to);
         Ok(())
+    }
+
+    /// 发权威房间的输入；没在线时返回 false。
+    pub fn send_input(&mut self, input: &InputMsg) -> bool {
+        if self.status != Status::Online {
+            return false;
+        }
+        self.send(&ClientMsg::Input(input.clone()));
+        true
+    }
+
+    /// 交成绩（记在这条连接的身份名下）：限频、限长。
+    pub fn send_score(&mut self, board: &str, score: f64, now: f64) -> Result<(), SendError> {
+        if self.status != Status::Online {
+            return Err(SendError::NotOnline);
+        }
+        if proto::clean_text(board, MAX_ROOM).is_none_or(|b| b != board) || !score.is_finite() {
+            return Err(SendError::Invalid);
+        }
+        if !self.messages.take(now) {
+            return Err(SendError::RateLimited);
+        }
+        self.send(&ClientMsg::Score { board: board.to_owned(), score });
+        Ok(())
+    }
+
+    /// 最近一次心跳的往返时间（秒）。
+    pub fn rtt(&self) -> Option<f64> {
+        self.rtt
     }
 
     pub fn status(&self) -> Status {
@@ -214,11 +268,35 @@ impl NetClient {
         }
     }
 
-    /// 连上了：报上房间和名字。
+    /// 连上了：不带凭据的马上报上房间和名字；带凭据的等服务端的随机数。
     fn hello(&mut self, now: f64) {
-        let Some(hello) = self.target.as_ref().and_then(hello_of) else { return };
         self.last_heard = now;
+        if self.target.as_ref().is_some_and(|t| t.token.is_some()) {
+            self.awaiting_challenge = true;
+            return;
+        }
+        let Some(hello) = self.target.as_ref().and_then(|t| hello_of(t, None)) else { return };
         self.send(&hello);
+    }
+
+    /// 收到随机数：带凭据的这时候发 `Hello`。
+    fn challenged(&mut self, nonce: &[u8; crate::auth::NONCE], required: bool) {
+        if !std::mem::take(&mut self.awaiting_challenge) {
+            // 没带凭据的已经发过 Hello 了：中继要鉴权的话会回 Unauthorized
+            if required {
+                log::info!("中继要鉴权，没配 token");
+            }
+            return;
+        }
+        let Some(target) = self.target.clone() else { return };
+        let Some(cred) = target.token.as_deref().and_then(Credential::parse) else {
+            return self.stop("token 格式不对，不连");
+        };
+        let room = hello_room(&target);
+        let auth = room.map(|room| HelloAuth { proof: cred.prove(nonce, &room), token: cred.token.clone() });
+        if let Some(hello) = hello_of(&target, auth) {
+            self.send(&hello);
+        }
     }
 
     /// 不再重连：换目标之前一直离线。
@@ -267,7 +345,20 @@ impl NetClient {
                     Err(e) => log::warn!("成员 {from} 发来的消息{e}，忽略"),
                 }
             }
-            RelayMsg::Pong => {}
+            RelayMsg::Pong => {
+                if let Some(sent) = self.ping_sent.take() {
+                    self.rtt = Some((now - sent).max(0.0));
+                }
+            }
+            RelayMsg::Challenge { nonce, required } => self.challenged(&nonce, required),
+            RelayMsg::World(world) => {
+                if self.target.as_ref().is_some_and(|t| t.mode == Mode::Authority) {
+                    self.events.push(ClientEvent::World(world));
+                }
+            }
+            RelayMsg::Ranked { board, rank } => self.events.push(ClientEvent::Ranked { board, rank }),
+            RelayMsg::Error(ErrorCode::Unauthorized) => self.stop("中继报错: Unauthorized（没带 token，或者 token 过期、伪造、重放），换 token 之前不再重连"),
+            RelayMsg::Error(ErrorCode::WrongMode) if self.status != Status::Online => self.stop("中继报错: WrongMode（房间已经是另一种模式），不再重连"),
             RelayMsg::Error(ErrorCode::Version) => self.stop("中继报错: Version（协议版本对不上），不再重连"),
             RelayMsg::Error(ErrorCode::BadHello) => self.stop("中继报错: BadHello（房间名或名字不合规），不再重连"),
             RelayMsg::Error(ErrorCode::RoomFull) => {
@@ -284,6 +375,8 @@ impl NetClient {
     fn drop_link(&mut self) {
         self.link = None;
         self.me = None;
+        self.awaiting_challenge = false;
+        self.ping_sent = None;
         let left = std::mem::take(&mut self.peers);
         self.events.extend(left.into_iter().map(|(id, name)| ClientEvent::Left(Peer { id, name })));
     }
@@ -297,10 +390,18 @@ impl NetClient {
     }
 }
 
+fn cut(s: &str, max: usize) -> Option<String> {
+    proto::clean_text(&s.trim().chars().take(max).collect::<String>(), max)
+}
+
+/// `Hello` 里的房间名（证明也是对它算的）。
+fn hello_room(target: &Target) -> Option<String> {
+    cut(&target.room, MAX_ROOM)
+}
+
 /// 要发的 `Hello`：超长的截断，空的、有控制字符的不行（中继还会再查）。
-fn hello_of(target: &Target) -> Option<ClientMsg> {
-    let cut = |s: &str, max: usize| proto::clean_text(&s.trim().chars().take(max).collect::<String>(), max);
-    Some(ClientMsg::Hello { version: PROTOCOL_VERSION, room: cut(&target.room, MAX_ROOM)?, name: cut(&target.name, MAX_NAME)? })
+fn hello_of(target: &Target, auth: Option<HelloAuth>) -> Option<ClientMsg> {
+    Some(ClientMsg::Hello { version: PROTOCOL_VERSION, room: hello_room(target)?, name: cut(&target.name, MAX_NAME)?, mode: target.mode, auth })
 }
 
 /// 退避抖动的种子：每个客户端不一样，免得一起断的又一起连回来。
@@ -321,7 +422,7 @@ mod tests {
     }
 
     fn target(room: &str) -> Target {
-        Target { url: "ws://relay".into(), room: room.into(), name: "小明".into() }
+        Target::relay("ws://relay", room, "小明")
     }
 
     fn bob() -> Peer {
@@ -351,7 +452,7 @@ mod tests {
         assert_eq!(fake.url(0), "ws://relay");
         fake.push(LinkEvent::Open);
         c.update(0.1);
-        assert_eq!(fake.take_sent(), vec![ClientMsg::Hello { version: PROTOCOL_VERSION, room: "r".into(), name: "小明".into() }]);
+        assert_eq!(fake.take_sent(), vec![ClientMsg::Hello { version: PROTOCOL_VERSION, room: "r".into(), name: "小明".into(), mode: Mode::Relay, auth: None }]);
         fake.relay(RelayMsg::Welcome { you: 1, peers: vec![bob()], max: 8 });
         assert_eq!(c.update(0.2), vec![ClientEvent::Status(Status::Online), ClientEvent::Joined(bob())]);
         assert_eq!((c.status(), c.me(), c.peers()), (Status::Online, Some(1), vec![bob()]));
@@ -490,7 +591,7 @@ mod tests {
     fn hello_name_and_room_are_trimmed_to_the_limits() {
         let fake = FakeRelay::default();
         let mut c = client(&fake);
-        c.set_target(Some(Target { url: "ws://x".into(), room: "r".repeat(100), name: "n".repeat(100) }));
+        c.set_target(Some(Target::relay("ws://x", "r".repeat(100), "n".repeat(100))));
         c.update(0.0);
         fake.push(LinkEvent::Open);
         c.update(0.0);
@@ -511,7 +612,7 @@ mod tests {
 
     #[test]
     fn a_version_mismatch_or_bad_hello_stops_retrying() {
-        for code in [ErrorCode::Version, ErrorCode::BadHello] {
+        for code in [ErrorCode::Version, ErrorCode::BadHello, ErrorCode::Unauthorized, ErrorCode::WrongMode] {
             let fake = FakeRelay::default();
             let mut c = client(&fake);
             let events = refused(&fake, &mut c, code);
@@ -525,6 +626,89 @@ mod tests {
             c.update(100.0);
             assert_eq!(fake.count(), 2);
         }
+    }
+
+    #[test]
+    fn credentials_wait_for_the_challenge_and_prove_this_connection() {
+        use crate::auth::{Claims, Secret};
+        let secret = Secret::new(b"client-test-secret-0123456789".to_vec()).unwrap();
+        let cred = secret.issue(&Claims { sub: "acct".into(), name: "小红".into(), exp: 2_000_000_000 }).unwrap();
+        let fake = FakeRelay::default();
+        let mut c = client(&fake);
+        c.set_target(Some(Target { mode: Mode::Authority, token: Some(cred.clone()), ..target("arena") }));
+        c.update(0.0);
+        fake.push(LinkEvent::Open);
+        c.update(0.0);
+        assert!(fake.take_sent().is_empty(), "带凭据的等随机数");
+        let nonce = [5; crate::auth::NONCE];
+        fake.relay(RelayMsg::Challenge { nonce, required: true });
+        c.update(0.1);
+        let sent = fake.take_sent();
+        let [ClientMsg::Hello { room, mode, auth: Some(auth), .. }] = &sent[..] else { panic!("{sent:?}") };
+        assert_eq!((room.as_str(), *mode), ("arena", Mode::Authority));
+        assert!(!auth.token.contains(cred.rsplit_once('.').unwrap().1), "会话密钥不上线");
+        assert_eq!(secret.verify(&auth.token, &nonce, room, &auth.proof, 1_999_990_000).map(|c| c.sub), Ok("acct".into()));
+        // 下一条连接的随机数不一样，证明也跟着变
+        fake.push(LinkEvent::Closed("断了".into()));
+        c.update(0.2);
+        c.update(5.0);
+        fake.push(LinkEvent::Open);
+        fake.relay(RelayMsg::Challenge { nonce: [6; crate::auth::NONCE], required: true });
+        c.update(5.0);
+        let again = fake.take_sent();
+        let [ClientMsg::Hello { auth: Some(second), .. }] = &again[..] else { panic!("{again:?}") };
+        assert_ne!(second.proof, auth.proof);
+        // 凭据坏了：不连
+        let fake = FakeRelay::default();
+        let mut c = client(&fake);
+        c.set_target(Some(Target { token: Some("坏的".into()), ..target("r") }));
+        c.update(0.0);
+        fake.push(LinkEvent::Open);
+        fake.relay(RelayMsg::Challenge { nonce, required: true });
+        let events = c.update(0.0);
+        assert_eq!(c.status(), Status::Offline, "{events:?}");
+    }
+
+    #[test]
+    fn pongs_measure_the_round_trip() {
+        let fake = FakeRelay::default();
+        let mut c = online(&fake);
+        assert_eq!(c.rtt(), None);
+        c.update(PING_INTERVAL);
+        assert!(fake.take_sent().contains(&ClientMsg::Ping));
+        fake.relay(RelayMsg::Pong);
+        c.update(PING_INTERVAL + 0.08);
+        assert!((c.rtt().unwrap() - 0.08).abs() < 1e-9);
+        fake.relay(RelayMsg::Pong);
+        c.update(PING_INTERVAL + 1.0);
+        assert!((c.rtt().unwrap() - 0.08).abs() < 1e-9, "没发心跳时的 Pong 不算");
+    }
+
+    #[test]
+    fn world_snapshots_reach_authority_rooms_only_and_scores_are_sent() {
+        use crate::arena::delta::WorldSnapshot;
+        let world = WorldSnapshot { tick: 3, base: None, ack: None, entities: vec![], removed: vec![] };
+        let fake = FakeRelay::default();
+        let mut c = online(&fake);
+        fake.relay(RelayMsg::World(world.clone()));
+        assert!(c.update(0.1).is_empty(), "中继房间不收快照");
+        assert_eq!(c.send_score("b1", 12.5, 0.1), Ok(()));
+        assert_eq!(c.send_score("b\n", 1.0, 0.1), Err(SendError::Invalid));
+        assert_eq!(c.send_score("b1", f64::NAN, 0.1), Err(SendError::Invalid));
+        assert!(fake.take_sent().contains(&ClientMsg::Score { board: "b1".into(), score: 12.5 }));
+        fake.relay(RelayMsg::Ranked { board: "b1".into(), rank: Some(1) });
+        assert_eq!(c.update(0.2), vec![ClientEvent::Ranked { board: "b1".into(), rank: Some(1) }]);
+
+        let fake = FakeRelay::default();
+        let mut c = client(&fake);
+        c.set_target(Some(Target { mode: Mode::Authority, ..target("r") }));
+        c.update(0.0);
+        fake.push(LinkEvent::Open);
+        fake.relay(RelayMsg::Welcome { you: 1, peers: vec![], max: 8 });
+        c.update(0.0);
+        fake.relay(RelayMsg::World(world.clone()));
+        assert_eq!(c.update(0.1), vec![ClientEvent::World(world)]);
+        assert!(c.send_input(&crate::arena::delta::InputMsg { first: 1, inputs: vec![0], ack: None, view: 0 }));
     }
 
     #[test]
@@ -545,7 +729,7 @@ mod tests {
         for (room, name) in [("", "a"), ("r", "  "), ("r", "a\u{7}"), ("a\u{1}b", "a")] {
             let fake = FakeRelay::default();
             let mut c = client(&fake);
-            c.set_target(Some(Target { url: "ws://x".into(), room: room.into(), name: name.into() }));
+            c.set_target(Some(Target::relay("ws://x", room, name)));
             let events = c.update(0.0);
             assert_eq!(fake.count(), 0, "{room:?} {name:?} 不去连");
             assert_eq!(c.status(), Status::Offline);

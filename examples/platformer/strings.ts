@@ -2,7 +2,7 @@
 import { i18n, type Messages } from "../../ts/nge";
 
 export const ZH = {
-  help: "← → / A D / 手柄 移动 · 空格 / ↑ / A 跳 · R 重来 · 数字键选关（解锁了 {count} 关）· S 换存档 · L 语言 · N 联网 · K 改键 · Q 调试 · P 性能 · O 曲线 · G 3D 试验场 · B 大地图 · ",
+  help: "← → / A D / 手柄 移动 · 空格 / ↑ / A 跳 · R 重来 · 数字键选关（解锁了 {count} 关）· S 换存档 · L 语言 · N 联网 · K 改键 · Q 调试 · P 性能 · O 曲线 · G 3D 试验场 · B 大地图 · M 联机竞技场 · ",
   big: "大地图 2000 × 80：点地面挖一格 · U 填回去 · P 性能 · O 曲线 · B 回去",
   lab: "3D 试验场：WASD / 方向键 走 · 空格 跳 · Q 调试线 · G 回去",
   slot: "存档 {n}",
@@ -30,6 +30,9 @@ export const ZH = {
   actionRemap: "改键",
   actionDown: "下（加跳穿下单向板）",
   actionLab: "试验场",
+  actionTag: "拍人",
+  arena: "权威联机竞技场：← → 跑 · 空格 跳 · J 拍人 · M 回去",
+  arenaStats: " · 延迟 {rtt} ms · 回滚 {rollbacks} 次 · 预测误差 {error} · 被拍 {tagged} 次",
   remapOpen: "改键",
   remapTitle: "改键",
   remapHint: "点一个键，再按要换成的键",
@@ -47,7 +50,7 @@ export const ZH = {
 };
 
 export const EN: Messages<typeof ZH> = {
-  help: "← → / A D / pad move · Space / ↑ / A jump · R restart · digits pick a level ({count} unlocked) · S save slot · L language · N online · K keys · Q debug · P perf · O graph · G 3D lab · B big map · ",
+  help: "← → / A D / pad move · Space / ↑ / A jump · R restart · digits pick a level ({count} unlocked) · S save slot · L language · N online · K keys · Q debug · P perf · O graph · G 3D lab · B big map · M arena · ",
   big: "Big map 2000 × 80: tap the ground to dig · U fill back · P perf · O graph · B back",
   lab: "3D lab: WASD / arrows walk · Space jump · Q debug lines · G back",
   slot: "Save {n}",
@@ -75,6 +78,9 @@ export const EN: Messages<typeof ZH> = {
   actionRemap: "Keys",
   actionDown: "Down (+ jump drops through)",
   actionLab: "3D lab",
+  actionTag: "Tag",
+  arena: "Authoritative arena: ← → run · Space jump · J tag · M back",
+  arenaStats: " · ping {rtt} ms · rollbacks {rollbacks} · prediction error {error} · tagged {tagged}",
   remapOpen: "Keys",
   remapTitle: "Key bindings",
   remapHint: "Pick a key, then press the new one",

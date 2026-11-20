@@ -1,6 +1,6 @@
 // 联网的 TSX 部分（见 docs/networking.md）：从 `net` 事件维护的房间状态、远端精灵的 id。
 import { expect, test } from "nsh/test";
-import { netRoom, netSend, relayHttp, remoteId, type NetEvent } from "../../ts/net";
+import { netRoom, netScore, netSend, relayHttp, remoteId, type NetEvent } from "../../ts/net";
 
 const bob = { id: 2, name: "bob" };
 const carol = { id: 3, name: "carol" };
@@ -83,4 +83,29 @@ test("status 里的成员只在在线时算，自己不算", () => {
   expect(room.peers()).toEqual([bob]);
   room.handle({ kind: "status", status: "connecting", url: "ws://r", me: null, peers: [bob] });
   expect(room.peers()).toEqual([]);
+});
+
+const layout = { width: 960, platforms: [{ x0: 1, x1: 2, y: 3 }], hero: [24, 32] as [number, number] };
+const stats = { rtt: 40, rollbacks: 2, resets: 0, error: 1.5, max_error: 3, lead: 5, tick: 90, tagged: 1, dropped: 0 };
+
+test("权威房间：在线时记下竞技场和统计，断线清掉", () => {
+  const room = netRoom();
+  room.handle({ kind: "stats", ...stats });
+  expect(room.stats()).toBe(null);
+  room.handle({ kind: "status", status: "online", url: "ws://relay:9100", me: 1, peers: [], arena: layout });
+  expect(room.arena()).toEqual(layout);
+  room.handle({ kind: "stats", ...stats });
+  expect(room.stats()).toEqual(stats);
+  room.handle({ kind: "status", status: "connecting", url: "ws://relay:9100", me: null, peers: [] });
+  expect(room.arena()).toBe(null);
+  expect(room.stats()).toBe(null);
+  room.handle(online);
+  expect(room.arena()).toBe(null);
+});
+
+test("netScore 发 command", () => {
+  const sent: [string, unknown][] = [];
+  const game = { command: (name: string, data: unknown) => sent.push([name, data]) } as never;
+  netScore(game, "platformer-1", 12.5);
+  expect(sent).toEqual([["netScore", { board: "platformer-1", score: 12.5 }]]);
 });

@@ -4,8 +4,11 @@
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
+use crate::arena::delta::{InputMsg, WorldSnapshot, validate_input, validate_snapshot};
+use crate::auth::{MAX_TOKEN, NONCE, PROOF};
+
 /// 协议版本：`Hello` 里带着，中继对不上就回 `Error(Version)`。
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 2;
 /// 名字最多几个字符。
 pub const MAX_NAME: usize = 32;
 /// 房间名最多几个字符。
@@ -29,14 +32,33 @@ pub struct Peer {
     pub name: String,
 }
 
+/// 房间的模式：中继只转发（各自广播自己），权威由服务端跑模拟（客户端只发输入）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum Mode {
+    #[default]
+    Relay,
+    Authority,
+}
+
+/// `Hello` 里的鉴权：token 和对这条连接的随机数、房间名的证明（见 `auth`）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HelloAuth {
+    pub token: String,
+    pub proof: Vec<u8>,
+}
+
 /// 客户端发给中继。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ClientMsg {
-    /// 第一条：进哪个房间、叫什么。
-    Hello { version: u16, room: String, name: String },
+    /// 第一条：进哪个房间、叫什么、什么模式；服务端要鉴权时带上 token。
+    Hello { version: u16, room: String, name: String, mode: Mode, auth: Option<HelloAuth> },
     /// 转发：`to` 是 `None` 时给房间里的其他人。
     Data { to: Option<PeerId>, body: Vec<u8> },
     Ping,
+    /// 权威房间里的输入。
+    Input(InputMsg),
+    /// 交成绩：记在这条连接的身份（鉴权时是账号）名下。
+    Score { board: String, score: f64 },
 }
 
 /// 中继发给客户端。
@@ -49,6 +71,12 @@ pub enum RelayMsg {
     Data { from: PeerId, body: Vec<u8> },
     Pong,
     Error(ErrorCode),
+    /// 连上就发：这条连接的随机数，`required` 时 `Hello` 要带鉴权。
+    Challenge { nonce: [u8; NONCE], required: bool },
+    /// 权威房间的快照。
+    World(WorldSnapshot),
+    /// 交的成绩排第几（没进榜、不比以前好是 `None`）。
+    Ranked { board: String, rank: Option<u32> },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -68,6 +96,12 @@ pub enum ErrorCode {
     Timeout,
     /// 发得太快。
     RateLimited,
+    /// 要鉴权却没带、token 过期 / 伪造 / 重放。
+    Unauthorized,
+    /// 房间已经是另一种模式，或者在中继房间里发了输入。
+    WrongMode,
+    /// 名字归别的账号了（交成绩时）。
+    NameTaken,
 }
 
 /// 客户端之间的消息。
@@ -122,6 +156,12 @@ pub fn encode<T: Serialize>(msg: &T) -> Vec<u8> {
 pub fn decode_client(bytes: &[u8], max: usize) -> Result<ClientMsg, DecodeError> {
     let msg: ClientMsg = decode(bytes, max)?;
     // Hello 的房间名、名字由中继按自己的规则清理（不合规回 BadHello），这里只管结构
+    match &msg {
+        ClientMsg::Hello { auth: Some(a), .. } => check(a.token.len() <= MAX_TOKEN && a.proof.len() <= PROOF, "鉴权太长")?,
+        ClientMsg::Input(m) => validate_input(m).map_err(DecodeError::Invalid)?,
+        ClientMsg::Score { board, score } => check(board.len() <= 4 * MAX_ROOM && score.is_finite(), "成绩不合规")?,
+        _ => {}
+    }
     Ok(msg)
 }
 
@@ -133,6 +173,8 @@ pub fn decode_relay(bytes: &[u8], max: usize) -> Result<RelayMsg, DecodeError> {
             peers.iter().try_for_each(check_peer)?;
         }
         RelayMsg::Joined(peer) => check_peer(peer)?,
+        RelayMsg::World(w) => validate_snapshot(w).map_err(DecodeError::Invalid)?,
+        RelayMsg::Ranked { board, .. } => check(board.len() <= 4 * MAX_ROOM, "榜名太长")?,
         _ => {}
     }
     Ok(msg)
@@ -201,7 +243,10 @@ mod tests {
     #[test]
     fn every_message_roundtrips() {
         let client = [
-            ClientMsg::Hello { version: PROTOCOL_VERSION, room: "r".into(), name: "小明".into() },
+            ClientMsg::Hello { version: PROTOCOL_VERSION, room: "r".into(), name: "小明".into(), mode: Mode::Relay, auth: None },
+            ClientMsg::Hello { version: PROTOCOL_VERSION, room: "r".into(), name: "n".into(), mode: Mode::Authority, auth: Some(HelloAuth { token: "v1.a.b".into(), proof: vec![1; PROOF] }) },
+            ClientMsg::Input(InputMsg { first: 9, inputs: vec![1, 2], ack: Some(8), view: 5 }),
+            ClientMsg::Score { board: "b".into(), score: 1.5 },
             ClientMsg::Data { to: Some(3), body: vec![1, 2, 3] },
             ClientMsg::Data { to: None, body: vec![] },
             ClientMsg::Ping,
@@ -216,6 +261,10 @@ mod tests {
             RelayMsg::Data { from: 2, body: vec![9] },
             RelayMsg::Pong,
             RelayMsg::Error(ErrorCode::RoomFull),
+            RelayMsg::Error(ErrorCode::Unauthorized),
+            RelayMsg::Challenge { nonce: [3; NONCE], required: true },
+            RelayMsg::World(WorldSnapshot { tick: 3, base: Some(2), ack: None, entities: vec![], removed: vec![1] }),
+            RelayMsg::Ranked { board: "b".into(), rank: Some(2) },
         ];
         for m in relay {
             assert_eq!(decode_relay(&encode(&m), 1024), Ok(m));
@@ -278,6 +327,19 @@ mod tests {
         assert!(decode_relay(&encode(&RelayMsg::Welcome { you: 0, peers, max: 8 }), 1 << 20).is_err());
         let joined = RelayMsg::Joined(Peer { id: 1, name: "n".repeat(MAX_NAME + 1) });
         assert!(decode_relay(&encode(&joined), 1024).is_err());
+    }
+
+    #[test]
+    fn bad_auth_inputs_and_scores_are_rejected() {
+        let hello = |token: String, proof: Vec<u8>| encode(&ClientMsg::Hello { version: PROTOCOL_VERSION, room: "r".into(), name: "n".into(), mode: Mode::Relay, auth: Some(HelloAuth { token, proof }) });
+        assert!(decode_client(&hello("t".repeat(MAX_TOKEN + 1), vec![]), 1 << 16).is_err(), "token 太长");
+        assert!(decode_client(&hello("t".into(), vec![0; PROOF + 1]), 1 << 16).is_err(), "证明太长");
+        assert!(decode_client(&hello("t".into(), vec![0; PROOF]), 1 << 16).is_ok());
+        let input = ClientMsg::Input(InputMsg { first: 1, inputs: vec![0xff], ack: None, view: 0 });
+        assert!(decode_client(&encode(&input), 1 << 16).is_err(), "不认得的按键位");
+        for bad in [f64::NAN, f64::INFINITY] {
+            assert!(decode_client(&encode(&ClientMsg::Score { board: "b".into(), score: bad }), 1 << 16).is_err());
+        }
     }
 
     #[test]

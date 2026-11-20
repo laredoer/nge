@@ -135,8 +135,10 @@ pub async fn serve_on(mut acceptor: impl Accept, config: Config, live: Live) -> 
     let (hub, inbox) = channel(HUB_INBOX);
     let outbox = config.outbox.max(1);
     let permits = Arc::new(Semaphore::new(config.max_conns.max(1)));
-    tokio::spawn(run_hub(Hub::new(config), inbox));
-    let scores = Arc::new(Mutex::new(Leaderboard::default()));
+    let locked = config.auth.is_some();
+    let hub_logic = Hub::new(config);
+    let scores = hub_logic.scores();
+    tokio::spawn(run_hub(hub_logic, inbox));
     let ids = Arc::new(Mutex::new(Ids::default()));
     loop {
         let stream = match acceptor.accept().await {
@@ -156,7 +158,7 @@ pub async fn serve_on(mut acceptor: impl Accept, config: Config, live: Live) -> 
         let id = ids.lock().unwrap_or_else(|e| e.into_inner()).take();
         live.0.fetch_add(1, Ordering::SeqCst);
         let slot = Slot { id, ids: ids.clone(), live: live.clone(), _permit: permit };
-        tokio::spawn(connection(stream, slot, hub.clone(), scores.clone(), outbox));
+        tokio::spawn(connection(stream, slot, hub.clone(), scores.clone(), outbox, locked));
     }
 }
 
@@ -198,6 +200,8 @@ async fn run_hub(mut hub: Hub, mut inbox: Receiver<ToHub>) {
     let start = Instant::now();
     let mut conns: HashMap<ConnId, Handle> = HashMap::new();
     let mut tick = tokio::time::interval(Duration::from_secs(1));
+    // 权威房间的固定 tick：落后了（机器卡了一下）就连着补，保持和墙上的时间对齐
+    let mut arena = tokio::time::interval(Duration::from_secs_f64(1.0 / f64::from(nge_net::arena::TICK_HZ)));
     loop {
         let out = tokio::select! {
             msg = inbox.recv() => {
@@ -206,8 +210,7 @@ async fn run_hub(mut hub: Hub, mut inbox: Receiver<ToHub>) {
                     None => return,
                     Some(ToHub::Open(id, handle)) => {
                         conns.insert(id, handle);
-                        hub.connect(id, now);
-                        vec![]
+                        hub.connect(id, now)
                     }
                     Some(ToHub::Binary(id, bytes)) => hub.frame(id, &bytes, now),
                     Some(ToHub::Text(id)) => hub.text(id, now),
@@ -218,6 +221,7 @@ async fn run_hub(mut hub: Hub, mut inbox: Receiver<ToHub>) {
                 }
             }
             _ = tick.tick() => hub.tick(start.elapsed().as_secs_f64()),
+            _ = arena.tick() => hub.step(),
         };
         deliver(&mut hub, &mut conns, out);
     }
@@ -250,7 +254,7 @@ fn deliver(hub: &mut Hub, conns: &mut HashMap<ConnId, Handle>, out: Vec<Out>) {
     }
 }
 
-async fn connection(mut stream: TcpStream, slot: Slot, hub: Sender<ToHub>, scores: Arc<Mutex<Leaderboard>>, outbox: usize) {
+async fn connection(mut stream: TcpStream, slot: Slot, hub: Sender<ToHub>, scores: Arc<Mutex<Leaderboard>>, outbox: usize, locked: bool) {
     let _ = stream.set_nodelay(true);
     // 先偷看请求头：WebSocket 升级交给 tungstenite（它自己再读一遍），别的当 HTTP
     let head = match tokio::time::timeout(HEAD_TIMEOUT, peek_head(&stream)).await {
@@ -260,7 +264,7 @@ async fn connection(mut stream: TcpStream, slot: Slot, hub: Sender<ToHub>, score
     if head.websocket {
         websocket(stream, slot.id, hub, outbox).await;
     } else {
-        let response = answer(&mut stream, &head, &scores).await;
+        let response = answer(&mut stream, &head, &scores, locked).await;
         let _ = tokio::time::timeout(WRITE_TIMEOUT, async {
             let _ = stream.write_all(&http::render(&response)).await;
             let _ = stream.shutdown().await;
@@ -292,7 +296,7 @@ async fn peek_head(stream: &TcpStream) -> io::Result<Option<http::Head>> {
     }
 }
 
-async fn answer(stream: &mut TcpStream, head: &http::Head, scores: &Mutex<Leaderboard>) -> Response {
+async fn answer(stream: &mut TcpStream, head: &http::Head, scores: &Mutex<Leaderboard>, locked: bool) -> Response {
     // 先把请求头读掉：没读的数据留在缓冲里时关连接会变成 RST，对方收不到响应
     let Some(start) = read_head(stream).await else { return Response { status: 400, body: r#"{"error":"请求头不对"}"#.into() } };
     if head.content_length > MAX_BODY {
@@ -304,7 +308,7 @@ async fn answer(stream: &mut TcpStream, head: &http::Head, scores: &Mutex<Leader
         return Response { status: 400, body: r#"{"error":"请求体不完整"}"#.into() };
     };
     let mut board = scores.lock().unwrap_or_else(|e| e.into_inner());
-    http::route(head, &body, &mut board)
+    http::route(head, &body, &mut board, locked)
 }
 
 /// 读到 `len` 字节的请求体（`start` 是读请求头时多读的）；断了、超时是 `None`。

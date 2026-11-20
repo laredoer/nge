@@ -1,5 +1,7 @@
 //! 内存里的排行榜：分数小的在前（比如通关秒数），每个名字在一个榜上只留最好的一条，每个榜最多 100 条；
-//! 最多 64 个榜，满了去掉最久没写过的。只是给 HTTP 演示用，谁都能交分。
+//! 最多 64 个榜，满了去掉最久没写过的。
+//! 名字归账号：鉴权后交的成绩带着账号，一个名字第一次被哪个账号用了就归它，别的账号（和不带账号的）再用这个名字交会被拒。
+//! 不鉴权的本机开发模式里谁都能交分。
 
 use std::collections::HashMap;
 
@@ -16,6 +18,10 @@ pub const MAX_BOARDS: usize = 64;
 pub const MAX_BOARD: usize = 64;
 /// 分数的上限（不含）。
 pub const MAX_SCORE: f64 = 1.0e9;
+/// 最多记几个名字的归属：满了新名字交不了（只在内存里，重启清空）。
+pub const MAX_OWNED: usize = 10_000;
+/// 名字归别的账号了。
+pub const NAME_TAKEN: &str = "名字归别的账号了";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Entry {
@@ -34,15 +40,33 @@ struct Board {
 pub struct Leaderboard {
     boards: HashMap<String, Board>,
     writes: u64,
+    /// 名字 → 账号。
+    owners: HashMap<String, String>,
 }
 
 impl Leaderboard {
-    /// 交一个分数，返回名次（从 1 数）；没进前 100、不比这个名字以前的好时是 `None`。
+    /// 不带账号交一个分数（本机开发模式），返回名次（从 1 数）；没进前 100、不比这个名字以前的好时是 `None`。
     pub fn submit(&mut self, board: &str, name: &str, score: f64) -> Result<Option<usize>, &'static str> {
+        self.submit_as(board, None, name, score)
+    }
+
+    /// 以账号 `owner` 的名义交分（`None` 是不带账号）。名字归了别的账号时报 [`NAME_TAKEN`]。
+    pub fn submit_as(&mut self, board: &str, owner: Option<&str>, name: &str, score: f64) -> Result<Option<usize>, &'static str> {
         let board = clean_text(board, MAX_BOARD).ok_or("榜名不合规")?;
         let name = clean_text(name, MAX_NAME).ok_or("名字不合规")?;
         if !(score.is_finite() && (0.0..MAX_SCORE).contains(&score)) {
             return Err("分数不合规");
+        }
+        match (self.owners.get(&name), owner) {
+            (Some(o), Some(me)) if o == me => {}
+            (Some(_), _) => return Err(NAME_TAKEN),
+            (None, Some(me)) => {
+                if self.owners.len() >= MAX_OWNED {
+                    return Err("记的名字太多了");
+                }
+                self.owners.insert(name.clone(), me.to_owned());
+            }
+            (None, None) => {}
         }
         if !self.boards.contains_key(&board) && self.boards.len() >= MAX_BOARDS {
             let oldest = self.boards.iter().min_by_key(|(_, b)| b.written).map(|(k, _)| k.clone());
@@ -131,6 +155,22 @@ mod tests {
             let _ = b.submit("l", "spam", 100.0 - i as f64 * 0.1);
         }
         assert_eq!(b.boards["l"].entries.len(), 3);
+    }
+
+    #[test]
+    fn a_name_belongs_to_the_first_account_that_uses_it() {
+        let mut b = Leaderboard::default();
+        assert_eq!(b.submit_as("l", Some("acct-1"), "小红", 10.0), Ok(Some(1)));
+        assert_eq!(b.submit_as("l", Some("acct-2"), "小红", 5.0), Err(NAME_TAKEN), "别的账号用不了这个名字");
+        assert_eq!(b.submit("l", "小红", 5.0), Err(NAME_TAKEN), "不带账号也不行");
+        assert_eq!(b.submit_as("l2", Some("acct-1"), "小红", 7.0), Ok(Some(1)), "自己在别的榜上照样用");
+        assert_eq!(b.submit_as("l", Some("acct-1"), "小红", 9.0), Ok(Some(1)));
+        assert_eq!(b.top("l"), vec![Entry { name: "小红".into(), score: 9.0 }]);
+        // 一个账号可以有几个名字；不带账号交过的名字之后有账号来认领
+        assert_eq!(b.submit_as("l", Some("acct-1"), "小红2", 20.0), Ok(Some(2)));
+        assert_eq!(b.submit("l", "路人", 30.0), Ok(Some(3)));
+        assert_eq!(b.submit_as("l", Some("acct-2"), "路人", 25.0), Ok(Some(3)));
+        assert_eq!(b.submit("l", "路人", 1.0), Err(NAME_TAKEN));
     }
 
     #[test]

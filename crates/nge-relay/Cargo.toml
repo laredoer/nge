@@ -1,6 +1,7 @@
 [package]
 name = "nge-relay"
-description = "NSH 游戏引擎的中继服务：按房间转发 WebSocket 消息，顺带一个内存里的排行榜（HTTP）"
+default-run = "nge-relay"
+description = "NSH 游戏引擎的中继服务：按房间转发 WebSocket 消息、权威房间、鉴权，顺带一个内存里的排行榜（HTTP）"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
@@ -9,6 +10,10 @@ license.workspace = true
 [[bin]]
 name = "nge-relay"
 path = "src/bin/nge-relay.rs"
+
+[[bin]]
+name = "nge-token"
+path = "src/bin/nge-token.rs"
 
 [dependencies]
 nge-net.workspace = true

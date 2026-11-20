@@ -1,6 +1,6 @@
 import { batch, effect, keymap, type NativeComponentRef, platform, safeArea, signal, Text, untracked, View } from "nsh";
 import { Button } from "nsh/base";
-import { ActionButton, floatText, gameView, httpClient, inputMap, netRoom, push, saved, saveSlots, setTiles, sound, touchGestures, transitions, tween, VirtualStick, type ActionEvent, type Gesture, type Scene, type SpriteNode, type Tap } from "../../ts/nge";
+import { ActionButton, floatText, gameView, httpClient, inputMap, netRoom, netScore, push, saved, saveSlots, setTiles, sound, touchGestures, transitions, tween, VirtualStick, type ActionEvent, type Gesture, type Scene, type SpriteNode, type Tap } from "../../ts/nge";
 import { DEFAULT_CONTROLS, guestSprite, PLAYER_GROUP } from "./controls";
 import { remapPlace, RemapPanel } from "./remap";
 import { COIN_SHADER, FLASH, FLASH_MS, levelAudio, night, portalOver, POST, SHADERS, stonesNear } from "./effects";
@@ -8,6 +8,7 @@ import { levelKey, otherLocale, strings } from "./strings";
 import { NEW_SAVE, nextSlot, SAVE_MIGRATIONS, SAVE_VERSION, saveDataOf, saveSummary, SLOTS } from "./savefile";
 import { hpBar, outOfHearts, padPlace, stickPlace, TITLE_HOLD_MS, titleBubble, zoomBy } from "./hud";
 import { boardOf, leaderOf, nameTags, netLabel, netNode, netSetting, playerName, remotePlayers, scoresUrl, submitUrl, type Leader } from "./online";
+import { ARENA_KEY_CODE, arenaNode, arenaScene, arenaStats } from "./arena";
 import { labAction, labScene, levelAfterLab } from "./lab";
 import { BIG_MAP, bigScene, digOf } from "./bigmap";
 import { GROVES, levelTransition, PREFABS, TEXTURES } from "./prefabs";
@@ -133,6 +134,8 @@ export function Game(props: GameProps = {}) {
   const inLab = signal(false);
   /** 在大地图里（按 B 进出，桌面上）：点地面挖一格，U 填回最近挖的一格。见 docs/big-scene-perf.md。 */
   const inBig = signal(false);
+  /** 在权威联机竞技场里（按 M 进出，桌面上，见 docs/net-more.md）：服务端跑模拟，自己的角色预测、回滚。 */
+  const inArena = signal(false);
   let dug: [number, number, number][] = [];
   /** 刚被撞回起点：角色闪白一下。 */
   const flashing = signal(false);
@@ -163,6 +166,8 @@ export function Game(props: GameProps = {}) {
   };
   const submitScore = (seconds: number) => {
     if (trial !== undefined) return;
+    // 在线时走联机连接交：成绩记在这条连接的身份名下（中继要鉴权时只收这样交的），结果回来再拿榜首
+    if (room.status() === "online") return netScore(game, boardOf(level()), seconds);
     const url = submitUrl(room.url());
     if (url === null) return;
     http.post(url, { board: boardOf(level()), name, score: seconds }, { timeout: 5 }).then(fetchLeader);
@@ -385,6 +390,18 @@ export function Game(props: GameProps = {}) {
     setTiles(game, { id: BIG_MAP, tiles: [last] });
   };
 
+  /** 进出竞技场：进去时这一关的事件都不算了，换成权威房间；出来时这一关从头开始。 */
+  const toggleArena = () => {
+    if (inArena()) {
+      inArena.set(false);
+      return play(level());
+    }
+    clearTimeout(next);
+    next = undefined;
+    switching = true;
+    inArena.set(true);
+  };
+
   /** 进出试验场：进去时这一关的事件都不算了；出来时这一关从头开始。 */
   const toggleLab = () => {
     if (inLab()) {
@@ -403,17 +420,17 @@ export function Game(props: GameProps = {}) {
   return (
     // 让开系统栏和刘海（手机上状态栏盖在最上面；横过来时刘海在左右）
     <View class="flex-1 bg-black" style={{ paddingTop: safeArea().top, paddingLeft: safeArea().left, paddingRight: safeArea().right }}>
-      <Text class="text-white p-4">{inLab() ? t("lab") : inBig() ? t("big") : fade.loading() ? t("loading", fade.progress()) : status()}</Text>
+      <Text class="text-white p-4">{inLab() ? t("lab") : inBig() ? t("big") : inArena() ? t("arena") + arenaStats(t, room.stats()) + " · " + netLabel(t, true, room.status(), room.peers().length, room.error()) : fade.loading() ? t("loading", fade.progress()) : status()}</Text>
       <GameView
         class="flex-1"
         {...pinchZoom}
         ref={(n: NativeComponentRef) => (game = n)}
-        scene={inLab() ? labScene() : inBig() ? bigScene(playerSprite(), zoom()) : scene()}
+        scene={inLab() ? labScene() : inBig() ? bigScene(playerSprite(), zoom()) : inArena() ? arenaScene(room.arena(), room.peers(), arenaNode(name)) : scene()}
         actions={input.prop()}
         onPad={input.handlePad}
         onAction={(e: ActionEvent) => {
           input.handle(e);
-          if (!e.down || e.player !== 0 || inBig()) return;
+          if (!e.down || e.player !== 0 || inBig() || inArena()) return;
           // 试验场的开关也是动作（controls.json 里的 lab，默认 G）：改键时和别的动作一样查冲突
           const gate = labAction(e.action, inLab(), platform.desktop && trial === undefined);
           if (gate === "toggle") return toggleLab();
@@ -470,6 +487,8 @@ export function Game(props: GameProps = {}) {
           if (inLab() || fade.busy()) return;
           if (e.down && !e.repeat && e.code === "KeyB" && platform.desktop) return toggleBig();
           if (inBig()) return e.down && !e.repeat && e.code === "KeyU" ? undig() : undefined;
+          if (e.down && !e.repeat && e.code === ARENA_KEY_CODE && platform.desktop) return toggleArena();
+          if (inArena()) return;
           // 换存档、语言、联网是动作（onAction）；Digit1 … Digit9：选已经解锁的关
           const n = /^Digit([1-9])$/.exec(e.code)?.[1];
           if (!e.down || e.repeat || n === undefined) return;
@@ -512,6 +531,7 @@ export function Game(props: GameProps = {}) {
         onNet={(e) => {
           room.handle(e);
           if (e.kind === "status" && e.status === "online") fetchLeader();
+          if (e.kind === "ranked") fetchLeader();
         }}
         onHttp={http.handle}
         onRestart={() => {

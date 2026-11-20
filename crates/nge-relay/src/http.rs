@@ -92,8 +92,8 @@ struct Submit {
     score: f64,
 }
 
-/// 处理一个请求。
-pub fn route(head: &Head, body: &[u8], board: &mut Leaderboard) -> Response {
+/// 处理一个请求。`locked`（配了鉴权密钥）时不收 HTTP 交的分：成绩要走鉴权过的连接交，才知道是谁的。
+pub fn route(head: &Head, body: &[u8], board: &mut Leaderboard, locked: bool) -> Response {
     let ok = |body: serde_json::Value| Response { status: 200, body: body.to_string() };
     let bad = |status: u16, why: &str| Response { status, body: json!({ "error": why }).to_string() };
     match (head.method.as_str(), head.path.as_str()) {
@@ -102,6 +102,7 @@ pub fn route(head: &Head, body: &[u8], board: &mut Leaderboard) -> Response {
             Some((_, name)) => ok(json!({ "board": name, "top": board.top(name) })),
             None => bad(400, "缺 board"),
         },
+        ("POST", "/scores") if locked => bad(403, "要鉴权：成绩走联机连接交（netScore）"),
         ("POST", "/scores") => match serde_json::from_slice::<Submit>(body) {
             Ok(s) => match board.submit(&s.board, &s.name, s.score) {
                 Ok(rank) => ok(json!({ "rank": rank })),
@@ -120,6 +121,7 @@ pub fn render(response: &Response) -> Vec<u8> {
         200 => "OK",
         204 => "No Content",
         400 => "Bad Request",
+        403 => "Forbidden",
         404 => "Not Found",
         405 => "Method Not Allowed",
         413 => "Payload Too Large",
@@ -166,17 +168,20 @@ mod tests {
     fn scores_can_be_submitted_and_read() {
         let mut board = Leaderboard::default();
         let post = head("POST /scores HTTP/1.1\r\n\r\n");
-        let r = route(&post, br#"{"board":"l1","name":"a","score":9.5}"#, &mut board);
+        let r = route(&post, br#"{"board":"l1","name":"a","score":9.5}"#, &mut board, false);
         assert_eq!(r, Response { status: 200, body: r#"{"rank":1}"#.into() });
-        let r = route(&head("GET /scores?board=l1 HTTP/1.1\r\n\r\n"), b"", &mut board);
+        let r = route(&head("GET /scores?board=l1 HTTP/1.1\r\n\r\n"), b"", &mut board, false);
         assert_eq!(r.status, 200);
         assert_eq!(serde_json::from_str::<serde_json::Value>(&r.body).unwrap(), json!({ "board": "l1", "top": [{ "name": "a", "score": 9.5 }] }));
-        assert_eq!(route(&post, b"{", &mut board).status, 400);
-        assert_eq!(route(&post, br#"{"board":"l1","name":"a","score":-1}"#, &mut board).status, 400);
-        assert_eq!(route(&head("GET /scores HTTP/1.1\r\n\r\n"), b"", &mut board).status, 400);
-        assert_eq!(route(&head("GET /nope HTTP/1.1\r\n\r\n"), b"", &mut board).status, 404);
-        assert_eq!(route(&head("DELETE /scores HTTP/1.1\r\n\r\n"), b"", &mut board).status, 405);
-        assert_eq!(route(&head("OPTIONS /scores HTTP/1.1\r\n\r\n"), b"", &mut board).status, 204);
+        assert_eq!(route(&post, b"{", &mut board, false).status, 400);
+        assert_eq!(route(&post, br#"{"board":"l1","name":"a","score":-1}"#, &mut board, false).status, 400);
+        assert_eq!(route(&head("GET /scores HTTP/1.1\r\n\r\n"), b"", &mut board, false).status, 400);
+        assert_eq!(route(&head("GET /nope HTTP/1.1\r\n\r\n"), b"", &mut board, false).status, 404);
+        assert_eq!(route(&head("DELETE /scores HTTP/1.1\r\n\r\n"), b"", &mut board, false).status, 405);
+        assert_eq!(route(&head("OPTIONS /scores HTTP/1.1\r\n\r\n"), b"", &mut board, false).status, 204);
+        // 要鉴权时 HTTP 不收分，照样能看
+        assert_eq!(route(&post, br#"{"board":"l1","name":"b","score":1}"#, &mut board, true).status, 403);
+        assert_eq!(route(&head("GET /scores?board=l1 HTTP/1.1\r\n\r\n"), b"", &mut board, true).status, 200);
     }
 
     #[test]

@@ -13,7 +13,7 @@ fn relay() -> String {
 
 fn client(addr: &str, room: &str, name: &str) -> NetClient {
     let mut c = NetClient::new(Box::new(nge_net::link::connect));
-    c.set_target(Some(Target { url: format!("ws://{addr}"), room: room.into(), name: name.into() }));
+    c.set_target(Some(Target::relay(format!("ws://{addr}"), room, name)));
     c
 }
 
@@ -139,4 +139,32 @@ fn the_engine_http_client_talks_to_the_leaderboard() {
     let done = wait_http(&mut client, 1);
     assert_eq!(done[0].id, down);
     assert!(done[0].error.is_some());
+}
+
+/// 要鉴权的中继：带着合格凭据的进得了权威房间、收得到快照；不带的、凭据是别的密钥签的被拒，而且不再重连。
+#[test]
+fn a_locked_relay_lets_signed_clients_into_an_authority_room() {
+    use nge_net::auth::{Claims, Secret};
+    use nge_net::proto::Mode;
+    let secret = Secret::new(b"integration-test-secret-0123456".to_vec()).unwrap();
+    let running = nge_relay::spawn("127.0.0.1:0", Config { auth: Some(secret.clone()), ..Config::default() }).unwrap();
+    let addr = running.addr.to_string();
+    let exp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() + 600;
+    let signed = |secret: &Secret, sub: &str, name: &str| {
+        let mut c = NetClient::new(Box::new(nge_net::link::connect));
+        let token = secret.issue(&Claims { sub: sub.into(), name: name.into(), exp }).unwrap();
+        c.set_target(Some(Target { mode: Mode::Authority, token: Some(token), ..Target::relay(format!("ws://{addr}"), "arena", "写什么都行") }));
+        c
+    };
+    let start = Instant::now();
+    let mut a = signed(&secret, "acct-a", "甲");
+    let events = run(&mut [&mut a], start, |e| e[0].iter().any(|x| matches!(x, ClientEvent::World(_))));
+    assert_eq!(a.status(), Status::Online, "{events:?}");
+    assert!(events[0].iter().any(|x| matches!(x, ClientEvent::World(w) if w.base.is_none())), "第一个快照是全量");
+
+    let forger = Secret::new(b"someone-elses-secret-0123456789".to_vec()).unwrap();
+    let mut b = signed(&forger, "acct-a", "甲");
+    let mut c = client(&addr, "arena", "丙");
+    let events = run(&mut [&mut b, &mut c], start, |e| e.iter().all(|e| e.iter().any(|x| matches!(x, ClientEvent::Error(w) if w.contains("Unauthorized")))));
+    assert_eq!((b.status(), c.status()), (Status::Offline, Status::Offline), "{events:?}");
 }

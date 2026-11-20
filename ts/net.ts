@@ -15,7 +15,41 @@ export interface NetNode {
   rate?: number;
   /** 远端显示的延迟（毫秒），默认 100：越大越平滑、越落后。 */
   delay?: number;
+  /** 房间的模式：`relay`（默认，各自广播自己）或 `authority`（服务端跑模拟，只发输入，见 docs/net-more.md）。 */
+  mode?: "relay" | "authority";
+  /** 鉴权的凭据（`nge-token` 签的整串）；不写时原生用环境变量 `NGE_TOKEN`。中继要鉴权时没有它连不上。 */
+  token?: string;
+  /** 权威模式里自己的角色的精灵 id：位置由引擎预测，别人的角色用 `remoteId(成员, "hero")` 声明。 */
+  predict?: string;
 }
+
+/** 权威模式的竞技场几何（`status` 事件带着，照着画平台）。 */
+export interface ArenaLayout {
+  width: number;
+  platforms: { x0: number; x1: number; y: number }[];
+  /** 角色的宽高。 */
+  hero: [number, number];
+}
+
+/** 权威模式的统计：每秒两次。 */
+export interface NetStats {
+  /** 心跳量到的往返（毫秒），还没量到是 null。 */
+  rtt: number | null;
+  rollbacks: number;
+  resets: number;
+  /** 最近一次回滚的预测误差（point）。 */
+  error: number;
+  max_error: number;
+  /** 超前服务端几个 tick。 */
+  lead: number;
+  tick: number;
+  /** 自己被拍过几次。 */
+  tagged: number;
+  dropped: number;
+}
+
+/** 权威房间里远端角色的 key。 */
+export const ARENA_KEY = "hero";
 
 /** `full`：房间满了，引擎过一会儿（30 秒）再试。 */
 export type NetStatus = "offline" | "connecting" | "online" | "full";
@@ -27,10 +61,12 @@ export interface NetPeer {
 
 /** `net` 事件。`status` 带着在连的中继地址和当时的成员列表；断线时先给每个人发 `leave`。 */
 export type NetEvent =
-  | { kind: "status"; status: NetStatus; url: string | null; me: number | null; peers: NetPeer[] }
+  | { kind: "status"; status: NetStatus; url: string | null; me: number | null; peers: NetPeer[]; arena?: ArenaLayout }
   | { kind: "join"; peer: NetPeer }
   | { kind: "leave"; peer: NetPeer }
   | { kind: "message"; from: number; type: string; data: unknown }
+  | { kind: "ranked"; board: string; rank: number | null }
+  | ({ kind: "stats" } & NetStats)
   | { kind: "error"; message: string };
 
 /** 远端成员 `peer` 同步过来的精灵 `key` 的 id：场景里声明它，位置由引擎按插值写。 */
@@ -49,6 +85,11 @@ export function netSend(game: NativeComponentRef | undefined, type: string, data
   game?.command("netSend", to === undefined ? { type, data } : { type, data, to });
 }
 
+/** 交成绩：走联机连接，记在这条连接的身份名下（鉴权时是 token 里的账号和名字）。结果是 `ranked` 事件。 */
+export function netScore(game: NativeComponentRef | undefined, board: string, score: number) {
+  game?.command("netScore", { board, score });
+}
+
 export interface NetRoom {
   status(): NetStatus;
   /** 在连的中继地址；断开时是 null。 */
@@ -59,6 +100,10 @@ export interface NetRoom {
   peers(): NetPeer[];
   /** 最近一次断线 / 报错的原因。 */
   error(): string | null;
+  /** 权威房间的几何；不在权威房间里时是 null。 */
+  arena(): ArenaLayout | null;
+  /** 最近的统计；不在权威房间里时是 null。 */
+  stats(): NetStats | null;
   /** 接 `<GameView onNet={room.handle}>`。 */
   handle(e: NetEvent): void;
   /** 订阅某种消息，返回取消订阅的函数。 */
@@ -72,6 +117,8 @@ export function netRoom(): NetRoom {
   const me = signal<number | null>(null);
   const peers = signal<NetPeer[]>([]);
   const error = signal<string | null>(null);
+  const arena = signal<ArenaLayout | null>(null);
+  const stats = signal<NetStats | null>(null);
   const listeners = new Map<string, Set<(data: unknown, from: NetPeer) => void>>();
   const sorted = (list: NetPeer[]) => [...list].sort((a, b) => a.id - b.id);
   return {
@@ -80,6 +127,8 @@ export function netRoom(): NetRoom {
     me: () => me(),
     peers: () => peers(),
     error: () => error(),
+    arena: () => arena(),
+    stats: () => stats(),
     handle(e) {
       switch (e.kind) {
         case "status":
@@ -88,6 +137,8 @@ export function netRoom(): NetRoom {
           me.set(e.me);
           peers.set(e.status === "online" ? sorted(e.peers.filter((p) => p.id !== e.me)) : []);
           if (e.status === "online") error.set(null);
+          arena.set(e.status === "online" ? (e.arena ?? null) : null);
+          if (e.status !== "online") stats.set(null);
           return;
         case "join":
           if (e.peer.id !== me() && !peers().some((p) => p.id === e.peer.id)) peers.set(sorted([...peers(), e.peer]));
@@ -101,6 +152,13 @@ export function netRoom(): NetRoom {
           for (const fn of listeners.get(e.type) ?? []) fn(e.data, from);
           return;
         }
+        case "stats": {
+          const { kind: _, ...rest } = e;
+          if (arena() !== null) stats.set(rest);
+          return;
+        }
+        case "ranked":
+          return;
         case "error":
           error.set(e.message);
           return;

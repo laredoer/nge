@@ -20,7 +20,7 @@ function Btn(p: { id: string; label: string; onPress: () => void; selected?: boo
 
 /** 冲突的位置是哪个动作的：用文案里的动作名，没有就用动作的 id。 */
 function actionName(t: T, slot: Slot): string {
-  const names: Record<string, Key> = { jump: "jump", move: "actionMove", down: "actionDown", restart: "actionRestart", slot: "actionSlot", lang: "actionLang", net: "actionNet", remap: "actionRemap", lab: "actionLab" };
+  const names: Record<string, Key> = { jump: "jump", move: "actionMove", down: "actionDown", restart: "actionRestart", slot: "actionSlot", lang: "actionLang", net: "actionNet", remap: "actionRemap", lab: "actionLab", tag: "actionTag" };
   const name = names[slot.action];
   return (name === undefined ? slot.action : t(name)) + (slot.player === 0 ? "" : ` (P${slot.player + 1})`);
 }

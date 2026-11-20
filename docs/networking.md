@@ -83,7 +83,7 @@ pub fn connect(url: &str) -> Box<dyn Link>;
   - 每条连接待发的帧有上限（`outbox`，默认 256）：排满了说明对方不读，当慢客户端踢掉，不拖住房间里的其他人；写一帧、关连接都有 5 秒超时。踢人时关闭帧排在已经待发的后面，排不进去就直接断。
   - 连接 id 用到头回绕时跳过还在用的。
 - 顺带一个很小的排行榜（HTTP，同一个端口）：`GET /scores?board=<名字>` 返回前 10 名，`POST /scores` 交 `{ board, name, score }`（分数小的在前，比如通关秒数）。只在内存里，每个榜最多 100 条、最多 64 个榜，请求体最多 4 KiB；一个名字在一个榜里只留一条，成绩更好才替换；榜满了再来新榜时去掉最久没写过的那个。请求体太大时先读掉最多 64 KiB（最多等 1 秒）再回 413，客户端能收到响应而不是连接被重置。带 `Access-Control-Allow-Origin: *`，浏览器里也能调。只是为了演示 HTTP 不依赖外部服务。
-- `cargo run -p nge-relay -- --addr 127.0.0.1:9100 --room-size 8 --max-conns 1024`。
+- `cargo run -p nge-relay -- --dev --addr 127.0.0.1:9100 --room-size 8 --max-conns 1024`（`--dev` 不鉴权；要鉴权时设 `NGE_AUTH_SECRET`，见 [net-more.md](net-more.md)）。
 
 ### ECS（`NetPlugin`）
 
@@ -141,9 +141,9 @@ scene.net = { url?: string, room: string, name?: string, sync?: string[], rate?:
 
 ## 不做
 
-- 权威服务器、预测和回滚、延迟补偿；对方的角色只是显示，不参与碰撞和踩敌人。
+- ~~权威服务器、预测和回滚、延迟补偿~~：已做，见 [net-more.md](net-more.md)（平台跳跃按 M 进的权威竞技场）；主场景的中继联机里对方的角色仍然只是显示，不参与碰撞和踩敌人。
 - 断线期间的本地缓冲重发、可靠有序的消息通道（WebSocket 本身就是可靠有序的，断了就丢）。
-- 加密、鉴权、防作弊；排行榜谁都能交分，名字也不归谁所有（一个名字只留一条最好成绩，谁都能用这个名字刷新它）。
+- ~~鉴权~~：已做，见 [net-more.md](net-more.md)（HMAC token、排行榜按账号归属，`--dev` 才免鉴权）；~~加密~~：走 TLS 反向代理加 `wss://`，见 [net-more.md](net-more.md)；防作弊仍不做。免鉴权的开发模式下排行榜照旧谁都能交分。
 - 排行榜的淘汰策略之外的配额：每个来源能建几个榜、交几次分不限（榜满了只是挤掉最久没写的那个）。
 - 中继的多进程 / 多机扩展、持久化。
 - NAT 穿透、P2P、WebRTC。
@@ -162,7 +162,7 @@ scene.net = { url?: string, room: string, name?: string, sync?: string[], rate?:
 ### 本机试联网
 
 ```sh
-cargo run -p nge-relay                      # 起中继，默认 127.0.0.1:9100
+cargo run -p nge-relay -- --dev             # 起中继（本机开发不鉴权），默认 127.0.0.1:9100
 cd examples/platformer && nsh run           # 开两个（第二个在另一个终端里再 nsh run）
 NGE_RELAY=ws://192.168.1.10:9100 nsh run    # 中继在别的机器上（原生读环境变量）
 curl 'http://127.0.0.1:9100/scores?board=platformer-1'   # 看排行榜

@@ -71,6 +71,13 @@
      "keys": [
       "KeyG"
      ]
+    },
+    "tag": {
+     "kind": "button",
+     "keys": [
+      "KeyJ",
+      "GamepadX"
+     ]
     }
    },
    {
@@ -179,6 +186,13 @@
      "keys": [
       "KeyG"
      ]
+    },
+    "tag": {
+     "kind": "button",
+     "keys": [
+      "KeyJ",
+      "GamepadX"
+     ]
     }
    },
    {
@@ -286,6 +300,13 @@
      "kind": "button",
      "keys": [
       "KeyG"
+     ]
+    },
+    "tag": {
+     "kind": "button",
+     "keys": [
+      "KeyJ",
+      "GamepadX"
      ]
     }
    },

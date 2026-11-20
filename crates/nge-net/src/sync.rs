@@ -121,7 +121,8 @@ pub fn snapshot_rate(rate: f32) -> f32 {
 
 /// 到点了把 `NetSync` 的实体发出去（每秒 `snapshot_rate(Net::rate)` 次）。
 pub(crate) fn broadcast(mut net: ResMut<Net>, mut remotes: ResMut<Remotes>, entities: Query<(&NetSync, &Transform2d)>) {
-    if net.status() != Status::Online {
+    // 权威房间里只发输入，位置由服务端算
+    if net.status() != Status::Online || net.mode() == crate::proto::Mode::Authority {
         remotes.next_send = None;
         return;
     }

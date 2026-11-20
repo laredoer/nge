@@ -9,15 +9,20 @@ use nge_ecs::{App, Outbox, Plugin, PostUpdate, PreUpdate};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::arena::Layout;
+use crate::arena::client::ArenaClient;
+use crate::authority::{self, Arena, ArenaStats};
 use crate::client::{ClientEvent, NetClient, SendError, Status, Target};
 use crate::link::Connector;
-use crate::proto::{Payload, Peer, PeerId};
+use crate::proto::{Mode, Payload, Peer, PeerId};
 use crate::sync::{self, Remotes};
 
 /// 发给 TSX 的事件。
 pub const NET: EventKey<NetWire> = EventKey::new("net");
 /// TSX 发消息。
 pub const NET_SEND: CommandKey<NetSend> = CommandKey::new("netSend");
+/// TSX 交成绩（记在这条连接的身份名下，鉴权时是账号）。
+pub const NET_SCORE: CommandKey<NetScore> = CommandKey::new("netScore");
 /// 不指定时连的中继。
 pub const DEFAULT_URL: &str = "ws://127.0.0.1:9100";
 
@@ -40,6 +45,12 @@ pub struct NetSend {
     pub to: Option<PeerId>,
 }
 
+#[derive(Message, Debug, Clone, PartialEq, Deserialize)]
+pub struct NetScore {
+    pub board: String,
+    pub score: f64,
+}
+
 /// 联网的事件（Rust 用 `MessageReader<NetEvent>` 读）。
 #[derive(Message, Debug, Clone, PartialEq)]
 pub enum NetEvent {
@@ -47,6 +58,8 @@ pub enum NetEvent {
     Joined(Peer),
     Left(Peer),
     Message { from: PeerId, kind: String, data: Value },
+    /// 交的成绩排第几。
+    Ranked { board: String, rank: Option<u32> },
     Error(String),
 }
 
@@ -55,10 +68,21 @@ pub enum NetEvent {
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum NetWire {
     /// `url` 是在连的中继地址（断开时是 null）：TSX 拿它推出同一台服务器的 HTTP 地址。
-    Status { status: &'static str, url: Option<String>, me: Option<PeerId>, peers: Vec<Peer> },
+    /// 权威房间里在线时带着竞技场的几何（`arena`），TSX 照着画。
+    Status {
+        status: &'static str,
+        url: Option<String>,
+        me: Option<PeerId>,
+        peers: Vec<Peer>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        arena: Option<Layout>,
+    },
     Join { peer: Peer },
     Leave { peer: Peer },
     Message { from: PeerId, #[serde(rename = "type")] kind: String, data: Value },
+    Ranked { board: String, rank: Option<u32> },
+    /// 权威模式的统计：延迟、回滚次数、预测误差。
+    Stats(ArenaStats),
     Error { message: String },
 }
 
@@ -92,6 +116,17 @@ impl Net {
     pub fn send(&mut self, kind: &str, data: &Value, to: Option<PeerId>) -> Result<(), SendError> {
         let now = self.now();
         self.client.send_message(kind, &data.to_string(), to, now)
+    }
+
+    /// 交成绩：记在这条连接的身份名下。
+    pub fn submit_score(&mut self, board: &str, score: f64) -> Result<(), SendError> {
+        let now = self.now();
+        self.client.send_score(board, score, now)
+    }
+
+    /// 在连的房间的模式。
+    pub fn mode(&self) -> Mode {
+        self.client.target().map_or(Mode::Relay, |t| t.mode)
     }
 
     pub fn status(&self) -> Status {
@@ -151,11 +186,13 @@ impl Plugin for NetPlugin {
         });
         app.insert_resource(Net { client: NetClient::new(connector), clock, rate: 20.0, delay: crate::interp::DEFAULT_DELAY })
             .init_resource::<Remotes>()
+            .init_resource::<Arena>()
             .add_message::<NetEvent>()
             .add_event(NET)
             .add_command(NET_SEND)
-            .add_systems(PreUpdate, (receive, send_commands).chain().in_set(NetSet::Receive))
-            .add_systems(PostUpdate, sync::apply.in_set(NetSet::Apply))
+            .add_command(NET_SCORE)
+            .add_systems(PreUpdate, (receive, send_commands, send_scores).chain().in_set(NetSet::Receive))
+            .add_systems(PostUpdate, (authority::predict, sync::apply).in_set(NetSet::Apply))
             .add_systems(PostUpdate, sync::broadcast.in_set(NetSet::Broadcast).after(NetSet::Apply));
     }
 }
@@ -170,7 +207,7 @@ fn status_name(status: Status) -> &'static str {
 }
 
 /// 收连接上的事件：发给 ECS 和 TSX，快照交给插值缓冲。
-fn receive(mut net: ResMut<Net>, mut remotes: ResMut<Remotes>, mut events: MessageWriter<NetEvent>, mut outbox: ResMut<Outbox>) {
+fn receive(mut net: ResMut<Net>, mut remotes: ResMut<Remotes>, mut arena: ResMut<Arena>, mut events: MessageWriter<NetEvent>, mut outbox: ResMut<Outbox>) {
     let now = net.now();
     for event in net.client.update(now) {
         let (event, wire) = match event {
@@ -178,8 +215,21 @@ fn receive(mut net: ResMut<Net>, mut remotes: ResMut<Remotes>, mut events: Messa
                 if status != Status::Online {
                     remotes.clear();
                 }
-                (NetEvent::Status(status), NetWire::Status { status: status_name(status), url: net.target().map(|t| t.url.clone()), me: net.me(), peers: net.peers() })
+                let authority = status == Status::Online && net.mode() == Mode::Authority;
+                arena.client = net.me().filter(|_| authority).map(ArenaClient::new);
+                let layout = authority.then(crate::arena::layout);
+                (NetEvent::Status(status), NetWire::Status { status: status_name(status), url: net.target().map(|t| t.url.clone()), me: net.me(), peers: net.peers(), arena: layout })
             }
+            ClientEvent::World(snapshot) => {
+                if let Some(client) = arena.client.as_mut() {
+                    let me = client.me();
+                    if let Some(world) = client.receive(&snapshot) {
+                        authority::feed(&mut remotes, me, snapshot.tick, world, now * 1000.0);
+                    }
+                }
+                continue;
+            }
+            ClientEvent::Ranked { board, rank } => (NetEvent::Ranked { board: board.clone(), rank }, NetWire::Ranked { board, rank }),
             ClientEvent::Joined(peer) => (NetEvent::Joined(peer.clone()), NetWire::Join { peer }),
             ClientEvent::Left(peer) => {
                 remotes.forget(peer.id);
@@ -210,6 +260,14 @@ fn send_commands(mut net: ResMut<Net>, mut commands: MessageReader<NetSend>) {
     for cmd in commands.read() {
         if let Err(e) = net.send(&cmd.kind, &cmd.data, cmd.to) {
             log::warn!("联网消息 {} 没发出去: {e:?}", cmd.kind);
+        }
+    }
+}
+
+fn send_scores(mut net: ResMut<Net>, mut commands: MessageReader<NetScore>) {
+    for cmd in commands.read() {
+        if let Err(e) = net.submit_score(&cmd.board, cmd.score) {
+            log::warn!("成绩没交上去: {e:?}");
         }
     }
 }
@@ -247,7 +305,7 @@ pub(crate) mod tests {
     }
 
     pub fn target() -> Target {
-        Target { url: "ws://relay".into(), room: "r".into(), name: "me".into() }
+        Target::relay("ws://relay", "r", "me")
     }
 
     pub fn bob() -> Peer {

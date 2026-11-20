@@ -105,7 +105,7 @@ type Ws = WebSocket<StdStream>;
 fn join(addr: &str, room: &str, name: &str) -> (Ws, PeerId) {
     let stream = StdStream::connect(addr).unwrap();
     let (mut ws, _) = tungstenite::client(format!("ws://{addr}/"), stream).unwrap();
-    let hello = proto::encode(&ClientMsg::Hello { version: PROTOCOL_VERSION, room: room.into(), name: name.into() });
+    let hello = proto::encode(&ClientMsg::Hello { version: PROTOCOL_VERSION, room: room.into(), name: name.into(), mode: nge_net::proto::Mode::Relay, auth: None });
     ws.send(Message::Binary(hello.into())).unwrap();
     loop {
         if let Message::Binary(b) = ws.read().unwrap()
