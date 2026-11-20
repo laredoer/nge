@@ -29,6 +29,19 @@ pub struct SceneDepth {
 /// 和 3D 渲染器共用的深度缓冲格式（深度 + 模板：精灵的遮罩也写在里面）。
 pub const SCENE_DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth24PlusStencil8;
 
+/// 这一帧裁剪的统计（见 docs/big-scene-perf.md）：`[画了, 一共]`。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CullStats {
+    /// 瓦片地图的块。
+    pub chunks: [u32; 2],
+    /// 画了几格瓦片。
+    pub tiles: u32,
+    /// 2D 精灵（实体）。
+    pub sprites: [u32; 2],
+    /// 3D 网格的部件。
+    pub meshes: [u32; 2],
+}
+
 /// 本帧的渲染状态，每帧渲染前重置。渲染器按插件添加的顺序执行。
 #[derive(Resource, Debug, Default)]
 pub struct RenderFrame {
@@ -36,6 +49,7 @@ pub struct RenderFrame {
     depth: Option<SceneDepth>,
     draws: u32,
     instances: u32,
+    cull: CullStats,
 }
 
 impl RenderFrame {
@@ -65,6 +79,16 @@ impl RenderFrame {
         (self.draws, self.instances)
     }
 
+    /// 渲染器往里加这一帧画了几个、一共几个。
+    pub fn cull_mut(&mut self) -> &mut CullStats {
+        &mut self.cull
+    }
+
+    /// 这一帧到目前为止的裁剪统计。
+    pub fn culled(&self) -> CullStats {
+        self.cull
+    }
+
     pub(crate) fn reset(&mut self) {
         *self = Self::default();
     }
@@ -92,5 +116,17 @@ mod tests {
         assert_eq!(frame.counts(), (5, 105));
         frame.reset();
         assert_eq!(frame.counts(), (0, 0));
+    }
+
+    #[test]
+    fn cull_stats_add_up_until_the_next_frame() {
+        let mut frame = RenderFrame::default();
+        frame.cull_mut().sprites[0] += 3;
+        frame.cull_mut().sprites[1] += 10;
+        frame.cull_mut().chunks = [2, 40];
+        frame.cull_mut().sprites[1] += 5;
+        assert_eq!(frame.culled(), CullStats { chunks: [2, 40], tiles: 0, sprites: [3, 15], meshes: [0, 0] });
+        frame.reset();
+        assert_eq!(frame.culled(), CullStats::default());
     }
 }

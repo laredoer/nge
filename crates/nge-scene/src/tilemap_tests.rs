@@ -3,7 +3,7 @@
 use bevy_ecs::prelude::*;
 use glam::Vec2;
 use nge_physics2d::{Collider, Shape, Velocity};
-use nge_render2d::{Sprite, SpriteImage, Transform2d};
+use nge_render2d::Transform2d;
 use serde_json::{Value, json};
 
 use crate::tilemap::TileSolid;
@@ -148,17 +148,16 @@ fn animated_tiles_change_frames_without_rebuilding_the_map() {
     let scene = json!({ "tilemaps": [{ "id": "w", "texture": "grid", "tile": 10, "cols": 3, "data": [3, 0, 3],
         "animated": [{ "frame": 3, "frames": [3, 4, 5], "fps": 4 }] }] });
     frame(&mut app, Some(scene));
-    let world = app.world_mut();
-    let before: Vec<Entity> = world.query_filtered::<Entity, With<Sprite>>().iter(world).collect();
+    // 动画瓦片按场景时钟画：这一帧画哪格由渲染器按 Time 算
     let frames = |app: &mut nge_ecs::App| {
+        let elapsed = app.world().resource::<nge_ecs::Time>().elapsed;
         let world = app.world_mut();
-        let mut v: Vec<(i32, u32)> = world
-            .query::<(&Transform2d, &Sprite)>()
-            .iter(world)
-            .map(|(t, s)| (t.translation.x as i32, if let SpriteImage::Atlas(_, f) = s.image { f } else { 99 }))
-            .collect();
-        v.sort();
-        v
+        let layer = world.query::<&nge_render2d::TileLayer>().iter(world).next().unwrap();
+        (0..3).map(|c| (c as i32 * 10 + 5, layer.drawn_frame(c, 0, elapsed).unwrap())).collect::<Vec<_>>()
+    };
+    let rebuilt = |app: &mut nge_ecs::App| {
+        let world = app.world_mut();
+        world.query::<&nge_render2d::TileLayer>().iter(world).next().unwrap().rebuilt()
     };
     // 每帧 0.5 秒、4 帧 / 秒：每帧往前两格
     frame(&mut app, None);
@@ -166,9 +165,7 @@ fn animated_tiles_change_frames_without_rebuilding_the_map() {
     assert_eq!(frames(&mut app), [(5, 4), (15, 0), (25, 4)], "动画瓦片一起换帧，别的格子不动");
     frame(&mut app, None);
     assert_eq!(frames(&mut app), [(5, 3), (15, 0), (25, 3)], "循环");
-    let world = app.world_mut();
-    let after: Vec<Entity> = world.query_filtered::<Entity, With<Sprite>>().iter(world).collect();
-    assert_eq!(before, after, "没重建");
+    assert_eq!(rebuilt(&mut app), 0, "没重建（渲染器还没画过）");
     frame(&mut app, None);
     // 改了地图的规则（整张重建）：动画接着原来的相位，不从头播（到这里 2.5 秒，第 10 格，循环下来是第 2 格）
     let scene = json!({ "tilemaps": [{ "id": "w", "texture": "grid", "tile": 10, "cols": 3, "data": [3, 0, 3],

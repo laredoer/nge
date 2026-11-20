@@ -82,13 +82,13 @@ pub(crate) struct Scratch {
 }
 
 /// 没有相机实体时，按默认相机放在 (0, 0, 5) 看向原点。
+/// 画 3D 用哪个相机：第一个 `Camera3d`，没有时是 (0, 0, 5) 朝 -z 的默认相机。
+pub fn main_camera(first: Option<(&Camera3d, &Transform3d)>) -> (Camera3d, Transform3d) {
+    first.map(|(c, t)| (*c, *t)).unwrap_or_else(|| (Camera3d::default(), Transform3d::from_xyz(0.0, 0.0, 5.0)))
+}
+
 pub(crate) fn globals(world: &mut World, size: Vec2, scratch: &mut Scratch) -> ((Globals, bool), View, CameraView) {
-    let (camera, eye) = world
-        .query::<(&Camera3d, &Transform3d)>()
-        .iter(world)
-        .next()
-        .map(|(c, t)| (*c, *t))
-        .unwrap_or_else(|| (Camera3d::default(), Transform3d::from_xyz(0.0, 0.0, 5.0)));
+    let (camera, eye) = main_camera(world.query::<(&Camera3d, &Transform3d)>().iter(world).next());
     let aspect = size.x / size.y.max(1.0);
     let view_proj = camera.view_proj(&eye, aspect);
     let ambient = *world.resource::<AmbientLight>();

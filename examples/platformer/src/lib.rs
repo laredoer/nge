@@ -77,6 +77,8 @@ const RESTART_ACTION: &str = "restart";
 /// 在空中超过这么久，落地时手柄轻震一下。
 const LAND_RUMBLE_AIR: f32 = 0.2;
 const PERF_KEY: &str = "KeyP";
+/// 开关性能曲线（见 docs/big-scene-perf.md）。
+const GRAPH_KEY: &str = "KeyO";
 
 /// 默认绑定：和 TSX 读的是同一份文件，TSX 的 `actions` 到之前（和测试里）也能玩。
 fn default_controls() -> ActionMap {
@@ -368,7 +370,7 @@ fn build(audio: AudioPlugin) -> App {
         .init_resource::<Sfx>()
         .add_systems(Startup, load_sfx)
         .init_resource::<debug::DebugView>()
-        .add_systems(Update, (reset_on_level_start, control, control_guest, debug::debug_view, toggle_perf).chain())
+        .add_systems(Update, (reset_on_level_start, control, control_guest, debug::debug_view, toggle_perf, toggle_graph).chain())
         // 3D 试验场（按 G 进出）：走、平台在物理之前，相机在物理之后
         .init_resource::<lab::Lab>()
         .add_systems(Update, (lab::walk, lab::move_platform, lab::probe, lab::cascade_colors).chain().after(debug::debug_view))
@@ -408,6 +410,13 @@ fn components(components: &nsh_platform_ios::Components) {
 fn toggle_perf(input: Res<Input>, mut overlay: ResMut<nge_text::PerfOverlay>) {
     if input.key_pressed(PERF_KEY) {
         overlay.0 = !overlay.0;
+    }
+}
+
+/// 按 O 开关性能曲线。
+fn toggle_graph(input: Res<Input>, mut graph: ResMut<nge_text::PerfGraph>) {
+    if input.key_pressed(GRAPH_KEY) {
+        graph.0 = !graph.0;
     }
 }
 
@@ -1430,6 +1439,23 @@ mod tests {
         run(&mut app, 3);
         assert!(on(&app), "按一次打开，场景每帧同步也不会关掉");
         key(&mut app, "KeyP", true);
+        run(&mut app, 1);
+        assert!(!on(&app), "再按一次关掉");
+    }
+
+    #[test]
+    fn o_toggles_the_perf_graph() {
+        let mut app = app();
+        app.prop("scene", Some(&level(None)));
+        run(&mut app, 2);
+        let on = |app: &App| app.world().resource::<nge_text::PerfGraph>().0;
+        assert!(!on(&app));
+        key(&mut app, "KeyO", true);
+        run(&mut app, 1);
+        key(&mut app, "KeyO", false);
+        run(&mut app, 3);
+        assert!(on(&app), "按一次打开，场景每帧同步也不会关掉");
+        key(&mut app, "KeyO", true);
         run(&mut app, 1);
         assert!(!on(&app), "再按一次关掉");
     }

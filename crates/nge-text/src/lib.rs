@@ -6,6 +6,7 @@
 mod floating;
 mod layout;
 mod perf;
+mod perf_graph;
 mod renderer;
 
 use bevy_ecs::prelude::*;
@@ -14,6 +15,7 @@ use nge_assets::{Asset, AssetApp, Handle, LoadContext};
 use nge_ecs::{App, Plugin, PostUpdate, Update};
 
 pub use perf::{PerfOverlay, PerfText, perf_lines};
+pub use perf_graph::{GRAPH_SIZE, PerfGraph, PerfGraphText, curve_points, graph_scales, legend, scale_count, scale_ms};
 
 pub use floating::FloatingText;
 pub use layout::Anchor;
@@ -92,13 +94,14 @@ impl Plugin for TextPlugin {
         nge_assets::ensure_plugin(app);
         app.init_asset::<Font>()
             .init_resource::<PerfOverlay>()
+            .init_resource::<PerfGraph>()
             .add_systems(Update, floating::float)
-            .add_systems(PostUpdate, perf::perf_overlay).add_renderer(renderer::TextRenderer::default());
+            .add_systems(PostUpdate, (perf::perf_overlay, perf_graph::perf_graph)).add_renderer(renderer::TextRenderer::default());
     }
 }
 
 pub mod prelude {
-    pub use crate::{Anchor, FloatingText, Font, FontId, PerfOverlay, ScreenText, Text2d, TextBox, TextPlugin};
+    pub use crate::{Anchor, FloatingText, Font, FontId, PerfGraph, PerfOverlay, ScreenText, Text2d, TextBox, TextPlugin};
 }
 
 #[cfg(test)]

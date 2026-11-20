@@ -20,6 +20,7 @@ use crate::pipes::{Mode, Pipes, STENCIL_FORMAT, pipe};
 use crate::post::{PostChain, PostRenderer};
 use crate::repeat::{Repeat, copies};
 use crate::sprite::{Sprite, SpriteInstances};
+use crate::tiles::{TileLayer, View2d, frame_image};
 
 const INITIAL_CAPACITY: u64 = 1024;
 
@@ -118,6 +119,8 @@ struct SpriteRenderer {
     packed_edges: Vec<[f32; 4]>,
     /// 提示过挡光的边太多。
     warned_edges: bool,
+    /// 这一帧瓦片层拷出来的实例（复用）。
+    tiles: Vec<Instance>,
     /// 背景层自己的后处理和画到的离屏纹理。
     post: PostChain,
     post_target: Option<wgpu::TextureView>,
@@ -127,7 +130,7 @@ struct SpriteRenderer {
 
 impl SpriteRenderer {
     fn new(layer: Layer, pipes: SharedPipes) -> Self {
-        Self { layer, pipes, gpu: None, items: Vec::new(), instances: Vec::new(), batches: Vec::new(), copies: Vec::new(), warned: HashSet::new(), warned_unmasked: false, edges: Vec::new(), packed_edges: Vec::new(), warned_edges: false, post: PostChain::default(), post_target: None, warned_post: false }
+        Self { layer, pipes, gpu: None, items: Vec::new(), instances: Vec::new(), batches: Vec::new(), copies: Vec::new(), tiles: Vec::new(), warned: HashSet::new(), warned_unmasked: false, edges: Vec::new(), packed_edges: Vec::new(), warned_edges: false, post: PostChain::default(), post_target: None, warned_post: false }
     }
 }
 
@@ -158,10 +161,11 @@ impl Renderer for SpriteRenderer {
         let mut occluders = world.query::<(&Occluder2d, &Transform2d, Option<&Sprite>, Option<&DrawAt>, Option<&Parallax>)>();
         let camera = world.query::<&Camera2d>().iter(world).next().copied().unwrap_or_default();
         world.resource_scope(|world, mut images: Mut<GpuImages>| images.sync(gfx, world.resource::<Assets<Image>>()));
+        let view2d = View2d::new(camera, Vec2::from(gfx.viewport.size));
+        let (interleave, has_back_post) = (world.resource::<Interleave>().0, world.resource::<PostEffects>().layer(PostLayer::Back).next().is_some());
+        let tile_draws = draw_tiles(self.layer, &mut self.tiles, world, &view2d, interleave, has_back_post);
         let (images, atlases, gpu_images) = (world.resource::<Assets<Image>>(), world.resource::<Atlases>(), world.resource::<GpuImages>());
         let extra = world.resource::<SpriteInstances>();
-        let interleave = world.resource::<Interleave>().0;
-        let has_back_post = world.resource::<PostEffects>().layer(PostLayer::Back).next().is_some();
         // 3D 留下了深度（混排、前面有 3D 渲染器）时精灵按深度和模型比
         let scene_depth = world.resource::<RenderFrame>().depth().cloned();
         let depth = scene_depth.is_some();
@@ -176,6 +180,7 @@ impl Renderer for SpriteRenderer {
         let view = camera.visible(Vec2::from(gfx.viewport.size));
         let lighting = world.resource::<Lighting2d>();
         let lit_scene = lighting.enabled;
+        let mut sprite_count = [0u32; 2];
         for (entity, sprite, transform, draw, parallax, repeat, shader, masking, unlit, normal, occluder) in
             sprites.iter(world).filter(|(_, _, t, ..)| self.layer.contains(t.z, interleave, has_back_post))
         {
@@ -195,6 +200,13 @@ impl Renderer for SpriteRenderer {
                 }
                 _ => self.copies.push(pos),
             }
+            // 视野外的不画；自定义着色器可能挪顶点，不裁
+            if shader.is_none() {
+                let half = rotated_half(size, rotation);
+                self.copies.retain(|&p| view2d.overlaps(p - half, p + half, 0.0));
+            }
+            sprite_count[1] += 1;
+            sprite_count[0] += u32::from(!self.copies.is_empty());
             let mode = Mode::of(masking);
             let module = shader.map_or(0, |s| pipes.module(gfx, shaders, &s.name));
             let params = shader.map_or([0.0; 4], |s| s.params.into());
@@ -220,6 +232,11 @@ impl Renderer for SpriteRenderer {
                         params,
                     },
                 });
+            }
+        }
+        for &(texture, ref range) in &tile_draws {
+            for &instance in &self.tiles[range.clone()] {
+                self.items.push(Item { texture, normal: TextureId::WHITE, pipe: pipe(0, Mode::Normal, depth), mask: false, instance });
             }
         }
         // 同一张图的额外实例通常是连着放的（一个发射器一批），只在图变了时重新查区域
@@ -309,6 +326,9 @@ impl Renderer for SpriteRenderer {
         };
         let mut frame = world.resource_mut::<RenderFrame>();
         frame.count(self.batches.len() as u32, self.instances.len() as u32);
+        let cull = frame.cull_mut();
+        cull.sprites[0] += sprite_count[0];
+        cull.sprites[1] += sprite_count[1];
         let load = frame.color_load(clear);
         // 背景层的后处理：先画到离屏纹理上，过完一串再画到目标上。前面已经有别的渲染器画过时不做（会盖掉它们）
         let offscreen = match (back_post.is_empty(), load) {
@@ -320,8 +340,10 @@ impl Renderer for SpriteRenderer {
             }
         };
         let draw_to = offscreen.clone().unwrap_or_else(|| target.clone());
+        let timer = nge_ecs::pass_timer(world, "精灵");
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("sprites"),
+            timestamp_writes: timer.as_ref().map(nge_ecs::PassTimer::writes),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: &draw_to,
                 depth_slice: None,
@@ -352,10 +374,44 @@ impl Renderer for SpriteRenderer {
         drop(pass);
         if let Some(source) = offscreen {
             let time = world.resource::<Time>().elapsed as f32;
-            let count = self.post.run(gfx, world.resource::<Shaders>(), encoder, &back_post, &source, target, time);
+            let timers = crate::post::post_timers(world, back_post.len());
+            let count = self.post.run(gfx, world.resource::<Shaders>(), encoder, &back_post, &source, target, time, &timers);
             world.resource_mut::<RenderFrame>().count(count, 0);
         }
     }
+}
+
+/// 这一层的瓦片地图按视野拷出实例到 `out`，返回每张地图用的贴图和实例范围；裁剪的统计记进 `RenderFrame`。
+fn draw_tiles(layer: Layer, out: &mut Vec<Instance>, world: &mut World, view: &View2d, interleave: bool, back_post: bool) -> Vec<(TextureId, std::ops::Range<usize>)> {
+    out.clear();
+    let elapsed = world.resource::<Time>().elapsed;
+    let mut draws = Vec::new();
+    let (mut chunks, mut tiles) = ([0u32; 2], 0u32);
+    world.resource_scope(|world, atlases: Mut<Atlases>| {
+        world.resource_scope(|world, images: Mut<Assets<Image>>| {
+            let mut layers = world.query::<&mut TileLayer>();
+            for mut map in layers.iter_mut(world).filter(|m| layer.contains(m.z, interleave, back_post)) {
+                let image = map.image_for(0);
+                let region = |f: u32| {
+                    let r = atlases.region(&images, frame_image(image, f));
+                    (r.texture, r.uv)
+                };
+                let start = out.len();
+                let parallax = map.parallax;
+                let (texture, stats) = map.draw(view, parallax, elapsed, &region, out);
+                chunks[0] += stats.shown;
+                chunks[1] += stats.total;
+                tiles += stats.tiles;
+                draws.push((texture, start..out.len()));
+            }
+        });
+    });
+    let mut frame = world.resource_mut::<RenderFrame>();
+    let cull = frame.cull_mut();
+    cull.chunks[0] += chunks[0];
+    cull.chunks[1] += chunks[1];
+    cull.tiles += tiles;
+    draws
 }
 
 /// 背景层画到的离屏纹理，跟着目标的大小、格式走。

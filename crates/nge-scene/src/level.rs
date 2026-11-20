@@ -136,7 +136,8 @@ mod tests {
         assert_eq!(tweens[0].0.len(), 1, "只剩新关卡的补间");
         let p = world.query::<(&SceneId, &Transform2d)>().iter(world).find(|(id, _)| id.0 == "p").map(|(_, t)| t.translation).unwrap();
         assert_eq!(p.x, 0.0, "旧补间（往 x = 100 走）没有带过来");
-        assert_eq!(world.query_filtered::<(), With<bevy_ecs::hierarchy::ChildOf>>().iter(world).count(), 2, "瓦片只有新的两块");
+        let layers: Vec<usize> = world.query::<&nge_render2d::TileLayer>().iter(world).map(|l| l.frames().len()).collect();
+        assert_eq!(layers, [2], "瓦片只有新地图的两格");
     }
 
     #[test]

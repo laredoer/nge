@@ -1233,3 +1233,28 @@ fn debug_lines_are_hidden_behind_models_unless_on_top() {
     let Some(img) = line_behind_cube(true) else { return };
     assert!(white_in_middle(&img, 4) && white_in_middle(&img, SIZE / 2), "画在最前面的不被挡");
 }
+
+#[test]
+fn meshes_outside_the_frustum_are_skipped_but_still_counted() {
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let out = seen.clone();
+    let Some(mut offscreen) = Offscreen::new(SIZE, move |app| {
+        unlit(app);
+        app.add_systems(Startup, |world: &mut World| {
+            solid(world, Vec4::new(1.0, 0.0, 0.0, 1.0), Mesh::cube(1.0), Transform3d::from_xyz(0.0, 0.0, 0.0));
+            // 相机背后、远平面以外、旁边很远
+            for at in [Vec3::new(0.0, 0.0, 50.0), Vec3::new(0.0, 0.0, -5000.0), Vec3::new(500.0, 0.0, 0.0)] {
+                solid(world, Vec4::ONE, Mesh::cube(1.0), Transform3d::from_xyz(at.x, at.y, at.z));
+            }
+        });
+        let out = out.clone();
+        app.add_systems(Update, move |frame: Res<nge_ecs::RenderFrame>| *out.lock().unwrap() = Some(frame.culled()));
+    }) else {
+        return eprintln!("没有 GPU，跳过");
+    };
+    offscreen.frame(false);
+    let img = offscreen.frame(true).expect("读回");
+    assert!(close(img.center(), [255, 0, 0, 255]), "{:?}", img.center());
+    let culled = seen.lock().unwrap().expect("第二帧更新时看到第一帧的统计");
+    assert_eq!(culled.meshes, [1, 4]);
+}

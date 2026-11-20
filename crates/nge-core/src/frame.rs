@@ -107,6 +107,11 @@ pub fn compression_features(supported: wgpu::Features) -> wgpu::Features {
     supported & (wgpu::Features::TEXTURE_COMPRESSION_ASTC | wgpu::Features::TEXTURE_COMPRESSION_BC | wgpu::Features::TEXTURE_COMPRESSION_ETC2)
 }
 
+/// 支持就要的特性：贴图压缩格式和时间戳（GPU 时间，见 docs/big-scene-perf.md）。
+pub fn optional_features(supported: wgpu::Features) -> wgpu::Features {
+    compression_features(supported) | (supported & wgpu::Features::TIMESTAMP_QUERY)
+}
+
 /// 拿到了设备、还没配置画面的 GPU。
 pub(crate) struct Gpu {
     adapter: wgpu::Adapter,
@@ -196,7 +201,7 @@ pub(crate) async fn request_gpu(instance: &wgpu::Instance, surface: wgpu::Surfac
     let info = adapter.get_info();
     log::info!("GPU：{}（{:?}，驱动 {} {}）", info.name, info.backend, info.driver, info.driver_info);
     let disk = DiskCache::wanted(&adapter);
-    let mut required_features = compression_features(adapter.features());
+    let mut required_features = optional_features(adapter.features());
     if disk.is_some() {
         required_features |= wgpu::Features::PIPELINE_CACHE;
     }
@@ -488,6 +493,13 @@ mod tests {
         assert_eq!(compression_features(apple), F::TEXTURE_COMPRESSION_ASTC | F::TEXTURE_COMPRESSION_ETC2, "别的特性不要");
         assert_eq!(compression_features(F::TEXTURE_COMPRESSION_BC), F::TEXTURE_COMPRESSION_BC);
         assert_eq!(compression_features(F::empty()), F::empty());
+    }
+
+    #[test]
+    fn timestamps_are_asked_for_only_when_supported() {
+        use wgpu::Features as F;
+        assert_eq!(optional_features(F::TIMESTAMP_QUERY | F::TEXTURE_COMPRESSION_BC | F::DEPTH_CLIP_CONTROL), F::TIMESTAMP_QUERY | F::TEXTURE_COMPRESSION_BC);
+        assert_eq!(optional_features(F::TEXTURE_COMPRESSION_ASTC), F::TEXTURE_COMPRESSION_ASTC, "不支持时不要");
     }
 
     #[test]

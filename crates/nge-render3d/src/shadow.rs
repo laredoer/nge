@@ -457,14 +457,20 @@ impl ShadowGpu {
         self.passes.push(Pass { local: true, layer, slot: MAX_CASCADES + layer, view_proj: m });
     }
 
+    /// 这一帧画几层。
+    pub fn pass_count(&self) -> usize {
+        self.passes.len()
+    }
+
     /// 每层画一遍（半透明的不在 `casters` 里），只画包围盒和这一层视野相交的。`bind` 绑定第 `i` 个 draw 并提交。
-    /// 返回一共提交了几次 draw。
-    pub fn draw(&self, encoder: &mut wgpu::CommandEncoder, casters: &[Caster], bind: impl Fn(&mut wgpu::RenderPass, usize)) -> u32 {
+    /// `timers` 是每层的 GPU 计时（见 [`Self::pass_count`]）。返回一共提交了几次 draw。
+    pub fn draw(&self, encoder: &mut wgpu::CommandEncoder, casters: &[Caster], timers: &[Option<nge_ecs::PassTimer>], bind: impl Fn(&mut wgpu::RenderPass, usize)) -> u32 {
         let mut count = 0;
-        for p in &self.passes {
+        for (i, p) in self.passes.iter().enumerate() {
             let map = if p.local { &self.local } else { &self.dir };
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("shadow"),
+                timestamp_writes: timers.get(i).and_then(Option::as_ref).map(nge_ecs::PassTimer::writes),
                 color_attachments: &[],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: &map.layers[p.layer],

@@ -15,7 +15,7 @@ pub mod stats;
 pub mod web;
 
 pub use bridge::{CommandKey, EventKey, GAME_COMPONENT, PropKey, StateKey};
-pub use frame::{Msg, compression_features};
+pub use frame::{Msg, compression_features, optional_features};
 pub use game::{Ctx, Emit, FrameTiming, Game, GameFactory, Gfx, Viewport};
 #[cfg(not(target_arch = "wasm32"))]
 pub use runtime::{Engine, create_surface};

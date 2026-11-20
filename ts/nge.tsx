@@ -726,7 +726,7 @@ export interface Camera2dNode {
  * 瓦片地图。`data` 一行一行从上往下，每格是图集里的帧号（整数），负数是空格；`(x, y)` 是地图左上角（y 朝上，行往下排）。
  * `solid` 里的帧号是实心的，变成静态碰撞体；被撞时（地图或另一方开了 `collide`）发 `collide`，名字是地图的 id，
  * 同时碰到好几块只算一次接触。`cols` / `grid` / `solid` 也都是整数。
- * 任何字段变了整张地图重建，不要每帧改。
+ * 只有 `data` 里的格子变了时只重建改到的那几条（见 `chunk`）；别的字段变了整张地图重建，不要每帧改。
  */
 export interface TilemapNode {
   id: string;
@@ -756,6 +756,36 @@ export interface TilemapNode {
   materials?: { frame: number; friction?: number; restitution?: number }[];
   /** 点得到：`tap` 事件带上点中的格子 `cell: [列, 行]` 和那格的帧号 `frame`。 */
   tap?: boolean;
+  /** 块的边长（格），默认 32，夹到 4 … 256：画的时候只画视野里的块，改格子只重建那一块所在的一条（`chunk` 行高、整张地图宽）的碰撞体。见 docs/big-scene-perf.md。 */
+  chunk?: number;
+}
+
+/** `scene.perf` 写成对象时：面板、曲线、每半秒一次的 `perf` 事件各自开关。 */
+export interface PerfNode {
+  panel?: boolean;
+  graph?: boolean;
+  events?: boolean;
+}
+
+/** `perf` 事件：每半秒的汇总（开了 `perf.events` 时）。裁剪的统计是 `[画了, 一共]`。 */
+export interface PerfEvent {
+  fps: number;
+  frameMs: number;
+  worstMs: number;
+  updateMs: number;
+  renderMs: number;
+  waitMs: number;
+  /** 设备不支持时间戳、还没读回时是 null。 */
+  gpuMs: number | null;
+  gpuSupported: boolean;
+  draws: number;
+  instances: number;
+  entities: number;
+  particles: number;
+  chunks: [number, number];
+  tiles: number;
+  sprites: [number, number];
+  meshes: [number, number];
 }
 
 export interface Scene {
@@ -792,8 +822,9 @@ export interface Scene {
   audio?: AudioNode;
   /** 时间缩放，默认 1；0 暂停（物理、补间、动画、粒子、相机平滑都停），0.5 慢一半。声音不受影响。 */
   timeScale?: number;
-  /** 左上角的性能面板：帧率、更新 / 渲染 / 等待各花多少毫秒、draw call、实例数、实体数，每半秒更新。见 docs/perf-overlay.md。 */
-  perf?: boolean;
+  /** 左上角的性能面板：帧率、更新 / 渲染 / 等待 / GPU 各花多少毫秒、draw call、实例数、实体数、裁剪统计，每半秒更新。见 docs/perf-overlay.md。
+   *  写成对象还能开曲线（`graph`）、`perf` 事件（`events`），见 docs/big-scene-perf.md。 */
+  perf?: boolean | PerfNode;
   /** 关卡：换了值（字符串或数字）就把场景整个重建，同 id 的节点也不留上一关的状态；Rust 收到 `LevelStart`。见 docs/levels.md。 */
   level?: string | number;
   /** 联网：写了就连中继（见 docs/networking.md 和 `netRoom()`）。 */
@@ -1003,6 +1034,12 @@ export function dropThrough(game: NativeComponentRef | undefined, args: { id: st
   game?.command("dropThrough", args);
 }
 
+/** 改瓦片地图 `id` 的格子：`tiles` 是一串 `[列, 行, 帧号]`，-1 挖空。只重建改到的块，不用重发整张地图；
+ *  改到下一次声明里这一格变了、或者地图的规则变了（整张重建）为止。见 docs/big-scene-perf.md。 */
+export function setTiles(game: NativeComponentRef | undefined, args: { id: string; tiles: [number, number, number][] }) {
+  game?.command("setTiles", args);
+}
+
 /** `dropThrough` 的结果。 */
 export interface DropThroughEvent {
   id: string;
@@ -1201,6 +1238,8 @@ interface BuiltinEvents {
   /** 3D 空间查询的结果（见 `queries3d()`）。 */
   query3d: Query3dReply;
   dropThrough: DropThroughEvent;
+  /** 性能汇总（`scene.perf.events`）。 */
+  perf: PerfEvent;
   /** 预加载的进度（见 `preloader()`）。 */
   preload: PreloadEvent;
   /** 换关过场的阶段和加载进度（见 `transitions()`）。 */

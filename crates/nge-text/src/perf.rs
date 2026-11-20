@@ -22,9 +22,15 @@ const COLOR: Vec4 = Vec4::new(0.6, 1.0, 0.6, 1.0);
 /// 面板上的几行字。
 pub fn perf_lines(report: Option<&PerfReport>) -> String {
     let Some(r) = report else { return "性能统计中…".into() };
+    let gpu = match (r.gpu_supported, r.gpu_ms) {
+        (false, _) => "不支持".to_string(),
+        (true, None) => "统计中".to_string(),
+        (true, Some(ms)) => format!("{ms:.1} ms"),
+    };
+    let c = &r.cull;
     format!(
-        "{:.0} fps  帧 {:.1} ms（最长 {:.1}）\n更新 {:.1}  渲染 {:.1}  等待 {:.1} ms\ndraw {}  实例 {}  实体 {}  粒子 {}",
-        r.fps, r.frame_ms, r.worst_ms, r.update_ms, r.render_ms, r.wait_ms, r.draws, r.instances, r.entities, r.particles
+        "{:.0} fps  帧 {:.1} ms（最长 {:.1}）\n更新 {:.1}  渲染 {:.1}  等待 {:.1} ms  GPU {gpu}\ndraw {}  实例 {}  实体 {}  粒子 {}\n块 {}/{}  瓦片 {}  精灵 {}/{}  网格 {}/{}",
+        r.fps, r.frame_ms, r.worst_ms, r.update_ms, r.render_ms, r.wait_ms, r.draws, r.instances, r.entities, r.particles, c.chunks[0], c.chunks[1], c.tiles, c.sprites[0], c.sprites[1], c.meshes[0], c.meshes[1]
     )
 }
 
@@ -74,8 +80,11 @@ mod tests {
 
     #[test]
     fn lines_show_every_number() {
-        let r = PerfReport { fps: 59.6, frame_ms: 16.78, worst_ms: 33.3, update_ms: 1.24, render_ms: 2.5, wait_ms: 12.96, draws: 42, instances: 1830, entities: 312, particles: 950 };
-        assert_eq!(perf_lines(Some(&r)), "60 fps  帧 16.8 ms（最长 33.3）\n更新 1.2  渲染 2.5  等待 13.0 ms\ndraw 42  实例 1830  实体 312  粒子 950");
+        let cull = nge_ecs::CullStats { chunks: [6, 250], tiles: 1400, sprites: [20, 300], meshes: [8, 40] };
+        let r = PerfReport { fps: 59.6, frame_ms: 16.78, worst_ms: 33.3, update_ms: 1.24, render_ms: 2.5, wait_ms: 12.96, draws: 42, instances: 1830, entities: 312, particles: 950, gpu_ms: Some(4.26), gpu_supported: true, cull };
+        assert_eq!(perf_lines(Some(&r)), "60 fps  帧 16.8 ms（最长 33.3）\n更新 1.2  渲染 2.5  等待 13.0 ms  GPU 4.3 ms\ndraw 42  实例 1830  实体 312  粒子 950\n块 6/250  瓦片 1400  精灵 20/300  网格 8/40");
+        assert!(perf_lines(Some(&PerfReport { gpu_ms: None, ..r })).contains("GPU 统计中"));
+        assert!(perf_lines(Some(&PerfReport { gpu_supported: false, ..r })).contains("GPU 不支持\n"), "不支持时不崩、写出来");
         assert_eq!(perf_lines(None), "性能统计中…");
     }
 
@@ -92,7 +101,7 @@ mod tests {
         app.tick(Default::default(), 0.016);
         let text = panel(&mut app);
         assert_eq!(text.len(), 1, "只有一个面板");
-        assert!(text[0].starts_with("2 fps") && text[0].ends_with("draw 3  实例 10  实体 7  粒子 0"), "{text:?}");
+        assert!(text[0].starts_with("2 fps") && text[0].contains("draw 3  实例 10  实体 7  粒子 0"), "{text:?}");
         app.world_mut().resource_mut::<PerfOverlay>().0 = false;
         app.tick(Default::default(), 0.016);
         assert!(panel(&mut app).is_empty());

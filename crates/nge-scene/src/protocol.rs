@@ -84,9 +84,9 @@ pub struct Scene {
     #[serde(rename = "timeScale")]
     #[serde(deserialize_with = "crate::lenient::time_scale")]
     pub time_scale: Option<f32>,
-    /// 左上角的性能面板（见 docs/perf-overlay.md）。
+    /// 左上角的性能面板、曲线、`perf` 事件（见 docs/perf-overlay.md、docs/big-scene-perf.md）。
     #[serde(deserialize_with = "crate::lenient::perf")]
-    pub perf: Option<bool>,
+    pub perf: Option<crate::scene_perf::PerfNode>,
     /// 关卡：换了值就整个重建场景（见 docs/levels.md）。数字和字符串都行。
     #[serde(deserialize_with = "crate::level::level_id")]
     pub level: Option<String>,

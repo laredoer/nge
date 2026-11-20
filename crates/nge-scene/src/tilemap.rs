@@ -1,11 +1,10 @@
-//! 瓦片地图（`scene.tilemaps`）：按图集的格子画出来，实心格子合并成静态碰撞体。
+//! 瓦片地图（`scene.tilemaps`）：按图集的格子画出来（按块裁剪），实心格子合并成静态碰撞体（按块重建，见 docs/big-scene-perf.md）。
 
 use std::collections::HashMap;
 
 use bevy_ecs::prelude::*;
-use glam::{Vec2, Vec4};
-use nge_physics2d::Collider;
-use nge_render2d::{Sprite, SpriteImage, Transform2d};
+use glam::Vec2;
+use nge_render2d::{SpriteImage, Transform2d};
 use serde::Deserialize;
 
 use crate::protocol::{ParallaxNode, Scene};
@@ -53,6 +52,9 @@ pub struct TilemapNode {
     /// 点地图时发 `tap`，带点中的格子。
     #[serde(default)]
     pub tap: bool,
+    /// 块的边长（格）：画的时候按块裁剪，改格子按块重建（见 docs/big-scene-perf.md）。不写是 32。
+    #[serde(default, deserialize_with = "crate::lenient::tile_chunk")]
+    pub chunk: Option<u32>,
 }
 
 /// 斜坡瓦片：底边平、两边竖直，顶边从左边高 `left` 到右边高 `right`（格高的几分之几，0 … 1）。
@@ -86,6 +88,22 @@ pub(crate) enum TileKind {
     Slope(f32, f32),
 }
 
+impl TileKind {
+    /// 挡不挡会飞的。
+    pub(crate) fn blocks_flyers(self) -> bool {
+        matches!(self, TileKind::Solid | TileKind::Slope(..))
+    }
+
+    pub(crate) fn ground(self) -> nge_ai::Ground {
+        match self {
+            TileKind::Empty => nge_ai::Ground::Empty,
+            TileKind::Solid => nge_ai::Ground::Solid,
+            TileKind::OneWay => nge_ai::Ground::OneWay,
+            TileKind::Slope(left, right) => nge_ai::Ground::Slope { left, right },
+        }
+    }
+}
+
 impl TilemapNode {
     fn kind(&self, frame: i32) -> TileKind {
         if frame < 0 {
@@ -103,6 +121,17 @@ impl TilemapNode {
         }
     }
 
+    /// 同 `kind`，斜坡的高写错了当空格（warn 一次）。
+    pub(crate) fn checked_kind(&self, frame: i32) -> TileKind {
+        match self.kind(frame) {
+            TileKind::Slope(left, right) if !(left.is_finite() && right.is_finite() && (0.0..=1.0).contains(&left) && (0.0..=1.0).contains(&right) && left.max(right) > 0.0) => {
+                crate::lenient::warn_once(format!("瓦片地图 {:?} 的斜坡帧 {frame} 左右的高要是 0 … 1、不能都是 0，当空格", self.id));
+                TileKind::Empty
+            }
+            kind => kind,
+        }
+    }
+
     /// 既是斜坡又写在单向平台里的帧号（按斜坡算，单向平台那条不起作用）。
     pub(crate) fn slopes_also_one_way(&self) -> Vec<i32> {
         let mut frames: Vec<i32> = self.slopes.iter().map(|s| s.frame).filter(|f| self.one_way.contains(f)).collect();
@@ -111,7 +140,7 @@ impl TilemapNode {
     }
 
     /// 这种瓦片的（摩擦，弹性）。
-    fn material(&self, frame: i32) -> (f32, f32) {
+    pub(crate) fn material(&self, frame: i32) -> (f32, f32) {
         let m = self.materials.iter().find(|m| m.frame == frame);
         let pick = |v: Option<f32>, fallback: f32| v.filter(|v| v.is_finite()).unwrap_or(fallback);
         (pick(m.and_then(|m| m.friction), self.friction), pick(m.and_then(|m| m.restitution), self.restitution))
@@ -203,152 +232,154 @@ pub(crate) fn merge(solid: &[bool], cols: usize) -> Vec<Run> {
     runs
 }
 
-pub(crate) fn sync_tilemaps(mut commands: Commands, scene: Res<Scene>, time: Res<nge_ecs::Time>, mut assets: SceneAssets, nodes: Query<(Entity, &Declared<TilemapNode>)>) {
-    // 动画瓦片的相位跟着场景的时钟走：改了地图的规则、整张重建也不从头播（这一帧的动画系统还会加上这一帧的时间）
-    let phase = time.elapsed - f64::from(time.delta);
-    sync_list(&mut commands, &scene.tilemaps, &nodes, |commands, map, _, node| {
-        commands.entity(map).despawn_related::<Children>().remove::<(nge_ai::NavGrid, nge_ai::GroundMap, TileTap)>();
-        if node.cols == 0 || !(node.tile > 0.0 && node.tile.is_finite()) {
-            log::warn!("瓦片地图 {:?} 的 cols 是 0 或 tile 不是正数，不画", node.id);
+/// 块的边长（格）：写错、超出 4 … 256 的夹到范围里。
+pub(crate) fn chunk_of(node: &TilemapNode) -> usize {
+    match node.chunk {
+        None => nge_render2d::DEFAULT_CHUNK,
+        Some(c) if (MIN_CHUNK..=MAX_CHUNK).contains(&c) => c as usize,
+        Some(c) => {
+            crate::lenient::warn_once(format!("瓦片地图 {:?} 的 chunk {c} 超出 {MIN_CHUNK} … {MAX_CHUNK}，夹到范围里", node.id));
+            c.clamp(MIN_CHUNK, MAX_CHUNK) as usize
+        }
+    }
+}
+
+const MIN_CHUNK: u32 = 4;
+const MAX_CHUNK: u32 = 256;
+
+/// 地图上的东西要不要导航网格、地面地形：带视差的不要（纯装饰的层不该让追击的角色以为一路畅通）。
+fn walkable(node: &TilemapNode) -> bool {
+    ParallaxNode::resolve(node.parallax, &node.id).is_none_or(|p| p.0 == Vec2::ONE)
+}
+
+/// 除了 `data` 都一样（`data` 长度也一样）：只改了格子，按块局部改。
+fn only_cells_changed(a: &TilemapNode, b: &TilemapNode) -> bool {
+    type Shape<'a> = (&'a str, &'a str, Option<[u32; 2]>, u32, u32, u32, u32, u32, Option<ParallaxNode>, bool, Option<u32>);
+    type Rules<'a> = (&'a [i32], u32, u32, bool, &'a [i32], &'a [SlopeTile], &'a [AnimatedTile], &'a [TileMaterial]);
+    fn shape(n: &TilemapNode) -> Shape<'_> {
+        (&n.id, &n.texture, n.grid, n.tile.to_bits(), n.cols, n.x.to_bits(), n.y.to_bits(), n.z.to_bits(), n.parallax, n.tap, n.chunk)
+    }
+    fn rules(n: &TilemapNode) -> Rules<'_> {
+        (&n.solid, n.friction.to_bits(), n.restitution.to_bits(), n.collide, &n.one_way, &n.slopes, &n.animated, &n.materials)
+    }
+    a.data.len() == b.data.len() && shape(a) == shape(b) && rules(a) == rules(b)
+}
+
+pub(crate) type MapParts<'a> = (&'a mut nge_render2d::TileLayer, Option<&'a mut nge_ai::NavGrid>, Option<&'a mut nge_ai::GroundMap>, Option<&'a mut TileTap>, &'a mut crate::tile_chunks::TileBodies);
+
+pub(crate) fn sync_tilemaps(
+    mut commands: Commands,
+    scene: Res<Scene>,
+    mut assets: SceneAssets,
+    nodes: Query<(Entity, &Declared<TilemapNode>)>,
+    mut maps: Query<(&mut nge_render2d::TileLayer, Option<&mut nge_ai::NavGrid>, Option<&mut nge_ai::GroundMap>, Option<&mut TileTap>, &mut crate::tile_chunks::TileBodies)>,
+) {
+    sync_list(&mut commands, &scene.tilemaps, &nodes, |commands, map, before, node| {
+        // 只改了格子：按块局部改（见 docs/big-scene-perf.md）
+        if let Some(before) = before.filter(|b| only_cells_changed(b, node))
+            && let Ok((mut layer, mut nav, mut ground, mut tap, mut bodies)) = maps.get_mut(map)
+        {
+            let cols = node.cols as usize;
+            let edits = before.data.iter().zip(&node.data).enumerate().filter(|(_, (a, b))| a != b).map(|(i, (_, &f))| (i % cols, i / cols, f));
+            let parts: MapParts = (&mut layer, nav.as_deref_mut(), ground.as_deref_mut(), tap.as_deref_mut(), &mut bodies);
+            crate::tile_chunks::edit_map(commands, map, node, parts, edits);
             return;
         }
-        let cols = node.cols as usize;
-        let rows = node.data.len() / cols;
-        if node.data.len() % cols != 0 {
-            log::warn!("瓦片地图 {:?} 的 data 长度 {} 不是 cols {} 的整数倍，最后不满一行的不画", node.id, node.data.len(), cols);
-        }
-        let image = assets.texture(&node.id, Some(&node.texture), node.grid, 0);
-        if matches!(image, SpriteImage::Texture(_)) {
-            log::warn!("瓦片地图 {:?} 的 texture 不是图集，每格都画整张图", node.id);
-        }
-        let parallax = ParallaxNode::resolve(node.parallax, &node.id);
-        let origin = Vec2::new(node.x, node.y);
-        let tile = node.tile;
-        let center = |c: f32, r: f32| origin + Vec2::new(c * tile, -r * tile);
-        let data = &node.data[..rows * cols];
-        let animations: HashMap<i32, crate::anim::FrameAnimation> = node
-            .animated
-            .iter()
-            .filter_map(|a| match crate::anim::FrameAnimation::new(a.frames.clone(), a.fps, true) {
-                Some(anim) => Some((a.frame, anim.starting_at(phase))),
-                None => {
-                    crate::lenient::warn_once(format!("瓦片地图 {:?} 的动画瓦片 {} 要有帧、fps 要是正数，不动", node.id, a.frame));
-                    None
-                }
-            })
-            .collect();
-        for (i, &value) in data.iter().enumerate() {
-            let Ok(frame) = u32::try_from(value) else { continue };
-            let image = match image {
-                SpriteImage::Atlas(atlas, _) => SpriteImage::Atlas(atlas, frame),
-                texture => texture,
-            };
-            let at = center((i % cols) as f32 + 0.5, (i / cols) as f32 + 0.5);
-            let sprite = Sprite { image, size: Some(Vec2::splat(tile)), color: Vec4::ONE };
-            let mut tile = commands.spawn((sprite, Transform2d::from_xy(at.x, at.y).with_z(node.z), ChildOf(map)));
-            if let Some(p) = parallax {
-                tile.insert(p);
-            }
-            // 动画瓦片：每格挂一个帧动画，同时生成的一起换帧；只换这些格子，不重建地图
-            if let Some(anim) = animations.get(&value) {
-                tile.insert(anim.clone());
-            }
-        }
-        for frame in node.slopes_also_one_way() {
-            crate::lenient::warn_once(format!("瓦片地图 {:?} 的帧 {frame} 既是斜坡又写在 oneWay 里，按斜坡算（斜坡不能单向）", node.id));
-        }
-        let mut kinds: Vec<TileKind> = data.iter().map(|&v| node.kind(v)).collect();
-        for (k, v) in kinds.iter_mut().zip(data) {
-            let TileKind::Slope(left, right) = *k else { continue };
-            if !(left.is_finite() && right.is_finite() && (0.0..=1.0).contains(&left) && (0.0..=1.0).contains(&right) && left.max(right) > 0.0) {
-                crate::lenient::warn_once(format!("瓦片地图 {:?} 的斜坡帧 {v} 左右的高要是 0 … 1、不能都是 0，当空格", node.id));
-                *k = TileKind::Empty;
-            }
-        }
-        let solid = kinds.contains(&TileKind::Solid) || kinds.iter().any(|k| matches!(k, TileKind::Slope(..)));
-        if parallax.is_some_and(|p| p.0 != Vec2::ONE) && kinds.iter().any(|k| *k != TileKind::Empty) {
-            log::warn!("瓦片地图 {:?} 设了视差又有实心格子：碰撞体在声明的位置，和画面对不上", node.id);
-        }
-        // 导航网格只给有实心格子、不带视差的地图：纯装饰的层不该让追击的角色以为一路畅通。会飞的从单向平台穿过去，斜坡挡住
-        if solid && parallax.is_none_or(|p| p.0 == Vec2::ONE) {
-            let blocked = kinds.iter().map(|k| matches!(k, TileKind::Solid | TileKind::Slope(..))).collect();
-            commands.entity(map).insert(nge_ai::NavGrid { grid: nge_ai::Grid::new(cols, blocked), origin, tile });
-        }
-        // 走地面的寻路用的地形（见 docs/gameplay2d.md）：同样只给不带视差的地图
-        if kinds.iter().any(|k| *k != TileKind::Empty) && parallax.is_none_or(|p| p.0 == Vec2::ONE) {
-            let ground = kinds
-                .iter()
-                .map(|k| match *k {
-                    TileKind::Empty => nge_ai::Ground::Empty,
-                    TileKind::Solid => nge_ai::Ground::Solid,
-                    TileKind::OneWay => nge_ai::Ground::OneWay,
-                    TileKind::Slope(left, right) => nge_ai::Ground::Slope { left, right },
-                })
-                .collect();
-            commands.entity(map).insert(nge_ai::GroundMap { terrain: nge_ai::Terrain::new(cols, ground), origin, tile });
-        }
-        if node.tap {
-            let tap = TileTap { origin, tile, cols, data: data.to_vec(), z: node.z, parallax };
-            commands.entity(map).insert(tap);
-        } else {
-            commands.entity(map).remove::<TileTap>();
-        }
-        let mut spawn = |at: Vec2, collider: Collider| {
-            commands.spawn((collider, Transform2d::from_xy(at.x, at.y), TileSolid, ChildOf(map)));
-        };
-        // 斜坡：一条直线上连着的并成一块，盖住的实心格子不再单独合并（坡和坡、坡和下面的方块相接处没有棱角，见 docs/gameplay2d.md）
-        let (pieces, covered) = crate::tile_slopes::slope_pieces(&kinds, cols);
-        for p in pieces {
-            let (friction, restitution) = node.material(data[p.first]);
-            let size = Vec2::new(p.w as f32, p.h) * tile;
-            let collider = Collider { restitution, friction, events: node.collide, ..Collider::slope(size, p.left, p.right) };
-            let bottom = origin.y - (p.bottom + 1) as f32 * tile;
-            spawn(Vec2::new(origin.x + (p.col as f32 + p.w as f32 / 2.0) * tile, bottom + size.y / 2.0), collider);
-        }
-        let kinds: Vec<TileKind> = kinds.iter().zip(&covered).map(|(&k, &c)| if c { TileKind::Empty } else { k }).collect();
-        // 实心格子按材质分开合并：材质一样的才并成一块
-        let mut materials: Vec<(f32, f32)> = Vec::new();
-        for (&v, k) in data.iter().zip(&kinds) {
-            let m = node.material(v);
-            if matches!(k, TileKind::Solid | TileKind::OneWay) && !materials.contains(&m) {
-                materials.push(m);
-            }
-        }
-        for &(friction, restitution) in &materials {
-            let base = Collider { restitution, friction, events: node.collide, ..Collider::rect(Vec2::ZERO) };
-            let mask = |kind: TileKind| -> Vec<bool> { data.iter().zip(&kinds).map(|(&v, &k)| k == kind && node.material(v) == (friction, restitution)).collect() };
-            for run in merge(&mask(TileKind::Solid), cols) {
-                let size = Vec2::new(run.w as f32, run.h as f32) * tile;
-                spawn(center(run.col as f32 + run.w as f32 / 2.0, run.row as f32 + run.h as f32 / 2.0), Collider { shape: Collider::rect(size).shape, ..base });
-            }
-            // 单向平台一行一块：上下两行不并成厚的
-            let one_way = mask(TileKind::OneWay);
-            for row in 0..rows {
-                for run in merge(&one_way[row * cols..(row + 1) * cols], cols) {
-                    let size = Vec2::new(run.w as f32, 1.0) * tile;
-                    spawn(center(run.col as f32 + run.w as f32 / 2.0, row as f32 + 0.5), Collider { shape: Collider::rect(size).shape, one_way: true, ..base });
-                }
-            }
-        }
+        build_map(commands, &mut assets, map, node);
     });
+}
+
+/// 整张重建：瓦片层、导航网格、地面地形、点地图的数据、一条条的碰撞体。
+fn build_map(commands: &mut Commands, assets: &mut SceneAssets, map: Entity, node: &TilemapNode) {
+    commands.entity(map).despawn_related::<Children>().remove::<(nge_ai::NavGrid, nge_ai::GroundMap, TileTap, nge_render2d::TileLayer, crate::tile_chunks::TileBodies)>();
+    if node.cols == 0 || !(node.tile > 0.0 && node.tile.is_finite()) {
+        log::warn!("瓦片地图 {:?} 的 cols 是 0 或 tile 不是正数，不画", node.id);
+        return;
+    }
+    let cols = node.cols as usize;
+    let rows = node.data.len() / cols;
+    if node.data.len() % cols != 0 {
+        log::warn!("瓦片地图 {:?} 的 data 长度 {} 不是 cols {} 的整数倍，最后不满一行的不画", node.id, node.data.len(), cols);
+    }
+    let image = assets.texture(&node.id, Some(&node.texture), node.grid, 0);
+    if matches!(image, SpriteImage::Texture(_)) {
+        log::warn!("瓦片地图 {:?} 的 texture 不是图集，每格都画整张图", node.id);
+    }
+    let parallax = ParallaxNode::resolve(node.parallax, &node.id);
+    let origin = Vec2::new(node.x, node.y);
+    let tile = node.tile;
+    let data = &node.data[..rows * cols];
+    // 动画瓦片跟着场景的时钟走：改了地图的规则、整张重建也不从头播
+    let anims = node
+        .animated
+        .iter()
+        .filter_map(|a| {
+            if a.frames.is_empty() || !(a.fps > 0.0 && a.fps.is_finite()) {
+                crate::lenient::warn_once(format!("瓦片地图 {:?} 的动画瓦片 {} 要有帧、fps 要是正数，不动", node.id, a.frame));
+                return None;
+            }
+            Some(nge_render2d::TileAnim { frame: a.frame, frames: a.frames.clone(), fps: a.fps })
+        })
+        .collect();
+    let chunk = chunk_of(node);
+    let mut layer = nge_render2d::TileLayer::new(image, origin, tile, cols, data.to_vec(), chunk, anims, node.z);
+    layer.parallax = parallax.map(|p| p.0);
+    for frame in node.slopes_also_one_way() {
+        crate::lenient::warn_once(format!("瓦片地图 {:?} 的帧 {frame} 既是斜坡又写在 oneWay 里，按斜坡算（斜坡不能单向）", node.id));
+    }
+    let kinds: Vec<TileKind> = data.iter().map(|&v| node.checked_kind(v)).collect();
+    if parallax.is_some_and(|p| p.0 != Vec2::ONE) && kinds.iter().any(|k| *k != TileKind::Empty) {
+        log::warn!("瓦片地图 {:?} 设了视差又有实心格子：碰撞体在声明的位置，和画面对不上", node.id);
+    }
+    let mut entity = commands.entity(map);
+    entity.insert(layer);
+    if let Some(nav) = nav_grid(node, &kinds) {
+        entity.insert(nav);
+    }
+    if let Some(ground) = ground_map(node, &kinds) {
+        entity.insert(ground);
+    }
+    if node.tap {
+        entity.insert(TileTap { origin, tile, cols, data: data.to_vec(), z: node.z, parallax });
+    }
+    let bodies = crate::tile_chunks::TileBodies::build(commands, map, node, data, chunk);
+    commands.entity(map).insert(bodies);
+}
+
+/// 导航网格只给有实心格子、不带视差的地图。会飞的从单向平台穿过去，斜坡挡住。
+pub(crate) fn nav_grid(node: &TilemapNode, kinds: &[TileKind]) -> Option<nge_ai::NavGrid> {
+    let solid = kinds.iter().any(|k| matches!(k, TileKind::Solid | TileKind::Slope(..)));
+    (solid && walkable(node)).then(|| nge_ai::NavGrid { grid: nge_ai::Grid::new(node.cols as usize, kinds.iter().map(|k| k.blocks_flyers()).collect()), origin: Vec2::new(node.x, node.y), tile: node.tile })
+}
+
+/// 走地面的寻路用的地形（见 docs/gameplay2d.md）：同样只给不带视差的地图。
+pub(crate) fn ground_map(node: &TilemapNode, kinds: &[TileKind]) -> Option<nge_ai::GroundMap> {
+    let any = kinds.iter().any(|k| *k != TileKind::Empty);
+    (any && walkable(node)).then(|| nge_ai::GroundMap { terrain: nge_ai::Terrain::new(node.cols as usize, kinds.iter().map(|k| k.ground()).collect()), origin: Vec2::new(node.x, node.y), tile: node.tile })
 }
 
 #[cfg(test)]
 mod tests {
     use bevy_ecs::system::RunSystemOnce;
-    use nge_physics2d::{Physics, Shape};
+    use nge_physics2d::{Collider, Physics, Shape};
     use serde_json::json;
 
     use super::*;
     use crate::testing::{app, frame};
 
-    fn tiles(app: &mut nge_ecs::App) -> Vec<(Vec2, u32)> {
+    /// 每张地图画出来的格子：（格子中心，帧号）。
+    pub(crate) fn tiles(app: &mut nge_ecs::App) -> Vec<(Vec2, u32)> {
         let world = app.world_mut();
-        let mut v: Vec<(Vec2, u32)> = world
-            .query_filtered::<(&Sprite, &Transform2d), With<ChildOf>>()
-            .iter(world)
-            .map(|(s, t)| (t.translation, if let SpriteImage::Atlas(_, f) = s.image { f } else { u32::MAX }))
-            .collect();
+        let mut v: Vec<(Vec2, u32)> = Vec::new();
+        for layer in world.query::<&nge_render2d::TileLayer>().iter(world) {
+            for r in 0..layer.rows() {
+                for c in 0..layer.cols() {
+                    if let Some(f) = layer.drawn_frame(c, r, 0.0) {
+                        v.push((layer.origin() + Vec2::new((c as f32 + 0.5) * layer.tile(), -(r as f32 + 0.5) * layer.tile()), f));
+                    }
+                }
+            }
+        }
         v.sort_by(|a, b| (a.0.x, -a.0.y).partial_cmp(&(b.0.x, -b.0.y)).unwrap());
         v
     }
@@ -377,8 +408,8 @@ mod tests {
         let expected = [(Vec2::new(105.0, 45.0), 0), (Vec2::new(105.0, 35.0), 2), (Vec2::new(115.0, 35.0), 2), (Vec2::new(125.0, 45.0), 1)];
         assert_eq!(tiles(&mut app), expected, "不满一行的 7 不画");
         let world = app.world_mut();
-        let (s, t) = world.query_filtered::<(&Sprite, &Transform2d), With<ChildOf>>().iter(world).next().unwrap();
-        assert_eq!((s.size, t.z), (Some(Vec2::splat(10.0)), 2.0));
+        let layer = world.query::<&nge_render2d::TileLayer>().iter(world).next().unwrap();
+        assert_eq!((layer.tile(), layer.z, layer.chunk()), (10.0, 2.0, 32));
         assert!(solids(&mut app).is_empty(), "不写 solid 就不碰撞");
     }
 
@@ -387,8 +418,8 @@ mod tests {
         let mut app = app();
         frame(&mut app, Some(json!({ "tilemaps": [{ "id": "m", "texture": "grid", "tile": 10, "cols": 2, "data": [0, 1, 1, -1], "solid": [1], "parallax": [0.4, 1] }] })));
         let world = app.world_mut();
-        let drawn: Vec<Option<nge_render2d::Parallax>> = world.query_filtered::<Option<&nge_render2d::Parallax>, (With<Sprite>, With<ChildOf>)>().iter(world).map(|p| p.copied()).collect();
-        assert_eq!(drawn, [Some(nge_render2d::Parallax(Vec2::new(0.4, 1.0))); 3]);
+        let drawn: Vec<Option<Vec2>> = world.query::<&nge_render2d::TileLayer>().iter(world).map(|l| l.parallax).collect();
+        assert_eq!(drawn, [Some(Vec2::new(0.4, 1.0))]);
         assert_eq!(world.query_filtered::<(), (With<TileSolid>, With<nge_render2d::Parallax>)>().iter(world).count(), 0);
     }
 

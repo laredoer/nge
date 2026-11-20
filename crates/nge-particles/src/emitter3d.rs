@@ -3,9 +3,9 @@
 use bevy_ecs::prelude::*;
 use glam::{Quat, Vec3, Vec4};
 use nge_assets::ImageId;
-use nge_ecs::{ParticleStats, Time};
+use nge_ecs::{ParticleStats, Screen, Time};
 use nge_physics3d::Physics3d;
-use nge_render3d::{Billboards, Blend, Transform3d};
+use nge_render3d::{Billboard, Billboards, Blend, Camera3d, Facing, Transform3d};
 
 use crate::collide3d::{ParticleCollision, Raycast};
 use crate::curve::{Curve, Gradient};
@@ -222,6 +222,18 @@ impl Particles3d {
     }
 }
 
+/// 方片的外接框（每个按能转到的最大范围算）；没有方片时是空框（不画）。
+pub(crate) fn billboard_bounds<'a>(billboards: impl Iterator<Item = &'a Billboard>) -> (Vec3, Vec3) {
+    billboards.fold((Vec3::INFINITY, Vec3::NEG_INFINITY), |(lo, hi), b| {
+        let stretch = match b.facing {
+            Facing::Velocity { velocity, stretch } => velocity.length() * stretch.abs(),
+            _ => 0.0,
+        };
+        let r = Vec3::splat(b.size.abs() + stretch);
+        (lo.min(b.position - r), hi.max(b.position + r))
+    })
+}
+
 static WARNED_NO_PHYSICS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 pub(crate) fn simulate3d(
@@ -232,8 +244,13 @@ pub(crate) fn simulate3d(
     physics: Option<Res<Physics3d>>,
     mut stats: ResMut<ParticleStats>,
     mut billboards: ResMut<Billboards>,
+    screen: Res<Screen>,
+    cameras: Query<(&Camera3d, &Transform3d)>,
+    mut scratch: Local<Vec<(ImageId, Blend, Billboard)>>,
     mut emitters: Query<(Entity, &ParticleEmitter3d, &mut Particles3d, Option<&Transform3d>)>,
 ) {
+    let (camera, eye) = nge_render3d::main_camera(cameras.iter().next());
+    let view_proj = camera.view_proj(&eye, screen.size.x / screen.size.y.max(1.0));
     // 软上限按这一帧开头的存活数算，场景查询按这一帧开头要查的粒子数分
     let (alive, load) = emitters.iter().fold((0, 0), |(a, l), (_, e, p, _)| (a + p.len(), l + p.pool.scene_load(e, 0)));
     let mut budget = Budget { remaining: limits.limit.saturating_sub(alive), dropped: 0, queries: limits.max_queries, load, queried: 0 };
@@ -250,7 +267,14 @@ pub(crate) fn simulate3d(
             continue;
         }
         total += particles.len();
-        particles.pool.billboards(emitter, &mut |texture, blend, b| billboards.push(texture, blend, b));
+        scratch.clear();
+        particles.pool.billboards(emitter, &mut |texture, blend, b| scratch.push((texture, blend, b)));
+        // 整个发射器（连子发射器）都在视锥外时不交给渲染器
+        if nge_render3d::in_view(view_proj, billboard_bounds(scratch.iter().map(|s| &s.2))) {
+            for &(texture, blend, b) in scratch.iter() {
+                billboards.push(texture, blend, b);
+            }
+        }
     }
     *stats = ParticleStats { alive: total as u32, dropped: budget.dropped.min(u32::MAX as usize) as u32, queries: budget.queried };
 }
@@ -288,6 +312,30 @@ mod tests {
         }
         assert_eq!(alive(&mut app), 40 + 15, "爆炸只发一次；30/秒 × 0.5 秒");
         assert_eq!(app.world().resource::<Billboards>().quads(), 55, "每帧清空后重新放");
+    }
+
+    #[test]
+    fn emitters_outside_the_view_still_simulate_but_are_not_drawn() {
+        let mut app = app();
+        // 默认相机在 (0, 0, 5) 看 -z：背后的那个不画，前面的画
+        app.world_mut().spawn((ParticleEmitter3d { lifetime: (10.0, 10.0), speed: (0.0, 0.0), ..ParticleEmitter3d::burst(30) }, Transform3d::from_xyz(0.0, 0.0, 20.0)));
+        app.world_mut().spawn((ParticleEmitter3d { lifetime: (10.0, 10.0), speed: (0.0, 0.0), ..ParticleEmitter3d::burst(10) }, Transform3d::default()));
+        app.tick(VIEWPORT, 0.05);
+        assert_eq!(alive(&mut app), 40, "看不见的照样模拟");
+        assert_eq!(app.world().resource::<Billboards>().quads(), 10);
+        // 相机转过去以后两个都看得见
+        app.world_mut().spawn((nge_render3d::Camera3d::default(), Transform3d::from_xyz(0.0, 0.0, 40.0)));
+        app.tick(VIEWPORT, 0.05);
+        assert_eq!(app.world().resource::<Billboards>().quads(), 40);
+    }
+
+    #[test]
+    fn billboard_bounds_cover_stretched_quads() {
+        let b = |position: Vec3, facing: Facing| Billboard { position, size: 2.0, facing, ..Default::default() };
+        let quads = [b(Vec3::ZERO, Facing::Camera), b(Vec3::X * 10.0, Facing::Velocity { velocity: Vec3::Y * 3.0, stretch: 1.0 })];
+        assert_eq!(billboard_bounds(quads.iter()), (Vec3::new(-2.0, -5.0, -5.0), Vec3::new(15.0, 5.0, 5.0)));
+        let (lo, hi) = billboard_bounds([].iter());
+        assert!(lo.cmpgt(hi).all(), "没有方片是空框");
     }
 
     #[test]

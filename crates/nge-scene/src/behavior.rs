@@ -339,8 +339,6 @@ pub(crate) fn blackboard(mut reader: MessageReader<BlackboardSet>, mut agents: Q
     }
 }
 
-/// 一张地图按一种角色（跳跃能力、大小、坡）建的图（地图变了重建）。
-type Graphs = HashMap<(Entity, [u32; 6]), Arc<GroundGraph>>;
 
 /// 追到的距离：横着差多少格以内、竖着差多少格以内。
 const ARRIVE: f32 = 0.4;
@@ -372,14 +370,16 @@ pub(crate) fn run(
     maps: Query<(Entity, Ref<GroundMap>)>,
     navs: Query<&NavGrid>,
     mut agents: Query<(Entity, &SceneId, &Transform2d, &mut Agent, Option<&mut Velocity>, Option<&Character>)>,
-    mut graphs: Local<Graphs>,
+    mut graphs: Local<crate::ground_graphs::GroundGraphs>,
 ) {
     if agents.is_empty() {
         return;
     }
     let dt = time.delta;
     let changed: Vec<Entity> = maps.iter().filter(|(_, m)| m.is_changed()).map(|(e, _)| e).collect();
-    graphs.retain(|(e, _), _| !changed.contains(e) && maps.contains(*e));
+    // 地图改了先用旧图，后台 / 节流重建（见 docs/big-scene-perf.md）
+    graphs.begin(|e| maps.contains(e), &changed);
+    let now = time.elapsed;
     let targets: HashMap<&str, Vec2> = ids.iter().map(|(id, t)| (id.0.as_str(), t.translation)).collect();
     let gravity = physics.gravity().y.abs();
     // 所有地图最低的底边：比它还低就是掉出去了
@@ -409,7 +409,7 @@ pub(crate) fn run(
         let mut graph_of = |e: Entity, m: &GroundMap| {
             let walker = walker(&agent, m.tile, gravity, max_slope);
             let key = (e, [walker.reach.height, walker.reach.distance, walker.half, walker.height, walker.max_slope, m.tile].map(f32::to_bits));
-            graphs.entry(key).or_insert_with(|| Arc::new(GroundGraph::build_for(&m.terrain, walker))).clone()
+            graphs.get(key, &m.terrain, walker, now)
         };
         let covering: Vec<(&GroundMap, Arc<GroundGraph>)> =
             maps.iter().filter(|(_, m)| m.covers(me)).map(|(e, m)| (m.into_inner(), e)).map(|(m, e)| (m, graph_of(e, m))).collect();

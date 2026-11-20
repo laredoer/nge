@@ -47,6 +47,15 @@ impl Terrain {
         self.rows
     }
 
+    /// 改一格；地图外的不管。返回变没变。
+    pub fn set(&mut self, (c, r): Cell, ground: Ground) -> bool {
+        if c < 0 || r < 0 || c as usize >= self.cols || r as usize >= self.rows {
+            return false;
+        }
+        let cell = &mut self.tiles[r as usize * self.cols + c as usize];
+        std::mem::replace(cell, ground) != ground
+    }
+
     pub fn at(&self, (c, r): Cell) -> Ground {
         if c < 0 || r < 0 || c as usize >= self.cols || r as usize >= self.rows {
             return Ground::Empty;

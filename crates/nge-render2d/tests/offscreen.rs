@@ -4,7 +4,7 @@ use glam::{UVec2, Vec2, Vec4};
 use nge_core::{Ctx, Emit, Gfx, Viewport, wgpu};
 use nge_ecs::prelude::*;
 use nge_render2d::prelude::*;
-use nge_render2d::{Parallax, Repeat, SpriteImage, SpriteInstance, SpriteInstances, TextureId};
+use nge_render2d::{Parallax, Repeat, SpriteImage, SpriteInstance, SpriteInstances, TextureId, TileLayer};
 
 const SIZE: u32 = 64;
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
@@ -24,6 +24,21 @@ fn render(gfx: &Gfx, setup: impl Fn(&mut World) + Send + Sync + 'static) -> Vec<
         let setup = setup.clone();
         app.add_systems(Startup, move |world: &mut World| setup(world));
     })
+}
+
+/// 同 [`render`]，再跑一帧更新读回这一帧的裁剪统计。
+fn render_culled(gfx: &Gfx, setup: impl Fn(&mut World) + Send + Sync + 'static) -> (Vec<[u8; 4]>, nge_ecs::CullStats) {
+    let setup = std::sync::Arc::new(setup);
+    let stats = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let seen = stats.clone();
+    let pixels = render_app(gfx, move |app| {
+        let setup = setup.clone();
+        app.add_systems(Startup, move |world: &mut World| setup(world));
+        let seen = seen.clone();
+        app.add_systems(Update, move |frame: Res<nge_ecs::RenderFrame>| *seen.lock().unwrap() = Some(frame.culled()));
+    });
+    let culled = stats.lock().unwrap().expect("渲染后又更新了一帧");
+    (pixels, culled)
 }
 
 /// 同 [`render`]，但可以往 App 里加系统。
@@ -68,7 +83,9 @@ fn render_app(gfx: &Gfx, build: impl Fn(&mut App) + Send + Sync + 'static) -> Ve
     readback.map_async(wgpu::MapMode::Read, .., |r| r.expect("map"));
     gfx.device.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
     let data = readback.get_mapped_range(..).expect("mapped");
-    bytemuck::cast_slice::<u8, [u8; 4]>(&data).to_vec()
+    let pixels = bytemuck::cast_slice::<u8, [u8; 4]>(&data).to_vec();
+    game.update(&mut Ctx::new(gfx.viewport, &emit), 0.016);
+    pixels
 }
 
 fn at(pixels: &[[u8; 4]], x: u32, y: u32) -> [u8; 4] {
@@ -282,4 +299,119 @@ fn broken_blocks_on_the_fallback_draw_white_instead_of_crashing() {
         world.spawn((Sprite::from_texture(texture).with_size(Vec2::splat(SIZE as f32)), Transform2d::default()));
     });
     assert_eq!(at(&pixels, 32, 32), [255, 255, 255, 255]);
+}
+
+/// 一行 `cols` 格、`rows` 行的瓦片层，帧号都是 0，左上角在 `origin`。
+fn white_tiles(origin: Vec2, tile: f32, cols: usize, rows: usize, chunk: usize, z: f32) -> TileLayer {
+    TileLayer::new(SpriteImage::Texture(TextureId::WHITE), origin, tile, cols, vec![0; cols * rows], chunk, Vec::new(), z)
+}
+
+#[test]
+fn tile_layers_draw_only_the_chunks_in_view() {
+    let Some(gfx) = gfx() else { return eprintln!("没有可用 GPU，跳过") };
+    let (pixels, culled) = render_culled(&gfx, |world| {
+        world.insert_resource(ClearColor(wgpu::Color::BLACK));
+        // 1000 × 4 格、每格 8：左上角在屏幕左边，只有下半屏有瓦片
+        world.spawn(white_tiles(Vec2::new(-32.0, 0.0), 8.0, 1000, 4, 32, 0.0));
+    });
+    assert_eq!(at(&pixels, 32, 48), [255, 255, 255, 255], "下半屏是瓦片");
+    assert_eq!(at(&pixels, 32, 16), [0, 0, 0, 255], "上半屏没有");
+    assert_eq!(culled.chunks, [1, 32], "视野只碰到第一块");
+    // 视野 64 宽外扩一格：列 0..9，4 行
+    assert_eq!(culled.tiles, 9 * 4);
+}
+
+#[test]
+fn back_and_front_tile_layers_add_up() {
+    let Some(gfx) = gfx() else { return eprintln!("没有可用 GPU，跳过") };
+    let (pixels, culled) = render_culled(&gfx, |world| {
+        world.insert_resource(ClearColor(wgpu::Color::BLACK));
+        world.spawn(white_tiles(Vec2::new(-32.0, 32.0), 8.0, 8, 4, 4, -1.0));
+        let mut front = white_tiles(Vec2::new(-32.0, 0.0), 8.0, 8, 4, 4, 1.0);
+        // 视差 0：钉在屏幕上，相机挪开也在
+        front.parallax = Some(Vec2::ZERO);
+        world.spawn(front);
+    });
+    assert_eq!(at(&pixels, 32, 16), [255, 255, 255, 255]);
+    assert_eq!(at(&pixels, 32, 48), [255, 255, 255, 255]);
+    assert_eq!(culled.chunks, [4, 4]);
+}
+
+#[test]
+fn sprites_out_of_view_are_culled_but_counted() {
+    let Some(gfx) = gfx() else { return eprintln!("没有可用 GPU，跳过") };
+    let (pixels, culled) = render_culled(&gfx, |world| {
+        world.insert_resource(ClearColor(wgpu::Color::BLACK));
+        world.spawn((Sprite::color(Vec2::splat(16.0), Vec4::new(1.0, 0.0, 0.0, 1.0)), Transform2d::default()));
+        for i in 0..10 {
+            world.spawn((Sprite::color(Vec2::splat(16.0), Vec4::ONE), Transform2d::from_xy(500.0 + i as f32 * 20.0, 0.0)));
+        }
+        // 转了 45° 的长条：中心在视野外，一角伸进来
+        world.spawn((Sprite::color(Vec2::new(120.0, 4.0), Vec4::new(0.0, 1.0, 0.0, 1.0)), Transform2d { rotation: std::f32::consts::FRAC_PI_4, ..Transform2d::from_xy(70.0, 0.0) }));
+    });
+    assert_eq!(at(&pixels, 32, 32), [255, 0, 0, 255]);
+    assert_eq!(culled.sprites, [2, 12]);
+}
+
+/// 一直画，直到 GPU 时间读回来（最多 15 秒）；返回最后看到的（支不支持、最近一帧）。
+fn gpu_times(gfx: &Gfx) -> (bool, Option<nge_ecs::GpuTimes>) {
+    let seen = std::sync::Arc::new(std::sync::Mutex::new((false, None)));
+    let out = seen.clone();
+    let factory = nge_ecs::factory(move || {
+        let mut app = App::new();
+        app.add_plugins(Render2dPlugin);
+        app.add_systems(Startup, |mut commands: Commands| {
+            commands.spawn((Sprite::color(Vec2::splat(16.0), Vec4::ONE), Transform2d::default()));
+        });
+        let out = out.clone();
+        app.add_systems(Update, move |clock: Res<nge_ecs::GpuClock>| *out.lock().unwrap() = (clock.supported(), clock.last().cloned()));
+        app
+    });
+    let mut game = factory(gfx);
+    let emit: Emit = Box::new(|_, _| {});
+    let texture = gfx.device.create_texture(&wgpu::TextureDescriptor {
+        label: None,
+        size: wgpu::Extent3d { width: SIZE, height: SIZE, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&Default::default());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    for frame in 0.. {
+        game.update(&mut Ctx::new(gfx.viewport, &emit), 0.016);
+        let got = seen.lock().unwrap().clone();
+        // 不支持的画几帧就够了
+        if got.1.is_some() || (!got.0 && frame > 3) || std::time::Instant::now() > deadline {
+            return got;
+        }
+        let mut encoder = gfx.device.create_command_encoder(&Default::default());
+        game.render(gfx, &mut encoder, &view);
+        gfx.queue.submit([encoder.finish()]);
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    unreachable!()
+}
+
+#[test]
+fn gpu_time_is_read_back_without_waiting_when_timestamps_are_supported() {
+    let Some(gfx) = gfx_with(wgpu::Features::TIMESTAMP_QUERY) else { return eprintln!("没有可用 GPU，跳过") };
+    if !gfx.device.features().contains(wgpu::Features::TIMESTAMP_QUERY) {
+        return eprintln!("GPU 不支持时间戳，跳过");
+    }
+    let (supported, times) = gpu_times(&gfx);
+    assert!(supported);
+    let times = times.expect("15 秒内读回来了");
+    assert_eq!(times.passes.iter().map(|p| p.0).collect::<Vec<_>>(), ["精灵"]);
+    assert!(times.total_ms >= 0.0 && times.total_ms < 1000.0, "{times:?}");
+}
+
+#[test]
+fn without_timestamps_gpu_time_is_unsupported_and_drawing_still_works() {
+    let Some(gfx) = gfx() else { return eprintln!("没有可用 GPU，跳过") };
+    let (supported, times) = gpu_times(&gfx);
+    assert!(!supported && times.is_none());
 }

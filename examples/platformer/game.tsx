@@ -1,6 +1,6 @@
 import { batch, effect, keymap, type NativeComponentRef, platform, safeArea, signal, Text, View } from "nsh";
 import { Button } from "nsh/base";
-import { ActionButton, floatText, gameView, httpClient, inputMap, netRoom, push, saved, saveSlots, sound, touchGestures, transitions, tween, VirtualStick, type ActionEvent, type Gesture, type Scene, type SpriteNode } from "../../ts/nge";
+import { ActionButton, floatText, gameView, httpClient, inputMap, netRoom, push, saved, saveSlots, setTiles, sound, touchGestures, transitions, tween, VirtualStick, type ActionEvent, type Gesture, type Scene, type SpriteNode, type Tap } from "../../ts/nge";
 import { DEFAULT_CONTROLS, guestSprite, PLAYER_GROUP } from "./controls";
 import { remapPlace, RemapPanel } from "./remap";
 import { COIN_SHADER, FLASH, FLASH_MS, levelAudio, night, portalOver, POST, SHADERS, stonesNear } from "./effects";
@@ -9,6 +9,7 @@ import { NEW_SAVE, nextSlot, SAVE_MIGRATIONS, SAVE_VERSION, saveDataOf, saveSumm
 import { hpBar, outOfHearts, padPlace, stickPlace, TITLE_HOLD_MS, titleBubble, zoomBy } from "./hud";
 import { boardOf, leaderOf, nameTags, netLabel, netNode, netSetting, playerName, remotePlayers, scoresUrl, submitUrl, type Leader } from "./online";
 import { labAction, labScene, levelAfterLab } from "./lab";
+import { BIG_MAP, bigScene, digOf } from "./bigmap";
 import { GROVES, levelTransition, PREFABS, TEXTURES } from "./prefabs";
 import { campfireAt, finish, flagOn, HERO, JELLY_ZONE, jellyAt, LEVELS, TILE, TOWER_TRIGGER, towerAt, towerSpot, walkerSprites, type Built, type Progress } from "./levels";
 
@@ -114,6 +115,9 @@ export function Game(props: GameProps = {}) {
   let titleEnd: ReturnType<typeof setTimeout> | undefined;
   /** 在 3D 试验场里（按 G 进出，桌面上）：场景换成 `labScene()`，存档、语言、联网、选关不响应。 */
   const inLab = signal(false);
+  /** 在大地图里（按 B 进出，桌面上）：点地面挖一格，U 填回最近挖的一格。见 docs/big-scene-perf.md。 */
+  const inBig = signal(false);
+  let dug: [number, number, number][] = [];
   /** 刚被撞回起点：角色闪白一下。 */
   const flashing = signal(false);
   let flashEnd: ReturnType<typeof setTimeout> | undefined;
@@ -226,6 +230,7 @@ export function Game(props: GameProps = {}) {
     t.models.filter((m) => m.body?.kind !== "fixed").forEach((m, i) => push(game, { id: m.id, x: 160 + i * 25, y: 120 + i * 40, z: (i % 2 ? 1 : -1) * 60 }));
   };
 
+  const playerSprite = (): SpriteNode => ({ id: "player", w: 24, h: 32, z: 5, ...HERO, body: { kind: "character", friction: 0, collide: true, group: PLAYER_GROUP } });
   const scene = (): Scene => ({
     level: levelId(),
     transition: levelTransition(level(), [COIN_SOUND, WIN_SOUND]),
@@ -257,7 +262,7 @@ export function Game(props: GameProps = {}) {
       ...BACKDROP,
       ...(levels[level()].night ? stonesNear(3 * TILE) : []),
       ...remotePlayers(room.peers()),
-      { id: "player", x: now().spawn[0], y: now().spawn[1], w: 24, h: 32, z: 5, ...HERO, body: { kind: "character", friction: 0, collide: true, group: PLAYER_GROUP }, ...(flashing() ? FLASH : {}) },
+      { ...playerSprite(), x: now().spawn[0], y: now().spawn[1], ...(flashing() ? FLASH : {}) },
       // 第二个手柄接入时多一个角色，拔掉就去掉
       ...(input.padOf(1) === null ? [] : [guestSprite(now().spawn)]),
       // 金币自己发光，夜里也不暗
@@ -308,6 +313,31 @@ export function Game(props: GameProps = {}) {
       trial !== undefined ? "" : " · ",
       trial !== undefined ? "" : netLabel(t, online.on(), room.status(), room.peers().length, room.error()),
     ].join("");
+  /** 进出大地图：进去时这一关的事件都不算了；出来时这一关从头开始。 */
+  const toggleBig = () => {
+    dug = [];
+    if (inBig()) {
+      inBig.set(false);
+      return play(level());
+    }
+    clearTimeout(next);
+    next = undefined;
+    switching = true;
+    inBig.set(true);
+  };
+  const dig = (tap: Tap) => {
+    const cell = digOf(tap);
+    if (cell === null) return;
+    dug = [...dug, cell];
+    setTiles(game, { id: BIG_MAP, tiles: [[cell[0], cell[1], -1]] });
+  };
+  const undig = () => {
+    const last = dug.at(-1);
+    if (last === undefined) return;
+    dug = dug.slice(0, -1);
+    setTiles(game, { id: BIG_MAP, tiles: [last] });
+  };
+
   /** 进出试验场：进去时这一关的事件都不算了；出来时这一关从头开始。 */
   const toggleLab = () => {
     if (inLab()) {
@@ -326,17 +356,17 @@ export function Game(props: GameProps = {}) {
   return (
     // 让开系统栏和刘海（手机上状态栏盖在最上面；横过来时刘海在左右）
     <View class="flex-1 bg-black" style={{ paddingTop: safeArea().top, paddingLeft: safeArea().left, paddingRight: safeArea().right }}>
-      <Text class="text-white p-4">{inLab() ? t("lab") : fade.loading() ? t("loading", fade.progress()) : status()}</Text>
+      <Text class="text-white p-4">{inLab() ? t("lab") : inBig() ? t("big") : fade.loading() ? t("loading", fade.progress()) : status()}</Text>
       <GameView
         class="flex-1"
         {...pinchZoom}
         ref={(n: NativeComponentRef) => (game = n)}
-        scene={inLab() ? labScene() : scene()}
+        scene={inLab() ? labScene() : inBig() ? bigScene(playerSprite(), zoom()) : scene()}
         actions={input.prop()}
         onPad={input.handlePad}
         onAction={(e: ActionEvent) => {
           input.handle(e);
-          if (!e.down || e.player !== 0) return;
+          if (!e.down || e.player !== 0 || inBig()) return;
           // 试验场的开关也是动作（controls.json 里的 lab，默认 G）：改键时和别的动作一样查冲突
           const gate = labAction(e.action, inLab(), platform.desktop && trial === undefined);
           if (gate === "toggle") return toggleLab();
@@ -359,6 +389,7 @@ export function Game(props: GameProps = {}) {
           // 换关时记下打到第几关；坏了的存档位不覆盖
           if (!brokenSlot()) persist();
         }}
+        onTap={(e: Tap) => inBig() && dig(e)}
         onCollide={(e) => {
           if (switching || (e.a !== "player" && e.b !== "player")) return;
           const other = e.a === "player" ? e.b : e.a;
@@ -390,6 +421,8 @@ export function Game(props: GameProps = {}) {
             return;
           }
           if (inLab() || fade.busy()) return;
+          if (e.down && !e.repeat && e.code === "KeyB" && platform.desktop) return toggleBig();
+          if (inBig()) return e.down && !e.repeat && e.code === "KeyU" ? undig() : undefined;
           // 换存档、语言、联网是动作（onAction）；Digit1 … Digit9：选已经解锁的关
           const n = /^Digit([1-9])$/.exec(e.code)?.[1];
           if (!e.down || e.repeat || n === undefined) return;

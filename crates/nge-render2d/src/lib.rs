@@ -14,6 +14,7 @@ mod post;
 mod renderer;
 mod repeat;
 mod sprite;
+mod tiles;
 mod warm;
 
 /// 单元测试用的 GPU；没有时是 `None`（测试跳过）。
@@ -36,6 +37,7 @@ pub use gizmos::{GIZMO_Z, Gizmos};
 pub use renderer::{PointerWorld, Render2dPlugin};
 pub use repeat::{MAX_COPIES, Repeat};
 pub use sprite::{Sprite, SpriteImage, SpriteInstance, SpriteInstances};
+pub use tiles::{DEFAULT_CHUNK, KEEP_FRAMES, TileAnim, TileDrawStats, TileLayer, View2d};
 
 pub mod prelude {
     pub use crate::{AssetServer, Assets, Atlases, Camera2d, ClearColor, DrawAt, Gizmos, Grid, Image, Render2dPlugin, Sprite, Transform2d};

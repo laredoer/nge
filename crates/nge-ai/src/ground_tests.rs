@@ -268,3 +268,11 @@ fn ground_maps_see_over_slopes_and_through_one_way_rows() {
     assert!(!m.sees(Vec2::new(0.5, -2.5), Vec2::new(4.5, -2.5)), "实心的挡");
     assert!(m.covers(Vec2::new(1.0, -1.0)) && !m.covers(Vec2::new(1.0, -5.0)) && !m.covers(Vec2::new(1.0, 2.0)));
 }
+
+#[test]
+fn set_changes_one_tile_inside_the_terrain() {
+    let mut t = Terrain::new(2, vec![Ground::Empty; 4]);
+    assert!(t.set((1, 1), Ground::Solid) && t.at((1, 1)) == Ground::Solid);
+    assert!(!t.set((1, 1), Ground::Solid), "没变");
+    assert!(!t.set((2, 0), Ground::Solid) && !t.set((0, -1), Ground::Solid), "地图外");
+}

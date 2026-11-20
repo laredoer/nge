@@ -14,7 +14,8 @@ use serde_json::Value as JsonValue;
 
 use crate::actions::{ActionMap, Actions, ActionsUpdated, Rumble, flush_rumble, update_actions};
 use crate::input::Input;
-use crate::perf::{ParticleStats, Perf};
+use crate::gpu_time::GpuClock;
+use crate::perf::{ParticleStats, Perf, PerfHistory, PerfSample};
 use crate::render::{ClearColor, Interleave, RenderFrame};
 use crate::resources::{NshCommand, Outbox, Props, Screen, Time};
 
@@ -96,6 +97,8 @@ impl App {
         world.init_resource::<RenderFrame>();
         world.init_resource::<Interleave>();
         world.init_resource::<Perf>();
+        world.init_resource::<PerfHistory>();
+        world.init_resource::<GpuClock>();
         world.init_resource::<ParticleStats>();
         for schedule in [Schedule::new(Startup), Schedule::new(PreUpdate), Schedule::new(Update), Schedule::new(PostUpdate), Schedule::new(Last)] {
             world.add_schedule(schedule);
@@ -308,7 +311,17 @@ impl App {
     }
 }
 
-struct EcsGame(App);
+/// 数实体用的查询（只看匹配的 archetype 有多大，不逐个数）。
+type EntityCount = QueryState<(), Without<bevy_ecs::resource::IsResource>>;
+
+struct EcsGame(App, Option<EntityCount>);
+
+/// 实体数：资源在 bevy 里也是实体，不算；停用的也不算。
+fn count_entities(world: &mut World, state: &mut Option<EntityCount>) -> u32 {
+    let state = state.get_or_insert_with(|| world.query_filtered());
+    state.update_archetypes(world);
+    state.matched_archetypes().map(|id| world.archetypes()[id].len()).sum()
+}
 
 impl Game for EcsGame {
     fn command(&mut self, _ctx: &mut Ctx, name: &str, args: &JsonValue) {
@@ -328,15 +341,34 @@ impl Game for EcsGame {
     fn timing(&mut self, timing: FrameTiming) {
         let world = &mut self.0.world;
         let (draws, instances) = world.resource::<RenderFrame>().counts();
+        let cull = world.resource::<RenderFrame>().culled();
         let particles = world.resource::<ParticleStats>().alive;
-        world.resource_scope(|world, mut perf: Mut<Perf>| {
-            perf.particles(particles);
-            // 资源在 bevy 里也是实体，不算
-            perf.record(timing, draws, instances, || world.query_filtered::<(), Without<bevy_ecs::resource::IsResource>>().iter(world).count() as u32);
-        });
+        let entities = count_entities(world, &mut self.1);
+        let mut clock = world.resource_mut::<GpuClock>();
+        let (gpu_ms, supported) = (clock.take_fresh(), clock.supported());
+        let mut perf = world.resource_mut::<Perf>();
+        perf.particles(particles);
+        perf.gpu(gpu_ms, supported);
+        perf.cull(cull);
+        perf.record(timing, draws, instances, || entities);
+        if timing.frame.is_finite() && timing.frame >= 0.0 {
+            let t = timing.sanitized();
+            let ms = |s: f32| s * 1000.0;
+            let gpu_ms = world.resource::<GpuClock>().last().map(|t| t.total_ms);
+            let sample = PerfSample { frame_ms: ms(t.frame), update_ms: ms(t.update), render_ms: ms(t.render), wait_ms: ms(t.wait), gpu_ms, entities, draws };
+            world.resource_mut::<PerfHistory>().push(sample);
+        }
     }
 
     fn render(&mut self, gfx: &Gfx, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView) {
+        self.0.world.resource_mut::<GpuClock>().begin(gfx);
+        self.render_all(gfx, encoder, target);
+        self.0.world.resource_mut::<GpuClock>().end(encoder);
+    }
+}
+
+impl EcsGame {
+    fn render_all(&mut self, gfx: &Gfx, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView) {
         let App { world, renderers, post, offscreen, .. } = &mut self.0;
         world.resource_mut::<RenderFrame>().reset();
         if let Some(post) = post.as_mut() {
@@ -381,7 +413,7 @@ fn offscreen_view(gfx: &Gfx, [width, height]: [u32; 2]) -> wgpu::TextureView {
 
 /// 把构建 App 的函数包成引擎的游戏工厂，交给平台层注册。App 在渲染线程上构建。
 pub fn factory(build: impl Fn() -> App + Send + Sync + 'static) -> GameFactory {
-    Arc::new(move |_gfx: &Gfx| Box::new(EcsGame(build())) as Box<dyn Game>)
+    Arc::new(move |_gfx: &Gfx| Box::new(EcsGame(build(), None)) as Box<dyn Game>)
 }
 
 #[cfg(test)]
@@ -400,7 +432,7 @@ mod tests {
 
     #[test]
     fn timing_goes_into_perf_with_this_frames_draws_and_entities() {
-        let mut game = EcsGame(App::new());
+        let mut game = EcsGame(App::new(), None);
         #[derive(Component)]
         struct Thing;
         game.0.world.spawn_batch((0..5).map(|_| Thing));
@@ -411,6 +443,27 @@ mod tests {
         let report = *game.0.world.resource::<Perf>().report().expect("一帧就满了半秒");
         assert_eq!((report.draws, report.instances, report.entities, report.particles), (4, 120, 6, 33), "资源不算");
         assert!((report.wait_ms - 500.0).abs() < 1e-3, "{report:?}");
+        assert_eq!((report.gpu_ms, report.gpu_supported), (None, false), "没有设备");
+        let history = game.0.world.resource::<PerfHistory>();
+        let last = *history.samples().last().expect("每帧记一笔");
+        assert_eq!((last.entities, last.draws, last.gpu_ms), (6, 4, None));
+        assert!((last.frame_ms - 600.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn entity_count_skips_resources_and_disabled_entities_and_follows_despawns() {
+        let mut game = EcsGame(App::new(), None);
+        #[derive(Component)]
+        struct Thing;
+        let world = &mut game.0.world;
+        let things: Vec<Entity> = world.spawn_batch((0..5).map(|_| Thing)).collect();
+        world.spawn((Thing, bevy_ecs::entity_disabling::Disabled));
+        assert_eq!(count_entities(&mut game.0.world, &mut game.1), 5);
+        game.0.world.despawn(things[0]);
+        game.0.world.spawn_empty();
+        assert_eq!(count_entities(&mut game.0.world, &mut game.1), 5);
+        let slow = game.0.world.query_filtered::<(), Without<bevy_ecs::resource::IsResource>>().iter(&game.0.world).count() as u32;
+        assert_eq!(slow, 5, "和逐个数的一样");
     }
 
     #[test]

@@ -2,8 +2,8 @@
 
 use bevy_ecs::prelude::*;
 use glam::{Vec2, Vec4};
-use nge_ecs::Time;
-use nge_render2d::{SpriteImage, SpriteInstance, SpriteInstances, TextureId, Transform2d};
+use nge_ecs::{Screen, Time};
+use nge_render2d::{Camera2d, SpriteImage, SpriteInstance, SpriteInstances, TextureId, Transform2d, View2d};
 
 use crate::rng::Rng;
 
@@ -146,6 +146,12 @@ impl Particles {
         self.burst_done && emitter.rate <= 0.0 && self.particles.is_empty()
     }
 
+    /// 所有粒子的外接框；没有粒子时是空框。
+    fn bounds(&self, emitter: &ParticleEmitter) -> (Vec2, Vec2) {
+        let r = Vec2::splat(emitter.size.0.abs().max(emitter.size.1.abs()) / 2.0);
+        self.particles.iter().fold((Vec2::INFINITY, Vec2::NEG_INFINITY), |(lo, hi), p| (lo.min(p.position - r), hi.max(p.position + r)))
+    }
+
     fn instances<'a>(&'a self, emitter: &'a ParticleEmitter, z: f32) -> impl Iterator<Item = SpriteInstance> + 'a {
         let (size0, size1) = emitter.size;
         let (color0, color1) = emitter.color;
@@ -166,8 +172,11 @@ pub(crate) fn simulate(
     mut commands: Commands,
     time: Res<Time>,
     mut instances: ResMut<SpriteInstances>,
+    screen: Res<Screen>,
+    cameras: Query<&Camera2d>,
     mut emitters: Query<(Entity, &ParticleEmitter, &mut Particles, Option<&Transform2d>)>,
 ) {
+    let view = View2d::new(cameras.iter().next().copied().unwrap_or_default(), screen.size);
     for (entity, emitter, mut particles, transform) in &mut emitters {
         let transform = transform.copied().unwrap_or_default();
         particles.step(emitter, transform.translation, time.delta);
@@ -175,7 +184,11 @@ pub(crate) fn simulate(
             commands.entity(entity).despawn();
             continue;
         }
-        instances.extend(emitter.texture, particles.instances(emitter, transform.z));
+        // 整个发射器都在视野外时不交给渲染器
+        let (lo, hi) = particles.bounds(emitter);
+        if view.overlaps(lo, hi, 0.0) {
+            instances.extend(emitter.texture, particles.instances(emitter, transform.z));
+        }
     }
 }
 
@@ -209,6 +222,19 @@ mod tests {
         assert_eq!(app.world().resource::<SpriteInstances>().len(), 100);
         app.tick(VIEWPORT, 0.016);
         assert_eq!(alive(&mut app), 100, "只在第一帧发射");
+    }
+
+    #[test]
+    fn emitters_outside_the_view_still_simulate_but_are_not_drawn() {
+        let mut app = app();
+        app.world_mut().spawn((ParticleEmitter { lifetime: (10.0, 10.0), speed: (0.0, 0.0), ..ParticleEmitter::burst(30) }, Transform2d::from_xy(500.0, 0.0)));
+        app.world_mut().spawn((ParticleEmitter { lifetime: (10.0, 10.0), speed: (0.0, 0.0), ..ParticleEmitter::burst(10) }, Transform2d::from_xy(48.0, 0.0)));
+        app.tick(VIEWPORT, 0.016);
+        assert_eq!(alive(&mut app), 40, "看不见的照样模拟");
+        assert_eq!(app.world().resource::<SpriteInstances>().len(), 10, "压在视野边上的照画");
+        app.world_mut().spawn(Camera2d { position: Vec2::new(500.0, 0.0), ..Default::default() });
+        app.tick(VIEWPORT, 0.016);
+        assert_eq!(app.world().resource::<SpriteInstances>().len(), 30);
     }
 
     #[test]

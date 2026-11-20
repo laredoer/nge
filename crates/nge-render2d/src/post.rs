@@ -43,9 +43,15 @@ impl PostProcess for PostRenderer {
     fn process(&mut self, world: &mut World, gfx: &Gfx, encoder: &mut wgpu::CommandEncoder, source: &wgpu::TextureView, target: &wgpu::TextureView) {
         let effects: Vec<PostEffect> = world.resource::<PostEffects>().layer(PostLayer::Screen).cloned().collect();
         let time = world.resource::<Time>().elapsed as f32;
-        let count = self.chain.run(gfx, world.resource::<Shaders>(), encoder, &effects, source, target, time);
+        let timers = post_timers(world, effects.len());
+        let count = self.chain.run(gfx, world.resource::<Shaders>(), encoder, &effects, source, target, time, &timers);
         world.resource_mut::<nge_ecs::RenderFrame>().count(count, 0);
     }
+}
+
+/// 每遍后处理一个 GPU 计时（至少一个：没有能用的效果时原样搬一遍）。bloom 里面的几遍不计时。
+pub(crate) fn post_timers(world: &mut World, effects: usize) -> Vec<Option<nge_ecs::PassTimer>> {
+    (0..effects.max(1)).map(|_| nge_ecs::pass_timer(world, "后处理")).collect()
 }
 
 /// 一串后处理：按顺序一遍遍画（两张中间纹理来回用），最后一遍画到目标上。整屏和背景层各用一个（uniform 不共用）。
@@ -70,7 +76,7 @@ impl PostChain {
 
     /// 从 `source` 画到 `target`；用不了的跳过，一遍都用不了时原样搬。返回画了几遍。
     #[allow(clippy::too_many_arguments)]
-    pub fn run(&mut self, gfx: &Gfx, shaders: &Shaders, encoder: &mut wgpu::CommandEncoder, effects: &[PostEffect], source: &wgpu::TextureView, target: &wgpu::TextureView, time: f32) -> u32 {
+    pub fn run(&mut self, gfx: &Gfx, shaders: &Shaders, encoder: &mut wgpu::CommandEncoder, effects: &[PostEffect], source: &wgpu::TextureView, target: &wgpu::TextureView, time: f32, timers: &[Option<nge_ecs::PassTimer>]) -> u32 {
         let gpu = self.gpu.get_or_insert_with(|| Gpu::new(gfx));
         // 管线、中间纹理都按目标的格式（平常就是 gfx.format）
         let format = gfx.target_format(target);
@@ -121,6 +127,7 @@ impl PostChain {
                     };
                     let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                         label: Some("post"),
+                        timestamp_writes: timers.get(i).and_then(Option::as_ref).map(nge_ecs::PassTimer::writes),
                         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                             view: &output,
                             depth_slice: None,

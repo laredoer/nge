@@ -124,6 +124,13 @@ struct MeshRenderer {
     /// 这一帧有没有要软化的方片。
     billboard_soft: bool,
     scratch: Scratch,
+    /// 每个 draw 在不在相机视锥里（复用）。
+    visible: Vec<bool>,
+}
+
+/// 包围盒和视锥相交的才画；包围盒算坏了的照画（不该让东西凭空消失）。
+pub fn in_view(view_proj: Mat4, bounds: (Vec3, Vec3)) -> bool {
+    !(bounds.0.is_finite() && bounds.1.is_finite()) || crate::shadow_views::intersects(view_proj, bounds)
 }
 
 impl Renderer for MeshRenderer {
@@ -162,11 +169,13 @@ impl Renderer for MeshRenderer {
         }
         gpu.lines.prepare(gfx, view_proj, world.resource::<Gizmos3d>());
         gpu.write_draws(gfx, &self.draws, &mut self.bytes, &self.joints);
-        // 半透明的不投影子；一个算坏了的包围盒不该让整个场景的影子消失
+        // 半透明的不投影子；一个算坏了的包围盒不该让整个场景的影子消失。视锥外的不画，影子照样投
         self.casters.clear();
-        for (index, d) in self.draws.iter().enumerate().filter(|(_, d)| !d.blend) {
+        self.visible.clear();
+        for (index, d) in self.draws.iter().enumerate() {
             let bounds = gpu.world_bounds(d, &self.joints);
-            if bounds.0.is_finite() && bounds.1.is_finite() {
+            self.visible.push(in_view(view_proj, bounds));
+            if !d.blend && bounds.0.is_finite() && bounds.1.is_finite() {
                 self.casters.push(Caster { index, skinned: d.joints.is_some(), bounds });
             }
         }
@@ -184,16 +193,21 @@ impl Renderer for MeshRenderer {
         let billboard_view = crate::billboard_gpu::ViewRaw::new(&globals.0);
         gpu.billboards.prepare(gfx, &billboard_view, &self.billboard_vertices);
         gfx.queue.write_buffer(&gpu.globals, 0, bytemuck::bytes_of(&globals.0));
+        let timers: Vec<Option<nge_ecs::PassTimer>> = (0..gpu.shadow.pass_count()).map(|_| nge_ecs::pass_timer(world, "阴影")).collect();
         let g = &*gpu;
-        let shadow_draws = g.shadow.draw(encoder, &self.casters, |pass, i| {
+        let shadow_draws = g.shadow.draw(encoder, &self.casters, &timers, |pass, i| {
             let draw = &self.draws[i];
             let mesh = &g.meshes[draw.mesh.0 as usize];
             pass.set_bind_group(1, &g.draws_group, &[(i as u64 * g.stride) as u32]);
             mesh.bind(pass, draw);
             pass.draw_indexed(0..mesh.count, 0, 0..1);
         });
-        let n = self.draws.len() as u32;
-        world.resource_mut::<RenderFrame>().count(n + shadow_draws, n);
+        let n = self.visible.iter().filter(|&&v| v).count() as u32;
+        let mut frame = world.resource_mut::<RenderFrame>();
+        frame.count(n + shadow_draws, n);
+        let cull = frame.cull_mut();
+        cull.meshes[0] += n;
+        cull.meshes[1] += self.draws.len() as u32;
         let billboards = world.resource::<Billboards>();
         let quads = (billboards.quads() + billboards.ribbons()) as u32;
         world.resource_mut::<RenderFrame>().count(self.billboard_batches.len() as u32, quads);
@@ -216,8 +230,10 @@ impl Renderer for MeshRenderer {
 
         let clear = *world.resource::<ClearColor>();
         let load = world.resource_mut::<RenderFrame>().color_load(clear);
+        let timer = nge_ecs::pass_timer(world, "网格");
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("meshes"),
+            timestamp_writes: timer.as_ref().map(nge_ecs::PassTimer::writes),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: target,
                 depth_slice: None,
@@ -238,6 +254,9 @@ impl Renderer for MeshRenderer {
             if i == opaque {
                 gpu.sky.draw(&mut pass, &globals.0);
             }
+            if !self.visible[i] {
+                continue;
+            }
             let mesh = &gpu.meshes[draw.mesh.0 as usize];
             let texture = gpu.texture(draw.texture);
             pass.set_pipeline(&gpu.pipelines[draw.pipeline]);
@@ -257,8 +276,10 @@ impl Renderer for MeshRenderer {
             return;
         }
         drop(pass);
+        let timer = nge_ecs::pass_timer(world, "软粒子");
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("soft billboards"),
+            timestamp_writes: timer.as_ref().map(nge_ecs::PassTimer::writes),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: target, depth_slice: None, resolve_target: None, ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store } })],
             // 只读：同一张深度纹理同时绑在 billboards 的 bind group 里
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment { view: depth, depth_ops: None, stencil_ops: None }),
@@ -269,8 +290,10 @@ impl Renderer for MeshRenderer {
         if gpu.lines.draws() == 0 {
             return;
         }
+        let timer = nge_ecs::pass_timer(world, "调试线");
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("lines"),
+            timestamp_writes: timer.as_ref().map(nge_ecs::PassTimer::writes),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: target, depth_slice: None, resolve_target: None, ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store } })],
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                 view: depth,
@@ -665,6 +688,18 @@ fn pipeline(gfx: &Gfx, layout: &wgpu::PipelineLayout, module: &wgpu::ShaderModul
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_boxes_in_the_frustum_are_drawn() {
+        let proj = crate::Camera3d { near: 0.1, far: 100.0, ..Default::default() }.view_proj(&crate::Transform3d::default(), 1.0);
+        let unit = |c: Vec3| (c - Vec3::splat(0.5), c + Vec3::splat(0.5));
+        assert!(in_view(proj, unit(Vec3::new(0.0, 0.0, -5.0))), "正前方");
+        assert!(!in_view(proj, unit(Vec3::new(0.0, 0.0, 5.0))), "背后");
+        assert!(!in_view(proj, unit(Vec3::new(20.0, 0.0, -5.0))), "旁边");
+        assert!(!in_view(proj, unit(Vec3::new(0.0, 0.0, -200.0))), "远平面以外");
+        assert!(in_view(proj, (Vec3::new(-100.0, -0.5, -3.0), Vec3::new(100.0, 0.5, -2.0))), "横穿视野、角都在外面");
+        assert!(in_view(proj, (Vec3::splat(f32::NAN), Vec3::ONE)), "算坏了的照画");
+    }
 
     #[test]
     fn gltf_models_resolve_once_loaded() {

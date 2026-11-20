@@ -14,6 +14,7 @@ mod behavior;
 mod camera;
 #[cfg(not(all(feature = "physics3d", feature = "ai", feature = "net")))]
 mod disabled;
+mod ground_graphs;
 mod effects;
 mod joints;
 mod joints3d;
@@ -32,12 +33,18 @@ mod quality3d;
 #[cfg_attr(not(feature = "physics3d"), allow(dead_code))]
 mod query3d;
 mod resolve;
+mod scene_perf;
 mod sync;
 mod sync_nodes;
+mod tile_chunks;
 mod tile_slopes;
 mod tilemap;
 #[cfg(test)]
 mod tilemap_tests;
+#[cfg(test)]
+mod tile_chunks_tests;
+#[cfg(test)]
+mod tile_perf_tests;
 mod transition;
 mod world_ui;
 
@@ -75,6 +82,8 @@ pub use preload::{Failed, PRELOAD, PRELOADED, Preload, PreloadProgress};
 pub use protocol::{Bounds, CameraNode, Color, SCENE, Scene, SpriteNode, TAP, Tap, TextureOptions};
 pub use transition::{SceneTransition, TRANSITION, scene_ready, TransitionEvent, TransitionKind, TransitionNode};
 pub use sync::SceneId;
+pub use scene_perf::{PERF, PerfEvent, PerfEvents, PerfNode};
+pub use tile_chunks::{SET_TILES, SetTiles};
 pub use tilemap::TilemapNode;
 
 /// 注册 `scene` prop、`tap` 等事件、`burst` / `floatText` / `push` / `sound` / `tween` / `shake` command 和命名纹理。
@@ -163,7 +172,7 @@ impl Plugin for ScenePlugin {
         let synced = (
             sync::sync_sprites,
             sync::sync_time_scale,
-            sync::sync_perf,
+            scene_perf::sync_perf,
             tilemap::sync_tilemaps,
             camera::sync_camera,
             sync_nodes::sync_texts,
@@ -186,10 +195,14 @@ impl Plugin for ScenePlugin {
             .init_resource::<camera::CameraRig>()
             .add_prop(SCENE)
             .add_event(TAP)
+            .add_event(scene_perf::PERF)
+            .init_resource::<scene_perf::PerfEvents>()
+            .add_systems(Update, scene_perf::send_perf)
             .add_command(BURST)
             .add_command(FLOAT_TEXT)
             .add_command(PUSH)
             .add_command(DROP_THROUGH)
+            .add_command(tile_chunks::SET_TILES)
             .add_command(SOUND)
             .add_command(TWEEN)
             .add_command(SHAKE)
@@ -229,7 +242,7 @@ impl Plugin for ScenePlugin {
             .add_systems(PreUpdate, level::switch_level.run_if(transition::scene_ready).before(sync::sync_sprites))
             .add_systems(PreUpdate, synced.run_if(transition::scene_ready).after(level::switch_level).before(PointerWorld))
             .add_systems(PreUpdate, match2d::match_2d.after(sync_nodes::sync_camera3d).after(camera::sync_camera).before(PointerWorld))
-            .add_systems(Update, (behave::spin, behave::tap, behave::burst, behave::float_text, physics::push, physics::drop_through, audio::play_sound, anim::animate))
+            .add_systems(Update, (behave::spin, behave::tap, behave::burst, behave::float_text, physics::push, physics::drop_through, tile_chunks::set_tiles, audio::play_sound, anim::animate))
             // 补间最后写，盖过 spin / push 这一帧的改动
             .add_systems(Update, (anim::start_tweens, anim::tween).chain().after(behave::spin).after(physics::push))
             // 精灵和关节都同步完了再连：关节可以在精灵之后才出现，反过来也行
