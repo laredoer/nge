@@ -366,9 +366,39 @@ impl Loader<'_> {
             return id;
         }
         let pbr = m.pbr_metallic_roughness();
-        let texture = pbr.base_color_texture().and_then(|info| {
+        let base_color_texture = pbr.base_color_texture().and_then(|info| {
             if info.tex_coord() != 0 {
                 log::warn!("glTF 材质 {index} 用了第 {} 套 uv，只支持第 0 套", info.tex_coord());
+            }
+            self.texture(info.texture().source().index())
+        });
+        let (normal_texture, normal_scale) = match m.normal_texture() {
+            Some(info) => {
+                if info.tex_coord() != 0 {
+                    log::warn!("glTF 材质 {index} 法线图用了第 {} 套 uv，只支持第 0 套", info.tex_coord());
+                }
+                (self.texture(info.texture().source().index()), info.scale())
+            }
+            None => (None, 1.0),
+        };
+        let metallic_roughness_texture = pbr.metallic_roughness_texture().and_then(|info| {
+            if info.tex_coord() != 0 {
+                log::warn!("glTF 材质 {index} 金属粗糙度图用了第 {} 套 uv，只支持第 0 套", info.tex_coord());
+            }
+            self.texture(info.texture().source().index())
+        });
+        let (occlusion_texture, occlusion_strength) = match m.occlusion_texture() {
+            Some(info) => {
+                if info.tex_coord() != 0 {
+                    log::warn!("glTF 材质 {index} AO 图用了第 {} 套 uv，只支持第 0 套", info.tex_coord());
+                }
+                (self.texture(info.texture().source().index()), info.strength())
+            }
+            None => (None, 1.0),
+        };
+        let emissive_texture = m.emissive_texture().and_then(|info| {
+            if info.tex_coord() != 0 {
+                log::warn!("glTF 材质 {index} 自发光图用了第 {} 套 uv，只支持第 0 套", info.tex_coord());
             }
             self.texture(info.texture().source().index())
         });
@@ -378,10 +408,17 @@ impl Loader<'_> {
         };
         let id = self.assets.add_material(Material {
             base_color: Vec4::from(pbr.base_color_factor()),
-            base_color_texture: texture,
+            base_color_texture,
+            normal_texture,
+            normal_scale,
             metallic: pbr.metallic_factor(),
             roughness: pbr.roughness_factor(),
+            metallic_roughness_texture,
+            occlusion_texture,
+            occlusion_strength,
             emissive: Vec3::from(m.emissive_factor()),
+            emissive_texture,
+            style: crate::assets::MaterialStyle::Pbr,
             alpha_cutoff,
             double_sided: m.double_sided(),
             blend: matches!(m.alpha_mode(), AlphaMode::Blend),

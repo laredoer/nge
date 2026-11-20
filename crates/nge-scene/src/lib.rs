@@ -13,6 +13,7 @@ mod audio3d;
 mod behave;
 mod behavior;
 mod camera;
+mod camera3d_rig;
 #[cfg(not(all(feature = "physics3d", feature = "ai", feature = "net")))]
 mod disabled;
 mod ground_graphs;
@@ -22,6 +23,7 @@ mod joints3d;
 mod lenient;
 mod level;
 mod match2d;
+mod nav3d;
 mod net;
 mod particles3d;
 mod nodes;
@@ -70,11 +72,13 @@ pub use audio::{AudioNode, BusName, BusNode, BusesNode, EffectNode, PlaySound, S
 pub use audio3d::{ConeNode, ListenerNode, OnLost, RolloffName, SoundEmitterNode, SpaceKind, SpaceNode};
 pub use behave::{Spin, Tappable};
 pub use camera::{SHAKE, Shake};
+pub use camera3d_rig::Camera3dRigUpdated;
 pub use effects::{Light2dNode, LightingNode, MaskedNode, PostNode};
 pub use joints::{JointKindName, JointNode, MotorNode};
 pub use joints3d::{Joint3dKindName, Joint3dNode};
 pub use level::{LEVEL_START, LevelStart};
-pub use nodes::{AmbientNode, AnchorName, BURST, Burst, Camera3dNode, EmitterNode, FLOAT_TEXT, FloatText, LightKind, LightNode, ModelNode, Particles, TextNode};
+pub use nav3d::{NavAgent3d, NavAgent3dNode, NavMesh3dNode};
+pub use nodes::{AmbientNode, AnchorName, BURST, Burst, Camera3dNode, EmitterNode, FLOAT_TEXT, FloatText, LightKind, LightNode, ModelNode, Particles, SocketNode, TextNode};
 pub use net::{NetNode, REMOTE_PREFIX, parse_remote};
 pub use physics::{BodyKind, BodyNode, COLLIDE, Collide, DROP_THROUGH, DROPPED, DropThrough, Dropped, PUSH, PhysicsNode, Push, ShapeName};
 pub use physics3d::{Body3dKind, ModelBody, Physics3dNode, Shape3dName};
@@ -235,6 +239,9 @@ impl Plugin for ScenePlugin {
             .init_resource::<transition::SceneTransition>()
             .init_resource::<sync::TextureSwitches>()
             .init_resource::<effects::SceneLighting>()
+            .init_resource::<nge_ai::NavMesh3d>()
+            .init_resource::<nav3d::NavMesh3dCache>()
+            .init_resource::<camera3d_rig::Camera3dRig>()
             .add_command(PRELOAD)
             .add_event(PRELOADED)
             .add_event(TRANSITION)
@@ -246,16 +253,22 @@ impl Plugin for ScenePlugin {
             .add_systems(PreUpdate, level::switch_level.run_if(transition::scene_ready).before(sync::sync_sprites))
             .add_systems(PreUpdate, synced.run_if(transition::scene_ready).after(level::switch_level).before(PointerWorld))
             .add_systems(PreUpdate, match2d::match_2d.after(sync_nodes::sync_camera3d).after(camera::sync_camera).before(PointerWorld))
-            .add_systems(Update, (behave::spin, behave::tap, behave::burst, behave::float_text, physics::push, physics::drop_through, tile_chunks::set_tiles, audio::play_sound, anim::animate))
+            .add_systems(Update, (behave::spin, behave::tap, behave::burst, behave::float_text, physics::push, physics::drop_through, tile_chunks::set_tiles, audio::play_sound, anim::animate, attach::resolve_sockets))
+            .add_systems(Update, (nav3d::sync_navmesh3d, nav3d::step_nav_agents).chain())
             // 补间最后写，盖过 spin / push 这一帧的改动
             .add_systems(Update, (anim::start_tweens, anim::tween).chain().after(behave::spin).after(physics::push))
             // 精灵和关节都同步完了再连：关节可以在精灵之后才出现，反过来也行
             .add_systems(PostUpdate, joints::resolve.before(PhysicsStepped))
             .add_systems(PostUpdate, attach::attach.after(PhysicsStepped).before(behave::follow))
-            // 拖尾读这一帧最后的位置：物理、跟随都改完以后
+            // 骨骼挂点等 3D 物理与 attach 挪完后再算最终世界变换，避免武器/配饰滞后一帧
             .configure_sets(
                 PostUpdate,
-                nge_particles::Particles3dSimulated.after(PhysicsStepped).after(nge_physics3d::Physics3dStepped).after(attach::attach).after(behave::follow).after(match2d::match_2d),
+                nge_render3d::SocketsUpdated.after(PhysicsStepped).after(nge_physics3d::Physics3dStepped).after(attach::attach),
+            )
+            // 拖尾读这一帧最后的位置：物理、挂点、跟随都改完以后
+            .configure_sets(
+                PostUpdate,
+                nge_particles::Particles3dSimulated.after(PhysicsStepped).after(nge_physics3d::Physics3dStepped).after(attach::attach).after(nge_render3d::SocketsUpdated).after(behave::follow).after(match2d::match_2d),
             )
             // 粒子按视野裁剪、曲线贴在屏幕上：用这一帧挪完的相机
             .configure_sets(PostUpdate, (nge_particles::ParticlesSimulated, nge_text::PerfDrawn).after(camera::camera_rig))
@@ -274,6 +287,7 @@ impl Plugin for ScenePlugin {
                     .after(match2d::match_2d)
                     .before(nge_audio::AudioUpdated),
             )
+            .add_systems(PostUpdate, camera3d_rig::camera3d_rig.in_set(camera3d_rig::Camera3dRigUpdated).after(PhysicsStepped).after(nge_physics3d::Physics3dStepped).after(attach::attach).after(nge_render3d::SocketsUpdated).before(behave::follow))
             .add_systems(PostUpdate, (behave::follow, physics::collide.after(PhysicsStepped), audio::listen.after(camera::camera_rig).before(nge_audio::AudioUpdated), camera::camera_rig.after(PhysicsStepped), match2d::match_2d.after(camera::camera_rig)));
     }
 }

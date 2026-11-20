@@ -188,7 +188,7 @@ export interface Light2dNode {
 }
 
 /**
- * 后处理的一遍：`shader` 是 `scene.shaders` 或内置的后处理（grayscale、vignette、pixelate），
+ * 后处理的一遍：`shader` 是 `scene.shaders` 或内置的后处理（grayscale、vignette、pixelate、tonemap、fxaa），
  * 或者内置的多遍效果 `bloom`（亮的地方往外晕开，params 是 [阈值 0.8, 强度 1, 级数 5, 0]）。
  */
 export interface PostNode {
@@ -367,16 +367,70 @@ export interface ModelNode {
    * `rotation` 在精灵的角度上再转，`spin` 不起作用。精灵不存在时模型留在原地。
    */
   attach?: string;
+  /** 挂到另一个 3D 模型的指定骨骼/节点上：x/y/z、rotation、scale 变为相对骨骼局部坐标系的偏移，随目标骨骼动画实时运动。 */
+  socket?: SocketNode;
   /** 播模型里的一段骨骼 / 节点动画（glTF 的 animations），见 docs/3d-more.md。只改 speed、loop 时不从头播。 */
   animation?: ModelAnimation;
   /** 动画状态机（见 docs/anim-graph.md）：片段是模型里的动画名，有它时 `animation` 不起作用。按值比较，定义变了才重建。 */
   animGraph?: AnimGraphDef;
   /** 状态机的参数，和上一次声明不一样时才写进去。 */
   animParams?: AnimParams;
-  /** 3D 刚体（见 docs/physics3d.md）。有了它位置和旋转归物理管：声明的位置、角度、缩放没变时不拉回去；`attach`、`spin` 不生效。 */
+  /** 3D 刚体（见 docs/physics3d.md）。有了它位置和旋转归物理管：声明的位置、角度、缩放没变时不拉回去；`attach`、`socket`、`spin` 不生效。 */
   body?: ModelBody;
   /** 拖尾（见 docs/particles3d.md）：模型走过的地方留一条朝着相机的带子。去掉时马上消失；只改参数时保留已经记下的点。 */
   trail?: TrailNode;
+  /** 材质着色风格覆盖："pbr"（默认标准 PBR）| "toon"（卡通分阶 + 边缘光）| "water"（动态水波 + 菲涅尔）| "foliage"（风吹摆动 + 逆光透射）。 */
+  style?: "pbr" | "toon" | "water" | "foliage";
+  /** 使用 `scene.shaders3d` 里注册的自定义 3D 着色器（WGSL 片段定义 `fn shade3d(s: Surface) -> vec4f`）。 */
+  shader?: string;
+  /** 传给自定义 3D 着色器的 4 个浮点参数（`s.params`）。 */
+  params?: [number, number, number, number];
+  /** 3D 导航网格寻路代理：跟随目标 3D 模型、沿路点循环巡逻或前往指定 3D 坐标。 */
+  nav?: NavAgent3dNode;
+}
+
+/** `scene.navmesh3d`：从指定 3D 地面模型与静态碰撞体自动构建 3D 导航网格。 */
+export interface NavMesh3dNode {
+  /** 用于提取可行走坡面的 3D 模型 id（如 "terrain"）。 */
+  surface: string;
+  /** 最大可行走坡度（度），默认 45。 */
+  maxSlope?: number;
+  /** 最低可行走海拔（例如过滤海平面以下），默认不限制。 */
+  minY?: number;
+  /** 角色避障膨胀半径，默认 12。 */
+  agentRadius?: number;
+  /** 是否用 3D 调试线实时绘制导航路径，默认 false。 */
+  debug?: boolean;
+}
+
+/** `ModelNode.nav`：3D 导航寻路代理配置。 */
+export interface NavAgent3dNode {
+  /** 跟随目标 3D 模型的 id。 */
+  follow?: string;
+  /** 循环巡逻的 3D 路点列表。 */
+  patrol?: [number, number, number][];
+  /** 前往的单个 3D 目标坐标。 */
+  target?: [number, number, number];
+  /** 移动速度（世界单位 / 秒），默认 95。 */
+  speed?: number;
+  /** 跟随模式下与目标保持的最小距离，默认 48。 */
+  minDistance?: number;
+  /** 到达路点的判定距离，默认 16。 */
+  arrive?: number;
+  /** 离导航地面的垂直高度偏移，默认 0。 */
+  hover?: number;
+  /** 转向平滑速度（弧度 / 秒），默认 7。 */
+  turnSpeed?: number;
+  /** 巡逻路点停留秒数，默认 1.2。 */
+  wait?: number;
+}
+
+/** 3D 骨骼挂点：把当前模型挂到目标 3D 模型的指定骨骼/节点上。 */
+export interface SocketNode {
+  /** 目标 3D 模型的 id。 */
+  target: string;
+  /** glTF 节点名（如 "armR"、"hand_r"）；留空时跟在目标模型根节点上。 */
+  bone?: string;
 }
 
 /** 混合方式：alpha 普通透明（从远往近画），add 叠加（火、光点）。 */
@@ -623,6 +677,20 @@ export interface Camera3dNode {
   shadowCascades?: number;
   /** 分段的影子覆盖到相机前方多远（3D 单位，不超过相机的远平面），默认 50。 */
   shadowDistance?: number;
+  /** 弹簧臂跟随目标 3D 模型的 id；写了以后自动平滑跟随目标并可防穿墙。 */
+  follow?: string;
+  /** 弹簧臂距离（默认 180）。 */
+  distance?: number;
+  /** 弹簧臂俯仰角（度，正值俯视，默认 22）。 */
+  pitch?: number;
+  /** 弹簧臂水平偏航角（度）；不填时自动跟随目标模型朝向。 */
+  yaw?: number;
+  /** 注视点在目标上方的抬高高度（默认 24）。 */
+  lift?: number;
+  /** 跟随平滑时间（秒，默认 0.12，0 为瞬间对齐）。 */
+  smooth?: number;
+  /** 弹簧臂防穿墙检测（默认 true，撞到地形/墙体时自动拉近相机）。 */
+  collision?: boolean;
 }
 
 export interface LightNode {
@@ -707,6 +775,28 @@ export interface ShadowsNode {
   size?: number;
   /** 聚光灯、点光源阴影图的边长，默认 512；显存超过 64 MB 时自动减半。要是整数，写小数 warn 后当没写。 */
   localSize?: number;
+}
+
+/** 3D 真实线性 HDR 色调映射（在写入 8-bit 帧缓冲前压缩高光，避免过曝发白）。 */
+export interface ToneMapNode {
+  /** 曲线模式，写 `tonemap` 时默认 "aces"；"agx" 柔和保留高光色彩；"reinhard" 经典压缩；"none" 关闭。 */
+  mode?: "none" | "aces" | "agx" | "reinhard";
+  /** 曝光倍率，默认 1。 */
+  exposure?: number;
+  /** 饱和度倍率，默认 1。 */
+  saturation?: number;
+}
+
+/** 3D 屏幕空间环境光遮蔽（SSAO，增强物体与地面、角落的接触暗角）。 */
+export interface SsaoNode {
+  /** 写 `ssao` 时默认 true。 */
+  enabled?: boolean;
+  /** 遮蔽强度（0–2），默认 0.65。 */
+  intensity?: number;
+  /** 采样半径（屏幕 UV 比例），默认 0.022。 */
+  radius?: number;
+  /** 深度偏移（防平面自遮蔽），默认 0.0004。 */
+  bias?: number;
 }
 
 /**
@@ -807,10 +897,14 @@ export interface Scene {
   sky?: SkyNode;
   fog?: FogNode;
   shadows?: ShadowsNode;
+  tonemap?: ToneMapNode;
+  ssao?: SsaoNode;
   /** 重力（point / s²），默认 [0, -981]。 */
   physics?: { gravity?: [number, number] };
   /** 3D 重力，默认 [0, -981, 0]。 */
   physics3d?: { gravity?: [number, number, number] };
+  /** 3D 导航网格：从地面模型与静态碰撞体自动构建可行走导航网格。 */
+  navmesh3d?: NavMesh3dNode;
   joints?: JointNode[];
   /** 3D 关节。 */
   joints3d?: Joint3dNode[];
@@ -818,6 +912,8 @@ export interface Scene {
   bubbles?: BubbleNode[];
   /** 自己写的着色器：名字 → WGSL。精灵着色器写 `fn effect(e: Effect) -> vec4f`，后处理写 `fn post(p: Post) -> vec4f`。见 docs/effects2d.md。 */
   shaders?: Record<string, string>;
+  /** 自己写的 3D 材质着色器：名字 → WGSL（定义 `fn shade3d(s: Surface) -> vec4f`，在 PBR 光照/阴影/雾之后、色调映射之前介入着色）。 */
+  shaders3d?: Record<string, string>;
   lighting?: LightingNode;
   /** 整帧画完以后按顺序过一遍的后处理。 */
   post?: PostNode[];

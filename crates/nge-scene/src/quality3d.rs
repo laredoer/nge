@@ -4,7 +4,7 @@ use bevy_ecs::prelude::*;
 use glam::Vec3;
 use nge_assets::{Assets, CubeImage};
 use nge_render2d::TextureId;
-use nge_render3d::{Fog, FogMode, HeightFog, ShadowFilter, Shadows, Sky, SkyGradient, SkySource};
+use nge_render3d::{Fog, FogMode, HeightFog, ShadowFilter, Shadows, Sky, SkyGradient, SkySource, Ssao, ToneMap, ToneMapMode};
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 
@@ -157,6 +157,59 @@ impl<'de> Deserialize<'de> for ShadowsNode {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ToneMapKind {
+    None,
+    Aces,
+    Agx,
+    Reinhard,
+}
+
+/// `scene.tonemap`：3D 线性 HDR 色调映射。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ToneMapNode {
+    pub mode: Option<ToneMapKind>,
+    pub exposure: Option<f32>,
+    pub saturation: Option<f32>,
+}
+
+impl<'de> Deserialize<'de> for ToneMapNode {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let mut f = Fields::new("tonemap", Value::deserialize(d)?).map_err(serde::de::Error::custom)?;
+        let node = Self {
+            mode: f.get("mode"),
+            exposure: f.get("exposure"),
+            saturation: f.get("saturation"),
+        };
+        f.finish();
+        Ok(node)
+    }
+}
+
+/// `scene.ssao`：3D 屏幕空间环境光遮蔽。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SsaoNode {
+    pub enabled: Option<bool>,
+    pub intensity: Option<f32>,
+    pub radius: Option<f32>,
+    pub bias: Option<f32>,
+}
+
+impl<'de> Deserialize<'de> for SsaoNode {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let mut f = Fields::new("ssao", Value::deserialize(d)?).map_err(serde::de::Error::custom)?;
+        let node = Self {
+            enabled: f.get("enabled"),
+            intensity: f.get("intensity"),
+            radius: f.get("radius"),
+            bias: f.get("bias"),
+        };
+        f.finish();
+        Ok(node)
+    }
+}
+
 fn rgb(color: Option<Color>, or: Vec3) -> Vec3 {
     color.map_or(or, |c| c.0.truncate())
 }
@@ -240,7 +293,28 @@ fn filter(kind: FilterKind) -> ShadowFilter {
 
 type SkyKey = (Option<SkyNode>, Option<[f32; 3]>);
 
-/// 天空、雾、阴影设置：各自的声明变了才覆盖。
+fn tonemap(node: &ToneMapNode) -> ToneMap {
+    let d = ToneMap::default();
+    let mode = match node.mode {
+        Some(ToneMapKind::None) => ToneMapMode::None,
+        Some(ToneMapKind::Aces) | None => ToneMapMode::Aces,
+        Some(ToneMapKind::Agx) => ToneMapMode::Agx,
+        Some(ToneMapKind::Reinhard) => ToneMapMode::Reinhard,
+    };
+    ToneMap { mode, exposure: node.exposure.unwrap_or(d.exposure), saturation: node.saturation.unwrap_or(d.saturation) }
+}
+
+fn ssao(node: &SsaoNode) -> Ssao {
+    let d = Ssao::default();
+    Ssao {
+        enabled: node.enabled.unwrap_or(true),
+        intensity: node.intensity.unwrap_or(d.intensity),
+        radius: node.radius.unwrap_or(d.radius),
+        bias: node.bias.unwrap_or(d.bias),
+    }
+}
+
+/// 天空、雾、阴影、色调映射、SSAO 设置：各自的声明变了才覆盖。
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn sync_quality3d(
     scene: Res<Scene>,
@@ -249,9 +323,13 @@ pub(crate) fn sync_quality3d(
     mut sky_res: ResMut<Sky>,
     mut fog_res: ResMut<Fog>,
     mut shadows_res: ResMut<Shadows>,
+    mut tonemap_res: ResMut<ToneMap>,
+    mut ssao_res: ResMut<Ssao>,
     mut last_sky: Local<Option<SkyKey>>,
     mut last_fog: Local<Option<Option<FogNode>>>,
     mut last_shadows: Local<Option<Option<ShadowsNode>>>,
+    mut last_tonemap: Local<Option<Option<ToneMapNode>>>,
+    mut last_ssao: Local<Option<Option<SsaoNode>>>,
 ) {
     let key = (scene.sky.clone(), scene.sky.as_ref().filter(|s| s.sun.is_none() && s.cube.is_none()).and_then(|_| first_sun(&scene)));
     // 场景从没写过时不动：留着 Rust 设的（和 shadows 一样）
@@ -271,6 +349,18 @@ pub(crate) fn sync_quality3d(
         let before = last_shadows.clone().flatten().unwrap_or_default();
         shadows(&mut shadows_res, &scene.shadows.clone().unwrap_or_default(), &before);
         *last_shadows = Some(scene.shadows.clone());
+    }
+    if last_tonemap.as_ref() != Some(&scene.tonemap) {
+        if last_tonemap.is_some() || scene.tonemap.is_some() {
+            *tonemap_res = scene.tonemap.as_ref().map_or_else(ToneMap::default, tonemap);
+        }
+        *last_tonemap = Some(scene.tonemap.clone());
+    }
+    if last_ssao.as_ref() != Some(&scene.ssao) {
+        if last_ssao.is_some() || scene.ssao.is_some() {
+            *ssao_res = scene.ssao.as_ref().map_or_else(Ssao::default, ssao);
+        }
+        *last_ssao = Some(scene.ssao.clone());
     }
 }
 

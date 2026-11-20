@@ -142,6 +142,9 @@ pub struct ModelNode {
     pub tap: bool,
     /// 跟着这个精灵走（见 docs/joints.md）：x、y、z 成了精灵坐标里的偏移，`rotation` 在精灵的角度上再转。
     pub attach: Option<String>,
+    /// 挂到另一个 3D 模型的指定骨骼/节点上：x、y、z、rotation、scale 变为相对骨骼局部坐标系的偏移。
+    #[serde(default)]
+    pub socket: Option<SocketNode>,
     /// 播模型里的哪段动画（见 docs/3d-more.md）。
     pub animation: Option<ModelAnimation>,
     /// 动画状态机（见 docs/anim-graph.md）；有它时 `animation` 不起作用。
@@ -150,12 +153,54 @@ pub struct ModelNode {
     /// 状态机的参数，和上一次声明不一样时才写进去。
     #[serde(rename = "animParams")]
     pub anim_params: Option<crate::anim_graph::AnimParams>,
-    /// 3D 刚体（见 docs/physics3d.md）：有了它位置和旋转归物理管，`attach`、`spin` 不生效。
+    /// 3D 刚体（见 docs/physics3d.md）：有了它位置和旋转归物理管，`attach`、`socket`、`spin` 不生效。
     #[serde(default)]
     pub body: Option<crate::physics3d::ModelBody>,
     /// 拖尾（见 docs/particles3d.md）。
     #[serde(default)]
     pub trail: Option<crate::particles3d::TrailNode>,
+    /// 材质着色风格覆盖："pbr"（默认）| "toon" | "water" | "foliage"。
+    #[serde(default)]
+    pub style: Option<MaterialStyleName>,
+    /// 使用 `scene.shaders3d` 里注册的自定义 3D 着色器（定义 `fn shade3d(s: Surface) -> vec4f`）。
+    #[serde(default)]
+    pub shader: Option<String>,
+    /// 传给自定义 3D 着色器的 4 个自定义参数（`s.params`）。
+    #[serde(default)]
+    pub params: Option<[f32; 4]>,
+    /// 3D 导航网格寻路代理（跟随目标模型、多点巡逻或前往目标坐标）。
+    #[serde(default)]
+    pub nav: Option<crate::nav3d::NavAgent3dNode>,
+}
+
+/// 3D 骨骼挂点：把当前模型挂到目标 3D 模型的指定骨骼/节点上。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct SocketNode {
+    /// 目标 3D 模型的 id。
+    pub target: String,
+    /// glTF 节点名（如 `"armR"`）；留空时直接跟在目标模型根节点上。
+    #[serde(default)]
+    pub bone: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MaterialStyleName {
+    Pbr,
+    Toon,
+    Water,
+    Foliage,
+}
+
+impl From<MaterialStyleName> for nge_render3d::MaterialStyle {
+    fn from(s: MaterialStyleName) -> Self {
+        match s {
+            MaterialStyleName::Pbr => Self::Pbr,
+            MaterialStyleName::Toon => Self::Toon,
+            MaterialStyleName::Water => Self::Water,
+            MaterialStyleName::Foliage => Self::Foliage,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -198,11 +243,43 @@ pub struct Camera3dNode {
     pub shadow_cascades: Option<u32>,
     /// 分段阴影覆盖到相机前方多远；不填按 `Shadows` 的默认。
     pub shadow_distance: Option<f32>,
+    /// 弹簧臂跟随目标 3D 模型的 id；写了以后自动平滑跟随目标并可防穿墙。
+    pub follow: Option<String>,
+    /// 弹簧臂距离（默认 180）。
+    pub distance: f32,
+    /// 弹簧臂俯仰角（度，正值俯视，默认 22）。
+    pub pitch: f32,
+    /// 弹簧臂水平偏航角（度）；不填时自动跟随目标模型朝向。
+    pub yaw: Option<f32>,
+    /// 注视点在目标上方的抬高高度（默认 24）。
+    pub lift: f32,
+    /// 跟随平滑时间（秒，默认 0.12，0 为瞬间对齐）。
+    pub smooth: f32,
+    /// 弹簧臂防穿墙检测（默认 true，撞到地形/墙体时自动拉近相机）。
+    pub collision: bool,
 }
 
 impl Default for Camera3dNode {
     fn default() -> Self {
-        Self { x: 0.0, y: 2.0, z: None, target: [0.0; 3], fov: 60.0, ortho: None, match2d: false, interleave: false, shadow_cascades: None, shadow_distance: None }
+        Self {
+            x: 0.0,
+            y: 2.0,
+            z: None,
+            target: [0.0; 3],
+            fov: 60.0,
+            ortho: None,
+            match2d: false,
+            interleave: false,
+            shadow_cascades: None,
+            shadow_distance: None,
+            follow: None,
+            distance: 180.0,
+            pitch: 22.0,
+            yaw: None,
+            lift: 24.0,
+            smooth: 0.12,
+            collision: true,
+        }
     }
 }
 

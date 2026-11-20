@@ -19,16 +19,19 @@ mod line_gpu;
 mod mesh;
 mod morph;
 mod renderer;
+mod shader3d;
 mod shadow;
 mod shadow_soft;
 mod shadow_views;
 mod sky;
 mod sky_gpu;
+mod socket;
+mod ssao;
 
 pub use animation::{Animation, Channel, Interpolation, Node, Property, Skeleton, Skin, Trs};
 pub use animator::{Animator, Fade, Pose};
 pub use billboards::{Billboard, Billboards, Blend, FULL_UV, Facing, RibbonPoint};
-pub use assets::{Assets3d, Material, MaterialId, MeshId, Model, ModelId, Part};
+pub use assets::{Assets3d, Material, MaterialId, MaterialStyle, MaterialStyleOverride, MeshId, Model, ModelId, Part};
 pub use nge_assets::{AssetPlugin, AssetServer, AssetSource, Assets, Image, ImageId, MAX_TEXTURE_SIDE, MemorySource};
 pub use camera::{Camera3d, Transform3d};
 pub use gizmos::{CIRCLE_SEGMENTS, Gizmos3d, Lines};
@@ -39,16 +42,19 @@ pub use mesh::{Influence, MAX_MORPH_TARGETS, Mesh, MorphTarget, Vertex};
 pub use morph::MorphWeights;
 pub use collect::main_camera;
 pub use renderer::{Mesh3d, Model3d, Render3dPlugin, in_view};
+pub use shader3d::{MaterialShader3d, Shaders3d};
 pub use fog::{Fog, FogMode, HeightFog};
 pub use nge_assets::CubeImage;
 pub use shadow::{ShadowFilter, Shadows};
 pub use shadow_soft::ShadowPriority;
 pub use sky::{Sky, SkyGradient, SkySource};
 pub use sky_gpu::SkyBake;
+pub use socket::{BoneSocket, SocketsUpdated, bone_world_matrix};
+pub use ssao::{Ssao, ToneMap, ToneMapMode};
 
 pub mod prelude {
     pub use crate::{
-        AmbientLight, Animator, AssetServer, Assets, Assets3d, Camera3d, GltfModel, Image, DirectionalLight, Material, Mesh, Mesh3d, Model3d, PointLight, Render3dPlugin, SpotLight, Transform3d,
+        AmbientLight, Animator, AssetServer, Assets, Assets3d, BoneSocket, Camera3d, DirectionalLight, GltfModel, Image, Material, MaterialShader3d, Mesh, Mesh3d, Model3d, PointLight, Render3dPlugin, Shaders3d, SpotLight, Transform3d,
     };
     pub use glam::{Quat, Vec3};
 }

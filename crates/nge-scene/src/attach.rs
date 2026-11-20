@@ -16,6 +16,16 @@ pub(crate) struct Attach {
     pub rotation: Quat,
 }
 
+/// 场景层声明的 3D 骨骼挂点（按目标模型 id 解析为 [`nge_render3d::BoneSocket`]）。
+#[derive(Component, Debug, Clone, PartialEq)]
+pub(crate) struct SceneSocket {
+    pub target: String,
+    pub bone: String,
+    pub offset: Vec3,
+    pub rotation: Quat,
+    pub scale: Vec3,
+}
+
 /// 物理一步之后，按精灵画在哪（有刚体时是插值过的 `DrawAt`）摆模型。精灵不存在时模型留在原地。
 pub(crate) fn attach(mut models: Query<(&Attach, &mut Transform3d)>, sprites: Query<(&Declared<SpriteNode>, &Transform2d, Option<&DrawAt>)>) {
     if models.is_empty() {
@@ -29,6 +39,39 @@ pub(crate) fn attach(mut models: Query<(&Attach, &mut Transform3d)>, sprites: Qu
         let rotation = Quat::from_rotation_z(angle) * attach.rotation;
         if (t.translation, t.rotation) != (translation, rotation) {
             (t.translation, t.rotation) = (translation, rotation);
+        }
+    }
+}
+
+/// `Update`：按目标模型的 `SceneId` 把 [`SceneSocket`] 解析成 [`nge_render3d::BoneSocket`]，供 `PostUpdate` 的骨骼挂点系统同步。
+pub(crate) fn resolve_sockets(
+    mut commands: Commands,
+    sockets: Query<(Entity, &SceneSocket, Option<&nge_render3d::BoneSocket>)>,
+    models: Query<(Entity, &crate::sync::SceneId), With<Declared<crate::nodes::ModelNode>>>,
+) {
+    if sockets.is_empty() {
+        return;
+    }
+    for (entity, socket, current) in &sockets {
+        let target = models.iter().find(|(_, id)| id.0 == socket.target).map(|(e, _)| e);
+        match target {
+            Some(target) if target != entity => {
+                let want = nge_render3d::BoneSocket {
+                    target,
+                    bone: socket.bone.clone(),
+                    offset: socket.offset,
+                    rotation: socket.rotation,
+                    scale: socket.scale,
+                };
+                if current != Some(&want) {
+                    commands.entity(entity).insert(want);
+                }
+            }
+            _ => {
+                if current.is_some() {
+                    commands.entity(entity).remove::<nge_render3d::BoneSocket>();
+                }
+            }
         }
     }
 }
@@ -86,5 +129,30 @@ mod tests {
         frame(&mut app, Some(crate_at(None)));
         let world = app.world_mut();
         assert_eq!(world.query::<&Attach>().iter(world).count(), 0, "去掉 attach 就不跟了");
+    }
+
+    #[test]
+    fn model_socket_binds_to_target_bone_and_detaches() {
+        let mut app = app();
+        let scene = json!({
+            "models": [
+                { "id": "hero", "model": "asset:/@t/crate.glb", "x": 10, "y": 2, "z": 3 },
+                { "id": "staff", "model": "asset:/@t/crate.glb", "socket": { "target": "hero" }, "x": 1, "y": 2, "z": 0 },
+            ]
+        });
+        frame(&mut app, Some(scene));
+        let world = app.world_mut();
+        let (t, has_socket) = world
+            .query::<(&SceneId, &Transform3d, Has<nge_render3d::BoneSocket>)>()
+            .iter(world)
+            .find(|(id, ..)| id.0 == "staff")
+            .map(|(_, t, s)| (*t, s))
+            .unwrap();
+        assert!(has_socket, "应解析并挂上 BoneSocket");
+        assert!((t.translation - Vec3::new(11.0, 4.0, 3.0)).length() < 1e-4, "挂在根节点上：{:?}", t.translation);
+
+        frame(&mut app, Some(json!({ "models": [{ "id": "hero", "model": "asset:/@t/crate.glb" }, { "id": "staff", "model": "asset:/@t/crate.glb", "x": 5 }] })));
+        let world = app.world_mut();
+        assert_eq!(world.query::<&nge_render3d::BoneSocket>().iter(world).count(), 0, "去掉 socket 后解除绑定");
     }
 }

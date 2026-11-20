@@ -21,17 +21,60 @@ impl MaterialId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ModelId(pub(crate) u32);
 
-/// glTF metallic-roughness 材质的子集。
+/// 3D 材质着色风格。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum MaterialStyle {
+    /// 标准 Cook-Torrance PBR。
+    #[default]
+    Pbr,
+    /// 卡通分阶着色 + 边缘光。
+    Toon,
+    /// 动态水波法线 + 菲涅尔高光。
+    Water,
+    /// 风吹顶点摆动 + 包裹漫反射与透光。
+    Foliage,
+}
+
+impl MaterialStyle {
+    pub(crate) fn as_u32(self) -> u32 {
+        match self {
+            Self::Pbr => 0,
+            Self::Toon => 1,
+            Self::Water => 2,
+            Self::Foliage => 3,
+        }
+    }
+}
+
+/// 挂在模型或网格实体上，覆盖其材质的着色风格（不修改共享的 [`Material`] 资源）。
+#[derive(bevy_ecs::prelude::Component, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MaterialStyleOverride(pub MaterialStyle);
+
+/// glTF metallic-roughness 材质（完整 PBR 贴图 + 可选风格化着色）。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Material {
     /// 线性 RGBA，和贴图相乘。
     pub base_color: Vec4,
-    /// sRGB 贴图。
+    /// sRGB 基础色贴图。
     pub base_color_texture: Option<ImageId>,
+    /// 线性切线空间法线贴图。
+    pub normal_texture: Option<ImageId>,
+    /// 法线贴图强度缩放（glTF 默认 1.0）。
+    pub normal_scale: f32,
     pub metallic: f32,
     pub roughness: f32,
+    /// 线性金属度/粗糙度贴图（glTF 规范：G 通道 = 粗糙度，B 通道 = 金属度）。
+    pub metallic_roughness_texture: Option<ImageId>,
+    /// 线性环境光遮蔽贴图（R 通道）。
+    pub occlusion_texture: Option<ImageId>,
+    /// 环境光遮蔽强度（glTF 默认 1.0）。
+    pub occlusion_strength: f32,
     /// 线性 RGB，直接加到结果上。
     pub emissive: Vec3,
+    /// sRGB 自发光贴图，与 `emissive` 相乘。
+    pub emissive_texture: Option<ImageId>,
+    /// 着色风格（默认标准 PBR）。
+    pub style: MaterialStyle,
     /// alpha 低于它的像素丢弃（glTF 的 MASK）；`None` 表示不透明。
     pub alpha_cutoff: Option<f32>,
     /// 关掉背面剔除。
@@ -45,9 +88,16 @@ impl Default for Material {
         Self {
             base_color: Vec4::ONE,
             base_color_texture: None,
+            normal_texture: None,
+            normal_scale: 1.0,
             metallic: 0.0,
             roughness: 0.5,
+            metallic_roughness_texture: None,
+            occlusion_texture: None,
+            occlusion_strength: 1.0,
             emissive: Vec3::ZERO,
+            emissive_texture: None,
+            style: MaterialStyle::Pbr,
             alpha_cutoff: None,
             double_sided: false,
             blend: false,

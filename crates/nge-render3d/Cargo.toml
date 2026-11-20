@@ -7,6 +7,8 @@ publish.workspace = true
 license.workspace = true
 
 [dependencies]
+# 校验游戏写的自定义 3D 着色器
+naga.workspace = true
 nge-core.workspace = true
 nge-ecs.workspace = true
 nge-assets.workspace = true

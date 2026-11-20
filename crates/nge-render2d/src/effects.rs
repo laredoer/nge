@@ -87,6 +87,79 @@ impl Shaders {
             [6.0, 0.0, 0.0, 0.0],
             "fn post(p: Post) -> vec4f {\n    let n = max(floor(p.params.x), 1.0);\n    let px = floor(p.uv * p.size / n) * n + floor(n / 2.0) + 0.5;\n    return sample(px / p.size);\n}",
         ),
+        // 色调映射：params.x 曝光（默认 1），params.y 曲线（0 ACES / 1 AgX / 2 Reinhard），params.z 饱和度（默认 1）
+        (
+            "tonemap",
+            true,
+            [1.0, 0.0, 1.0, 0.0],
+            "fn post(p: Post) -> vec4f {
+    let exposure = select(p.params.x, 1.0, p.params.x <= 0.0);
+    let sat = select(p.params.z, 1.0, p.params.z <= 0.0);
+    var c = max(p.color.rgb * exposure, vec3f(0.0));
+    if p.params.y < 0.5 {
+        c = clamp((c * (2.51 * c + 0.03)) / (c * (2.43 * c + 0.59) + 0.14), vec3f(0.0), vec3f(1.0));
+    } else if p.params.y < 1.5 {
+        let m = mat3x3f(
+            vec3f(0.84247906, 0.04232824, 0.04237565),
+            vec3f(0.07843360, 0.87846864, 0.07843360),
+            vec3f(0.07922375, 0.07916613, 0.87914297),
+        );
+        var x = clamp((log2(max(m * c, vec3f(1e-6))) + 12.47393) / 16.5, vec3f(0.0), vec3f(1.0));
+        let x2 = x * x;
+        let x4 = x2 * x2;
+        x = 15.5 * x4 * x2 - 40.14 * x4 * x + 31.96 * x4 - 6.868 * x2 * x + 0.4298 * x2 + 0.1191 * x - 0.00232;
+        let inv_m = mat3x3f(
+            vec3f(1.19687900, -0.05289685, -0.05297163),
+            vec3f(-0.09802088, 1.15190313, -0.09804345),
+            vec3f(-0.09902974, -0.09896118, 1.15107367),
+        );
+        c = clamp(inv_m * x, vec3f(0.0), vec3f(1.0));
+    } else {
+        c = c / (vec3f(1.0) + c);
+    }
+    let luma = dot(c, vec3f(0.2126, 0.7152, 0.0722));
+    c = clamp(mix(vec3f(luma), c, sat), vec3f(0.0), vec3f(1.0));
+    return vec4f(c, p.color.a);
+}",
+        ),
+        // 快速近似抗锯齿（FXAA）：params.x 子像素平滑（默认 0.75），params.y 边缘阈值（0.166），params.z 最小阈值（0.0833）
+        (
+            "fxaa",
+            true,
+            [0.75, 0.166, 0.0833, 0.0],
+            "fn post(p: Post) -> vec4f {
+    let px = 1.0 / max(p.size, vec2f(1.0));
+    let luma_w = vec3f(0.299, 0.587, 0.114);
+    let rgb_m = p.color.rgb;
+    let rgb_nw = sample(p.uv + vec2f(-px.x, -px.y)).rgb;
+    let rgb_ne = sample(p.uv + vec2f(px.x, -px.y)).rgb;
+    let rgb_sw = sample(p.uv + vec2f(-px.x, px.y)).rgb;
+    let rgb_se = sample(p.uv + vec2f(px.x, px.y)).rgb;
+    let l_m = dot(rgb_m, luma_w);
+    let l_nw = dot(rgb_nw, luma_w);
+    let l_ne = dot(rgb_ne, luma_w);
+    let l_sw = dot(rgb_sw, luma_w);
+    let l_se = dot(rgb_se, luma_w);
+    let l_min = min(l_m, min(min(l_nw, l_ne), min(l_sw, l_se)));
+    let l_max = max(l_m, max(max(l_nw, l_ne), max(l_sw, l_se)));
+    let range = l_max - l_min;
+    let thresh = select(p.params.y, 0.166, p.params.y <= 0.0);
+    let min_thresh = select(p.params.z, 0.0833, p.params.z <= 0.0);
+    if range < max(min_thresh, l_max * thresh) {
+        return p.color;
+    }
+    var dir = vec2f(-((l_nw + l_ne) - (l_sw + l_se)), (l_nw + l_sw) - (l_ne + l_se));
+    let dir_reduce = max((l_nw + l_ne + l_sw + l_se) * 0.03125, 1.0 / 128.0);
+    let rcp = 1.0 / (min(abs(dir.x), abs(dir.y)) + dir_reduce);
+    dir = clamp(dir * rcp, vec2f(-8.0), vec2f(8.0)) * px;
+    let rgb_a = 0.5 * (sample(p.uv + dir * (1.0 / 3.0 - 0.5)).rgb + sample(p.uv + dir * (2.0 / 3.0 - 0.5)).rgb);
+    let rgb_b = rgb_a * 0.5 + 0.25 * (sample(p.uv + dir * -0.5).rgb + sample(p.uv + dir * 0.5).rgb);
+    let l_b = dot(rgb_b, luma_w);
+    let out_rgb = select(rgb_b, rgb_a, l_b < l_min || l_b > l_max);
+    let blend = clamp(select(p.params.x, 0.75, p.params.x <= 0.0), 0.0, 1.0);
+    return vec4f(mix(rgb_m, out_rgb, blend), p.color.a);
+}",
+        ),
     ];
 
     /// 内置的多遍后处理 bloom 的名字（不是一个着色器，游戏不能用这个名字）。

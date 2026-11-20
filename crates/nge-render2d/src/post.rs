@@ -424,7 +424,7 @@ mod tests {
         gpu.sync(&gfx, &shaders, gfx.format);
         gpu.settle();
         assert!(gpu.identity.is_some());
-        assert_eq!(warmed(&gpu), ["dim", "grayscale", "pixelate", "vignette"]);
+        assert_eq!(warmed(&gpu), ["dim", "fxaa", "grayscale", "pixelate", "tonemap", "vignette"]);
         // 精灵着色器不预热，用到时照常提示、跳过
         assert!(!gpu.pipelines.contains_key("glow"));
         assert!(!gpu.prepare(&gfx, &shaders, "glow"));
@@ -442,7 +442,7 @@ mod tests {
         gpu.sync(&bgra, &shaders, bgra.format);
         gpu.settle();
         assert!(gpu.identity.is_some());
-        assert_eq!(warmed(&gpu), ["dim", "grayscale", "pixelate", "vignette"]);
+        assert_eq!(warmed(&gpu), ["dim", "fxaa", "grayscale", "pixelate", "tonemap", "vignette"]);
     }
 
     #[test]

@@ -3,6 +3,7 @@
 use bevy_ecs::prelude::*;
 use glam::{Vec2, Vec3, Vec4};
 use nge_render2d::{Camera2d, DrawAt, Light2d, Lighting2d, Masking, NormalMap, Occluder2d, Parallax, PostEffect, PostEffects, PostLayer, Shaders, SpriteImage, SpriteShader, Transform2d, Unlit, drawn};
+use nge_render3d::Shaders3d;
 use serde::Deserialize;
 
 use crate::protocol::{Color, Scene, SpriteNode};
@@ -144,13 +145,14 @@ pub(crate) fn apply_sprite(entity: &mut EntityCommands, node: &SpriteNode, asset
 #[derive(Resource, Default)]
 pub(crate) struct SceneLighting(Option<LightingNode>);
 
-/// `scene.shaders`、`scene.post` 和 `scene.lighting`（场景变了才跑）。
-pub(crate) fn sync_effects(scene: Res<Scene>, mut shaders: ResMut<Shaders>, mut post: ResMut<PostEffects>, mut lighting: ResMut<SceneLighting>) {
+/// `scene.shaders`、`scene.shaders3d`、`scene.post` 和 `scene.lighting`（场景变了才跑）。
+pub(crate) fn sync_effects(scene: Res<Scene>, mut shaders: ResMut<Shaders>, mut shaders3d: ResMut<Shaders3d>, mut post: ResMut<PostEffects>, mut lighting: ResMut<SceneLighting>) {
     if lighting.0 != scene.lighting {
         lighting.0 = scene.lighting.clone();
     }
     // 一样的不算改，不会重新编译
     shaders.set(scene.shaders.clone());
+    shaders3d.set(scene.shaders3d.clone());
     let effects: Vec<PostEffect> = scene.post.iter().map(|p| PostEffect {
             shader: p.shader.clone(),
             params: params(&p.shader, p.params),

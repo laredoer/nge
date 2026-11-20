@@ -192,11 +192,12 @@ pub(crate) struct CameraView {
     pub aspect: f32,
 }
 
-/// 投影子的 draw：在这一帧 draw 列表里的下标、是否蒙皮、世界包围盒。
+/// 投影子的 draw：在这一帧 draw 列表里的下标、是否蒙皮、世界包围盒、实例化数量（静态合批时 > 1）。
 pub(crate) struct Caster {
     pub index: usize,
     pub skinned: bool,
     pub bounds: (Vec3, Vec3),
+    pub instance_count: u32,
 }
 
 /// 一张深度数组：采样用整张，画的时候一层一层地画。
@@ -462,9 +463,9 @@ impl ShadowGpu {
         self.passes.len()
     }
 
-    /// 每层画一遍（半透明的不在 `casters` 里），只画包围盒和这一层视野相交的。`bind` 绑定第 `i` 个 draw 并提交。
+    /// 每层画一遍（半透明的不在 `casters` 里），只画包围盒和这一层视野相交的。`bind` 绑定第 `i` 个 draw 并提交 `instance_count` 个实例。
     /// `timers` 是每层的 GPU 计时（见 [`Self::pass_count`]）。返回一共提交了几次 draw。
-    pub fn draw(&self, encoder: &mut wgpu::CommandEncoder, casters: &[Caster], timers: &[Option<nge_ecs::PassTimer>], bind: impl Fn(&mut wgpu::RenderPass, usize)) -> u32 {
+    pub fn draw(&self, encoder: &mut wgpu::CommandEncoder, casters: &[Caster], timers: &[Option<nge_ecs::PassTimer>], bind: impl Fn(&mut wgpu::RenderPass, usize, u32)) -> u32 {
         let mut count = 0;
         for (i, p) in self.passes.iter().enumerate() {
             let map = if p.local { &self.local } else { &self.dir };
@@ -482,7 +483,7 @@ impl ShadowGpu {
             pass.set_bind_group(0, &self.light_group, &[(p.slot as u64 * self.stride) as u32]);
             for c in casters.iter().filter(|c| intersects(p.view_proj, c.bounds)) {
                 pass.set_pipeline(&self.pipelines[usize::from(c.skinned)]);
-                bind(&mut pass, c.index);
+                bind(&mut pass, c.index, c.instance_count);
                 count += 1;
             }
         }
@@ -537,7 +538,7 @@ mod tests {
     /// 正交相机每段的横截面都是整屏，分段没用：按一段画，框住所有物体。
     #[test]
     fn ortho_cameras_draw_a_single_cascade() {
-        let casters = [Caster { index: 0, skinned: false, bounds: (Vec3::splat(-1.0), Vec3::splat(1.0)) }];
+        let casters = [Caster { index: 0, skinned: false, bounds: (Vec3::splat(-1.0), Vec3::splat(1.0)), instance_count: 1 }];
         let settings = Shadows { cascades: 3, ..Default::default() };
         let eye = Transform3d::from_xyz(0.0, 2.0, 10.0);
         let mut out = Vec::new();

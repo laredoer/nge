@@ -5472,6 +5472,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "whispering-isles"
+version = "0.1.0"
+dependencies = [
+ "bevy_ecs",
+ "nge-assets",
+ "nge-audio",
+ "nge-core",
+ "nge-ecs",
+ "nge-physics3d",
+ "nge-platform",
+ "nge-render2d",
+ "nge-render3d",
+ "nge-scene",
+ "nge-text",
+ "nsh-core",
+ "nsh-platform-ios",
+ "nsh-platform-macos",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "wide"
 version = "1.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -1,4 +1,4 @@
-// 阴影 pass：只写深度。Draw、关节矩阵、变形差和 shader.wgsl 的一样。
+// 阴影 pass：只写深度。Draw、关节矩阵、变形差、实例化矩阵和 shader.wgsl 的一样。
 
 struct Draw {
     model: mat4x4f,
@@ -9,12 +9,19 @@ struct Draw {
     skin: vec4u,
     morph: vec4u,
     weights: array<vec4f, 2>,
+    custom: vec4f,
+}
+
+struct Instance {
+    model: mat4x4f,
+    normal: mat4x4f,
 }
 
 @group(0) @binding(0) var<uniform> light: mat4x4f;
 @group(1) @binding(0) var<uniform> d: Draw;
 @group(1) @binding(1) var<storage, read> joints: array<mat4x4f>;
 @group(1) @binding(2) var<storage, read> morphs: array<vec4f>;
+@group(1) @binding(3) var<storage, read> instances: array<Instance>;
 
 /// 按权重加上每个变形目标的位置差（法线用不到）。
 fn morph(index: u32, position: vec3f) -> vec4f {
@@ -26,8 +33,12 @@ fn morph(index: u32, position: vec3f) -> vec4f {
 }
 
 @vertex
-fn vs(@location(0) position: vec3f, @builtin(vertex_index) index: u32) -> @builtin(position) vec4f {
-    return light * d.model * morph(index, position);
+fn vs(@location(0) position: vec3f, @builtin(vertex_index) index: u32, @builtin(instance_index) inst: u32) -> @builtin(position) vec4f {
+    var model = d.model;
+    if (d.skin.y & 16u) != 0u {
+        model = instances[d.morph.w + inst].model;
+    }
+    return light * model * morph(index, position);
 }
 
 @vertex

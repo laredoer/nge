@@ -52,11 +52,20 @@ pub struct Scene {
     /// 阴影的过滤、偏移、投影灯数和级联过渡。
     #[serde(deserialize_with = "crate::lenient::shadows")]
     pub shadows: Option<crate::quality3d::ShadowsNode>,
+    /// 3D 真实线性 HDR 色调映射（ACES / AgX / Reinhard）。
+    #[serde(deserialize_with = "crate::lenient::tonemap")]
+    pub tonemap: Option<crate::quality3d::ToneMapNode>,
+    /// 3D 屏幕空间环境光遮蔽（SSAO）。
+    #[serde(deserialize_with = "crate::lenient::ssao")]
+    pub ssao: Option<crate::quality3d::SsaoNode>,
     #[serde(deserialize_with = "crate::lenient::physics")]
     pub physics: Option<PhysicsNode>,
     /// 3D 物理（见 docs/physics3d.md）。
     #[serde(deserialize_with = "crate::lenient::physics3d")]
     pub physics3d: Option<crate::physics3d::Physics3dNode>,
+    /// 3D 导航网格（从地形模型与静态碰撞体自动构建）。
+    #[serde(deserialize_with = "crate::lenient::navmesh3d")]
+    pub navmesh3d: Option<crate::nav3d::NavMesh3dNode>,
     /// 进度条（见 docs/world-ui.md）。
     #[serde(deserialize_with = "crate::lenient::bars")]
     pub bars: Vec<crate::world_ui::BarNode>,
@@ -72,6 +81,9 @@ pub struct Scene {
     /// 游戏写的着色器：名字 → WGSL（见 docs/effects2d.md）。
     #[serde(deserialize_with = "crate::lenient::shaders")]
     pub shaders: std::collections::HashMap<String, String>,
+    /// 游戏写的 3D 材质着色器：名字 → WGSL（定义 `fn shade3d(s: Surface) -> vec4f`）。
+    #[serde(deserialize_with = "crate::lenient::shaders")]
+    pub shaders3d: std::collections::HashMap<String, String>,
     /// 2D 光照，写了就开。
     #[serde(deserialize_with = "crate::lenient::lighting")]
     pub lighting: Option<LightingNode>,

@@ -5,10 +5,10 @@ use glam::{EulerRot, Quat, Vec2, Vec3, Vec4};
 use nge_particles::ParticleEmitter;
 use nge_render2d::Transform2d;
 use nge_ecs::Interleave;
-use nge_render3d::{AmbientLight, Animator, Camera3d, DirectionalLight, GltfModel, Model3d, PointLight, Pose, ShadowPriority, Shadows, SpotLight, Transform3d};
+use nge_render3d::{AmbientLight, Animator, BoneSocket, Camera3d, DirectionalLight, GltfModel, MaterialShader3d, MaterialStyleOverride, Model3d, PointLight, Pose, ShadowPriority, Shadows, SpotLight, Transform3d};
 use nge_text::{ScreenText, Text2d};
 
-use crate::attach::Attach;
+use crate::attach::{Attach, SceneSocket};
 use crate::behave::{Follow, Spin, Tappable};
 use crate::match2d::Match2d;
 use crate::nodes::{AmbientNode, Camera3dNode, EmitterNode, LightKind, LightNode, ModelNode, Particles, TextNode};
@@ -99,9 +99,9 @@ pub(crate) fn sync_models(
             scale: Vec3::splat(node.scale),
         };
         let mut entity = commands.entity(entity);
-        entity.remove::<(Spin, Tappable, Attach)>();
-        // 有刚体的：声明的位置没变就不拉回去；变了就是瞬移
-        let keeps_place = crate::physics3d::keeps_place(before, node);
+        entity.remove::<(Spin, Tappable, Attach, SceneSocket, BoneSocket)>();
+        // 有刚体或 3D 导航代理的：声明的位置没变就不拉回去；变了就是瞬移
+        let keeps_place = crate::physics3d::keeps_place(before, node) || crate::nav3d::keeps_place(before, node);
         if !keeps_place {
             entity.insert(transform);
         }
@@ -139,8 +139,19 @@ pub(crate) fn sync_models(
             }
         }
         if node.body.is_some() {
+            if node.attach.is_some() || node.socket.is_some() || node.spin != 0.0 {
+                log::warn!("模型 {:?} 有刚体，attach / socket / spin 不生效", node.id);
+            }
+        } else if let Some(socket) = &node.socket {
+            entity.insert(SceneSocket {
+                target: socket.target.clone(),
+                bone: socket.bone.clone(),
+                offset: transform.translation,
+                rotation: transform.rotation,
+                scale: transform.scale,
+            });
             if node.attach.is_some() || node.spin != 0.0 {
-                log::warn!("模型 {:?} 有刚体，attach / spin 不生效", node.id);
+                log::warn!("模型 {:?} 挂在骨骼上，attach / spin 不生效", node.id);
             }
         } else if let Some(sprite) = &node.attach {
             entity.insert(Attach { sprite: sprite.clone(), offset: transform.translation, rotation: transform.rotation });
@@ -153,6 +164,25 @@ pub(crate) fn sync_models(
         if node.tap {
             entity.insert(Tappable);
         }
+        match node.style {
+            Some(style) => { entity.insert(MaterialStyleOverride(style.into())); }
+            None => { entity.remove::<MaterialStyleOverride>(); }
+        }
+        match &node.shader {
+            Some(name) => {
+                entity.insert(MaterialShader3d {
+                    name: name.clone(),
+                    params: node.params.map_or(Vec4::ZERO, Vec4::from),
+                });
+            }
+            None => {
+                if node.params.is_some() {
+                    log::warn!("模型 {:?} 写了 params 没写 shader：params 不起作用", node.id);
+                }
+                entity.remove::<MaterialShader3d>();
+            }
+        }
+        crate::nav3d::apply_nav(&mut entity, before, node);
         crate::particles3d::apply_trail(&mut entity, &node.id, node.trail.as_ref(), teleported, &mut assets);
     });
 }
@@ -209,11 +239,13 @@ pub(crate) fn sync_camera3d(
     mut ambient: ResMut<AmbientLight>,
     mut interleave: ResMut<Interleave>,
     mut shadows: ResMut<Shadows>,
+    mut rig3d: ResMut<crate::camera3d_rig::Camera3dRig>,
     mut last_camera: Local<Option<Option<Camera3dNode>>>,
     mut last_ambient: Local<Option<Option<AmbientNode>>>,
 ) {
     if last_camera.as_ref() != Some(&scene.camera3d) {
         let cam = scene.camera3d.clone().unwrap_or_default();
+        rig3d.set_node(cam.clone());
         interleave.0 = cam.interleave;
         // 声明了的写进去；上次声明了、这次去掉的回到默认；其余留着 Rust 设的
         let before = last_camera.clone().flatten().unwrap_or_default();

@@ -1,5 +1,6 @@
-//! 网格渲染器：深度缓冲、每次 draw 一段动态 uniform、贴图按 ImageId 缓存 bind group。
+//! 网格渲染器：深度缓冲、每次 draw 一段动态 uniform、完整 PBR 材质按贴图组合缓存 bind group、静态不透明网格自动 GPU Instancing 合批。
 
+use std::collections::{HashMap, HashSet};
 use std::num::NonZeroU64;
 
 use bevy_ecs::prelude::*;
@@ -10,27 +11,30 @@ use nge_ecs::{App, ClearColor, Interleave, Plugin, PostUpdate, PreUpdate, Render
 use nge_assets::{AssetApp, Assets, GpuImages, Image, ImageId};
 
 use crate::animator::animate;
+use crate::assets::{Assets3d, MaterialId, MeshId, ModelId};
 use crate::billboard_gpu::BillboardGpu;
 use crate::billboards::{Batch, BillboardVertex, Billboards, Scratch as BillboardScratch};
-use crate::gizmos::Gizmos3d;
-use crate::line_gpu::LineGpu;
-use crate::assets::{Assets3d, MaterialId, MeshId, ModelId};
+use crate::collect::{Draw, DrawRaw, FLAG_INSTANCED, InstanceRaw, MaterialTextures, Scratch, blend_depth, collect, globals, sort_draws};
 use crate::depth_target::DepthTarget;
-use crate::collect::{Draw, DrawRaw, Scratch, blend_depth, collect, globals, sort_draws};
+use crate::fog::{FOG_WGSL, Fog};
+use crate::gizmos::Gizmos3d;
 use crate::gltf_load::{Gltf, GltfModels, resolve_gltf_models};
 use crate::light::{AmbientLight, Globals};
+use crate::line_gpu::LineGpu;
 use crate::mesh::{Influence, Vertex};
 use crate::morph::MorphBuffer;
-use crate::fog::{FOG_WGSL, Fog};
+use crate::shader3d::Shaders3d;
 use crate::shadow::{Caster, ShadowGpu, Shadows};
 use crate::sky::Sky;
 use crate::sky_gpu::SkyGpu;
+use crate::ssao::{Ssao, SsaoGpu, ToneMap};
 
 const SHADER: &str = include_str!("shader.wgsl");
 /// 和精灵共用（混排时精灵读它，遮罩写它的模板）。
 const DEPTH_FORMAT: wgpu::TextureFormat = SCENE_DEPTH_FORMAT;
 const INITIAL_DRAWS: u64 = 64;
 const INITIAL_JOINTS: u64 = 64;
+const INITIAL_INSTANCES: u64 = 64;
 
 /// 一个网格加一个材质，画在同一实体的 [`Transform3d`] 上。
 #[derive(Component, Debug, Clone, Copy, PartialEq)]
@@ -56,6 +60,8 @@ impl Plugin for Render3dPlugin {
             // 状态机（见 docs/anim-graph.md）
             .add_message::<nge_anim::AnimEvent>()
             .add_systems(PostUpdate, crate::graph_pose::animate_graphs.in_set(nge_anim::Animated))
+            // 骨骼挂点（在所有骨骼动画与状态机更新完 Pose 之后同步世界变换）
+            .add_systems(PostUpdate, crate::socket::update_bone_sockets.in_set(crate::socket::SocketsUpdated).after(animate).after(crate::graph_pose::animate_graphs))
             .init_resource::<crate::billboards::Billboards>()
             .add_systems(PreUpdate, crate::billboards::clear_billboards)
             // 调试画线（见 docs/gameplay3d.md）
@@ -63,8 +69,14 @@ impl Plugin for Render3dPlugin {
             .add_systems(PreUpdate, crate::gizmos::clear_gizmos);
         // 一插上状态机就有 Pose：第一帧就按状态机的姿势画（见 docs/anim-graph.md）
         app.world_mut().register_required_components::<nge_anim::AnimGraph, crate::animator::Pose>();
-        // 天空、雾（见 docs/render3d-quality.md）
-        app.init_asset::<nge_assets::CubeImage>().init_resource::<Sky>().init_resource::<Fog>().init_resource::<crate::sky_gpu::SkyBake>();
+        // 天空、雾、色调映射、SSAO、自定义 3D 着色器（见 docs/render3d-quality.md）
+        app.init_asset::<nge_assets::CubeImage>()
+            .init_resource::<Sky>()
+            .init_resource::<Fog>()
+            .init_resource::<crate::sky_gpu::SkyBake>()
+            .init_resource::<ToneMap>()
+            .init_resource::<Ssao>()
+            .init_resource::<Shaders3d>();
         app.insert_resource(Assets3d::default()).init_resource::<AmbientLight>().init_resource::<Shadows>().add_renderer(MeshRenderer::default());
     }
 }
@@ -84,6 +96,14 @@ struct GpuMesh {
 struct Gpu {
     /// [背面剔除, 正面剔除（镜像变换，绕序反了）, 双面]，再按蒙皮、半透明各翻一倍：下标 = 剔除 + 3 × 蒙皮 + 6 × 半透明。
     pipelines: Vec<wgpu::RenderPipeline>,
+    pipeline_layout: wgpu::PipelineLayout,
+    gl: bool,
+    /// 自定义 3D 着色器名 → 校验通过后的 ShaderModule（失败或缺失缓存 None 避免重复报错）。
+    custom_modules: HashMap<String, Option<wgpu::ShaderModule>>,
+    /// 自定义 3D 着色器名 → 按 12 种管线变体懒编译缓存的 RenderPipeline。
+    custom_pipelines: HashMap<String, [Option<wgpu::RenderPipeline>; 12]>,
+    shader_generation: u64,
+    warned_shaders: HashSet<String>,
     globals: wgpu::Buffer,
     globals_layout: wgpu::BindGroupLayout,
     globals_group: wgpu::BindGroup,
@@ -99,13 +119,24 @@ struct Gpu {
     joint_capacity: u64,
     /// 所有网格的变形差（和关节矩阵在同一个 bind group）。
     morphs: MorphBuffer,
+    /// 这一帧静态合批的实例变换矩阵（storage buffer，和 draw 的 uniform 在一个 bind group）。
+    instances: wgpu::Buffer,
+    instance_capacity: u64,
+    /// 网格材质布局（5 张贴图 + 1 个采样器）。
+    material_layout: wgpu::BindGroupLayout,
+    /// 方片 / 丝带用的单贴图布局（2 个绑定）。
     texture_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
-    /// 按贴图编号缓存；贴图还没加载完的不缓存，先用白色贴图的。
+    /// 网格材质按 5 张贴图组合缓存 bind group。
+    materials: HashMap<MaterialTextures, wgpu::BindGroup>,
+    /// 方片按单张贴图编号缓存；贴图还没加载完的不缓存，先用白色贴图的。
     textures: Vec<Option<wgpu::BindGroup>>,
+    /// 已同步过线性标记的材质数量。
+    linear_materials_synced: usize,
     generation: u64,
     meshes: Vec<GpuMesh>,
     depth: DepthTarget,
+    ssao: SsaoGpu,
     billboards: BillboardGpu,
     lines: LineGpu,
 }
@@ -116,6 +147,9 @@ struct MeshRenderer {
     draws: Vec<Draw>,
     bytes: Vec<u8>,
     joints: Vec<Mat4>,
+    instances: Vec<InstanceRaw>,
+    /// 主 pass 每个不透明批次：(首 draw 下标, 实例数)；半透明仍逐个画。
+    opaque_batches: Vec<(usize, u32)>,
     warned_lights: bool,
     casters: Vec<Caster>,
     billboard_vertices: Vec<BillboardVertex>,
@@ -133,6 +167,48 @@ pub fn in_view(view_proj: Mat4, bounds: (Vec3, Vec3)) -> bool {
     !(bounds.0.is_finite() && bounds.1.is_finite()) || crate::shadow_views::intersects(view_proj, bounds)
 }
 
+/// 把连续可见、网格与材质完全一致的静态不透明 draw 合并成 GPU Instancing 批次。
+fn build_opaque_batches(draws: &mut [Draw], visible: &[bool], opaque: usize, instances: &mut Vec<InstanceRaw>, batches: &mut Vec<(usize, u32)>) {
+    instances.clear();
+    batches.clear();
+    let mut i = 0;
+    while i < opaque {
+        if !visible[i] {
+            i += 1;
+            continue;
+        }
+        let mut j = i + 1;
+        let mut count = 1u32;
+        while j < opaque {
+            if !visible[j] {
+                j += 1;
+                continue;
+            }
+            if draws[i].can_batch_with(&draws[j]) {
+                count += 1;
+                j += 1;
+            } else {
+                break;
+            }
+        }
+        if count >= 2 {
+            let base = instances.len() as u32;
+            for k in i..j {
+                if visible[k] {
+                    instances.push(InstanceRaw { model: draws[k].raw.model, normal: draws[k].raw.normal });
+                }
+            }
+            draws[i].raw.skin[1] |= FLAG_INSTANCED;
+            draws[i].raw.morph[3] = base;
+            batches.push((i, count));
+            i = j;
+        } else {
+            batches.push((i, 1));
+            i += 1;
+        }
+    }
+}
+
 impl Renderer for MeshRenderer {
     fn render(&mut self, world: &mut World, gfx: &Gfx, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView) {
         let gpu = self.gpu.get_or_insert_with(|| Gpu::new(gfx));
@@ -141,7 +217,17 @@ impl Renderer for MeshRenderer {
             log::warn!("灯光数量超过上限，多出来的已忽略");
         }
 
-        world.resource_scope(|world, mut images: Mut<GpuImages>| images.sync(gfx, world.resource::<Assets<Image>>()));
+        // 把新加入材质的法线 / 金属粗糙度 / AO 贴图标为线性（生成 mipmap 不做 sRGB 解码）
+        world.resource_scope(|world, mut images: Mut<GpuImages>| {
+            let assets = world.resource::<Assets3d>();
+            for m in assets.materials.get(gpu.linear_materials_synced..).unwrap_or_default() {
+                for id in [m.normal_texture, m.metallic_roughness_texture, m.occlusion_texture].into_iter().flatten() {
+                    images.set_linear(id, true);
+                }
+            }
+            gpu.linear_materials_synced = assets.materials.len();
+            images.sync(gfx, world.resource::<Assets<Image>>());
+        });
         gpu.upload(gfx, world.resource::<Assets3d>());
         collect(world, &mut self.draws, &mut self.joints, &mut self.scratch);
         self.draws.retain(|d| (d.mesh.0 as usize) < gpu.meshes.len());
@@ -162,23 +248,73 @@ impl Renderer for MeshRenderer {
         if gpu.generation != images.generation() {
             gpu.generation = images.generation();
             gpu.textures.clear();
+            gpu.materials.clear();
         }
-        let textures = self.draws.iter().map(|d| d.texture).chain(self.billboard_batches.iter().map(|b| b.texture));
-        for id in std::iter::once(ImageId::WHITE).chain(textures) {
+        // 方片单贴图缓存
+        for id in std::iter::once(ImageId::WHITE).chain(self.billboard_batches.iter().map(|b| b.texture)) {
             gpu.cache_texture(gfx, images, id);
         }
-        gpu.lines.prepare(gfx, view_proj, world.resource::<Gizmos3d>());
-        gpu.write_draws(gfx, &self.draws, &mut self.bytes, &self.joints);
-        // 半透明的不投影子；一个算坏了的包围盒不该让整个场景的影子消失。视锥外的不画，影子照样投
-        self.casters.clear();
-        self.visible.clear();
-        for (index, d) in self.draws.iter().enumerate() {
-            let bounds = gpu.world_bounds(d, &self.joints);
-            self.visible.push(in_view(view_proj, bounds));
-            if !d.blend && bounds.0.is_finite() && bounds.1.is_finite() {
-                self.casters.push(Caster { index, skinned: d.joints.is_some(), bounds });
+        // 网格材质 5 贴图组合缓存
+        gpu.cache_material(gfx, images, [ImageId::WHITE; 5]);
+        for d in &self.draws {
+            gpu.cache_material(gfx, images, d.textures);
+        }
+        // 自定义 3D 着色器热更新与按需编译缓存
+        let shaders3d = world.resource::<Shaders3d>();
+        gpu.sync_shaders(shaders3d);
+        for d in &self.draws {
+            if let Some(name) = d.shader.as_deref() {
+                gpu.ensure_custom_pipeline(gfx, shaders3d, name, d.pipeline);
             }
         }
+        gpu.lines.prepare(gfx, view_proj, world.resource::<Gizmos3d>());
+
+        // 先算世界包围盒和视锥可见性；静态不透明物体合批后，主 pass 和阴影 pass 共用同一份实例缓冲
+        self.casters.clear();
+        self.visible.clear();
+        let opaque = self.draws.iter().take_while(|d| !d.blend).count();
+        let mut draw_bounds = Vec::with_capacity(self.draws.len());
+        for d in &self.draws {
+            let bounds = gpu.world_bounds(d, &self.joints);
+            self.visible.push(in_view(view_proj, bounds));
+            draw_bounds.push(bounds);
+        }
+        build_opaque_batches(&mut self.draws, &self.visible, opaque, &mut self.instances, &mut self.opaque_batches);
+        // 主 pass 合批的静态不透明物体在阴影 pass 里也合并为一个 Caster，大幅降低阴影 draw call
+        let mut batched_in_shadow = vec![false; opaque];
+        for &(leader, count) in &self.opaque_batches {
+            if count >= 2 {
+                let mut merged = (Vec3::INFINITY, Vec3::NEG_INFINITY);
+                let mut rem = count;
+                for k in leader..opaque {
+                    if self.visible[k] {
+                        let b = draw_bounds[k];
+                        if b.0.is_finite() && b.1.is_finite() {
+                            merged = (merged.0.min(b.0), merged.1.max(b.1));
+                        }
+                        batched_in_shadow[k] = true;
+                        rem -= 1;
+                        if rem == 0 {
+                            break;
+                        }
+                    }
+                }
+                if merged.0.is_finite() && merged.1.is_finite() {
+                    self.casters.push(Caster { index: leader, skinned: false, bounds: merged, instance_count: count });
+                }
+            }
+        }
+        for index in 0..opaque {
+            if batched_in_shadow[index] {
+                continue;
+            }
+            let bounds = draw_bounds[index];
+            if bounds.0.is_finite() && bounds.1.is_finite() {
+                self.casters.push(Caster { index, skinned: self.draws[index].joints.is_some(), bounds, instance_count: 1 });
+            }
+        }
+        gpu.write_draws(gfx, &self.draws, &mut self.bytes, &self.joints, &self.instances);
+
         let mut rebuilt = gpu.shadow.prepare(gfx, &mut globals.0, &camera, &self.casters, &self.scratch.candidates, *world.resource::<Shadows>());
         rebuilt |= gpu.sky.prepare(gfx, world.resource::<Sky>(), world.resource::<Assets<Image>>(), world.resource::<Assets<nge_assets::CubeImage>>(), &mut globals.0);
         let bake = gpu.sky.status();
@@ -190,23 +326,29 @@ impl Renderer for MeshRenderer {
         }
         let forward = camera.eye.rotation * Vec3::NEG_Z;
         globals.0.fog = world.resource::<Fog>().raw(camera.eye.translation, camera.camera.ortho_height().is_none(), forward, gpu.sky.has_sky());
+        let tonemap = *world.resource::<ToneMap>();
+        globals.0.sky[0][3] = tonemap.mode.as_f32();
+        globals.0.sky[1][3] = tonemap.exposure;
+        globals.0.sky[2][3] = tonemap.saturation;
         let billboard_view = crate::billboard_gpu::ViewRaw::new(&globals.0);
         gpu.billboards.prepare(gfx, &billboard_view, &self.billboard_vertices);
         gfx.queue.write_buffer(&gpu.globals, 0, bytemuck::bytes_of(&globals.0));
         let timers: Vec<Option<nge_ecs::PassTimer>> = (0..gpu.shadow.pass_count()).map(|_| nge_ecs::pass_timer(world, "阴影")).collect();
         let g = &*gpu;
-        let shadow_draws = g.shadow.draw(encoder, &self.casters, &timers, |pass, i| {
+        let shadow_draws = g.shadow.draw(encoder, &self.casters, &timers, |pass, i, instance_count| {
             let draw = &self.draws[i];
             let mesh = &g.meshes[draw.mesh.0 as usize];
             pass.set_bind_group(1, &g.draws_group, &[(i as u64 * g.stride) as u32]);
             mesh.bind(pass, draw);
-            pass.draw_indexed(0..mesh.count, 0, 0..1);
+            pass.draw_indexed(0..mesh.count, 0, 0..instance_count);
         });
-        let n = self.visible.iter().filter(|&&v| v).count() as u32;
+        let visible_blend = self.visible[opaque..].iter().filter(|&&v| v).count() as u32;
+        let main_draw_calls = self.opaque_batches.len() as u32 + visible_blend;
+        let visible_instances = self.visible.iter().filter(|&&v| v).count() as u32;
         let mut frame = world.resource_mut::<RenderFrame>();
-        frame.count(n + shadow_draws, n);
+        frame.count(main_draw_calls + shadow_draws, visible_instances);
         let cull = frame.cull_mut();
-        cull.meshes[0] += n;
+        cull.meshes[0] += visible_instances;
         cull.meshes[1] += self.draws.len() as u32;
         let billboards = world.resource::<Billboards>();
         let quads = (billboards.quads() + billboards.ribbons()) as u32;
@@ -214,10 +356,13 @@ impl Renderer for MeshRenderer {
         let lines = world.resource::<Gizmos3d>();
         let segments = (lines.depth_tested().len() + lines.top().len()) as u32;
         world.resource_mut::<RenderFrame>().count(gpu.lines.draws(), segments);
-        // 有软粒子时方片另开一个 pass，深度只读、同时绑成纹理（GL 上不行，退成硬边）
+        // 有软粒子或 SSAO 时深度纹理需要可读（GL 上不行，退化跳过）
+        let ssao = *world.resource::<Ssao>();
+        let ssao_on = ssao.enabled && !gpu.billboards.gl;
         let split = self.billboard_soft && !gpu.billboards.gl;
-        if let Some(depth_only) = gpu.depth.prepare(&gfx.device, target.texture().size(), split) {
+        if let Some(depth_only) = gpu.depth.prepare(&gfx.device, target.texture().size(), split || ssao_on) {
             gpu.billboards.set_depth(&gfx.device, &depth_only);
+            gpu.ssao.set_depth(&gfx.device, &depth_only);
         }
         let depth = gpu.depth.view().clone();
         let depth = &depth;
@@ -242,33 +387,38 @@ impl Renderer for MeshRenderer {
             })],
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                 view: depth,
-                depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: if interleave || split { wgpu::StoreOp::Store } else { wgpu::StoreOp::Discard } }),
+                depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: if interleave || split || ssao_on { wgpu::StoreOp::Store } else { wgpu::StoreOp::Discard } }),
                 stencil_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(0), store: wgpu::StoreOp::Discard }),
             }),
             ..Default::default()
         });
         pass.set_bind_group(0, &gpu.globals_group, &[]);
-        // 不透明的、天空、半透明的：天空只盖住深度还是 1 的地方，半透明的叠在天空上
-        let opaque = self.draws.iter().take_while(|d| !d.blend).count();
-        for (i, draw) in self.draws.iter().enumerate() {
-            if i == opaque {
-                gpu.sky.draw(&mut pass, &globals.0);
-            }
+        // 不透明的（按合批绘制）、天空、半透明的：天空只盖住深度还是 1 的地方，半透明的叠在天空上
+        for &(i, instance_count) in &self.opaque_batches {
+            let draw = &self.draws[i];
+            let mesh = &gpu.meshes[draw.mesh.0 as usize];
+            let material = gpu.material(draw.textures);
+            pass.set_pipeline(gpu.pipeline_for(draw.shader.as_deref(), draw.pipeline));
+            pass.set_bind_group(1, &gpu.draws_group, &[(i as u64 * gpu.stride) as u32]);
+            pass.set_bind_group(2, material, &[]);
+            mesh.bind(&mut pass, draw);
+            pass.draw_indexed(0..mesh.count, 0, 0..instance_count);
+        }
+        gpu.sky.draw(&mut pass, &globals.0);
+        for i in opaque..self.draws.len() {
             if !self.visible[i] {
                 continue;
             }
+            let draw = &self.draws[i];
             let mesh = &gpu.meshes[draw.mesh.0 as usize];
-            let texture = gpu.texture(draw.texture);
-            pass.set_pipeline(&gpu.pipelines[draw.pipeline]);
+            let material = gpu.material(draw.textures);
+            pass.set_pipeline(gpu.pipeline_for(draw.shader.as_deref(), draw.pipeline));
             pass.set_bind_group(1, &gpu.draws_group, &[(i as u64 * gpu.stride) as u32]);
-            pass.set_bind_group(2, texture, &[]);
+            pass.set_bind_group(2, material, &[]);
             mesh.bind(&mut pass, draw);
             pass.draw_indexed(0..mesh.count, 0, 0..1);
         }
-        if opaque == self.draws.len() {
-            gpu.sky.draw(&mut pass, &globals.0);
-        }
-        if !split {
+        if !split && !ssao_on {
             // 透明的方片和带子画在所有网格后面
             gpu.billboards.draw(&mut pass, &self.billboard_batches, false, |id| gpu.texture(id));
             // 调试画线最后画：半透明的方片不会盖住它
@@ -276,6 +426,42 @@ impl Renderer for MeshRenderer {
             return;
         }
         drop(pass);
+        if ssao_on {
+            let timer = nge_ecs::pass_timer(world, "SSAO");
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("ssao"),
+                timestamp_writes: timer.as_ref().and_then(nge_ecs::PassTimer::writes),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                })],
+                ..Default::default()
+            });
+            gpu.ssao.draw(gfx, &mut pass, ssao, target.texture().size());
+            world.resource_mut::<RenderFrame>().count(1, 0);
+        }
+        if !split {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("billboards and lines"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: depth,
+                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Load, store: if interleave { wgpu::StoreOp::Store } else { wgpu::StoreOp::Discard } }),
+                    stencil_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(0), store: wgpu::StoreOp::Discard }),
+                }),
+                ..Default::default()
+            });
+            gpu.billboards.draw(&mut pass, &self.billboard_batches, false, |id| gpu.texture(id));
+            gpu.lines.draw(&mut pass);
+            return;
+        }
         let timer = nge_ecs::pass_timer(world, "软粒子");
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("soft billboards"),
@@ -350,6 +536,16 @@ impl Gpu {
             ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: true }, view_dimension: wgpu::TextureViewDimension::Cube, multisampled: false },
             count: None,
         };
+        let tex2d = |binding| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        };
         let globals_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("mesh globals"),
             entries: &[
@@ -364,12 +560,7 @@ impl Gpu {
                 shadow_map(3),
                 cube(4),
                 cube(5),
-                wgpu::BindGroupLayoutEntry {
-                    binding: 6,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: true }, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false },
-                    count: None,
-                },
+                tex2d(6),
                 wgpu::BindGroupLayoutEntry {
                     binding: 7,
                     visibility: wgpu::ShaderStages::FRAGMENT,
@@ -395,21 +586,35 @@ impl Gpu {
                     ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: NonZeroU64::new(16) },
                     count: None,
                 },
+                // GPU 实例化变换矩阵（静态不透明合批）
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: NonZeroU64::new(size_of::<InstanceRaw>() as u64) },
+                    count: None,
+                },
+            ],
+        });
+        let material_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("mesh material"),
+            entries: &[
+                tex2d(0),
+                tex2d(1),
+                tex2d(2),
+                tex2d(3),
+                tex2d(4),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
             ],
         });
         let texture_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("mesh texture"),
             entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
+                tex2d(0),
                 wgpu::BindGroupLayoutEntry {
                     binding: 1,
                     visibility: wgpu::ShaderStages::FRAGMENT,
@@ -420,12 +625,13 @@ impl Gpu {
         });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("meshes"),
-            bind_group_layouts: &[Some(&globals_layout), Some(&draw_layout), Some(&texture_layout)],
+            bind_group_layouts: &[Some(&globals_layout), Some(&draw_layout), Some(&material_layout)],
             immediate_size: 0,
         });
+        let gl = gfx.device.adapter_info().backend == wgpu::Backend::Gl;
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("meshes"),
-            source: wgpu::ShaderSource::Wgsl(shader_source(gfx.device.adapter_info().backend == wgpu::Backend::Gl).into()),
+            source: wgpu::ShaderSource::Wgsl(shader_source(gl).into()),
         });
         let culls = [Some(wgpu::Face::Back), Some(wgpu::Face::Front), None];
         let pipelines = [false, true]
@@ -447,19 +653,28 @@ impl Gpu {
         let stride = (size_of::<DrawRaw>() as u64).div_ceil(align) * align;
         let joints = joint_buffer(device, INITIAL_JOINTS);
         let morphs = MorphBuffer::new(device);
-        let (draws, draws_group) = draw_buffer(device, &draw_layout, INITIAL_DRAWS * stride, &joints, &morphs.buffer);
+        let instances = instance_buffer(device, INITIAL_INSTANCES);
+        let (draws, draws_group) = draw_buffer(device, &draw_layout, INITIAL_DRAWS * stride, &joints, &morphs.buffer, &instances);
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("meshes"),
             address_mode_u: wgpu::AddressMode::Repeat,
             address_mode_v: wgpu::AddressMode::Repeat,
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
             ..Default::default()
         });
+        let ssao = SsaoGpu::new(gfx);
         let billboards = BillboardGpu::new(gfx, &texture_layout);
         let lines = LineGpu::new(gfx);
         Self {
             pipelines,
+            pipeline_layout: layout,
+            gl,
+            custom_modules: HashMap::new(),
+            custom_pipelines: HashMap::new(),
+            shader_generation: 0,
+            warned_shaders: HashSet::new(),
             globals,
             globals_layout,
             globals_group,
@@ -473,12 +688,18 @@ impl Gpu {
             joints,
             joint_capacity: INITIAL_JOINTS,
             morphs,
+            instances,
+            instance_capacity: INITIAL_INSTANCES,
+            material_layout,
             texture_layout,
             sampler,
+            materials: HashMap::new(),
             textures: Vec::new(),
+            linear_materials_synced: 0,
             generation: 0,
             meshes: Vec::new(),
             depth: DepthTarget::default(),
+            ssao,
             billboards,
             lines,
         }
@@ -495,6 +716,66 @@ impl Gpu {
                 .fold((Vec3::INFINITY, Vec3::NEG_INFINITY), |(a, b), (c, e)| (a.min(c), b.max(e))),
             None => world_box(model, lo, hi),
         }
+    }
+
+    fn sync_shaders(&mut self, shaders: &Shaders3d) {
+        if self.shader_generation != shaders.generation() {
+            self.shader_generation = shaders.generation();
+            self.custom_modules.clear();
+            self.custom_pipelines.clear();
+            self.warned_shaders.clear();
+        }
+    }
+
+    fn ensure_custom_pipeline(&mut self, gfx: &Gfx, shaders: &Shaders3d, name: &str, pipeline_idx: usize) {
+        if self.custom_pipelines.get(name).is_some_and(|arr| arr[pipeline_idx].is_some()) {
+            return;
+        }
+        if !self.custom_modules.contains_key(name) {
+            let compiled = match shaders.code(name) {
+                Some(code) => {
+                    let base = shader_source(self.gl);
+                    let full = crate::shader3d::compose(&base, code);
+                    match crate::shader3d::validate(&full, code) {
+                        Ok(()) => Some(gfx.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                            label: Some("meshes custom"),
+                            source: wgpu::ShaderSource::Wgsl(full.into()),
+                        })),
+                        Err(err) => {
+                            if self.warned_shaders.insert(name.to_owned()) {
+                                log::warn!("自定义 3D 着色器 `{name}` 校验失败，已回退默认着色器：\n{err}");
+                            }
+                            None
+                        }
+                    }
+                }
+                None => {
+                    if self.warned_shaders.insert(name.to_owned()) {
+                        log::warn!("找不到自定义 3D 着色器 `{name}`，已回退默认着色器");
+                    }
+                    None
+                }
+            };
+            self.custom_modules.insert(name.to_owned(), compiled);
+        }
+        let Some(module) = self.custom_modules.get(name).and_then(Option::as_ref) else {
+            return;
+        };
+        let culls = [Some(wgpu::Face::Back), Some(wgpu::Face::Front), None];
+        let cull = culls[pipeline_idx % 3];
+        let skinned = (pipeline_idx / 3) % 2 == 1;
+        let blend = pipeline_idx >= 6;
+        let pipe = pipeline(gfx, &self.pipeline_layout, module, cull, skinned, blend);
+        self.custom_pipelines.entry(name.to_owned()).or_insert_with(|| std::array::from_fn(|_| None))[pipeline_idx] = Some(pipe);
+    }
+
+    fn pipeline_for(&self, shader: Option<&str>, pipeline_idx: usize) -> &wgpu::RenderPipeline {
+        if let Some(name) = shader {
+            if let Some(pipe) = self.custom_pipelines.get(name).and_then(|arr| arr[pipeline_idx].as_ref()) {
+                return pipe;
+            }
+        }
+        &self.pipelines[pipeline_idx]
     }
 
     /// 上传还没上传过的网格（资源只增不减）；变形差的缓冲换了时重建 draw 的 bind group。
@@ -517,8 +798,46 @@ impl Gpu {
             });
         }
         if grew {
-            (self.draws, self.draws_group) = draw_buffer(&gfx.device, &self.draw_layout, self.draw_capacity * self.stride, &self.joints, &self.morphs.buffer);
+            (self.draws, self.draws_group) = draw_buffer(&gfx.device, &self.draw_layout, self.draw_capacity * self.stride, &self.joints, &self.morphs.buffer, &self.instances);
         }
+    }
+
+    /// 材质的 5 张贴图都加载好才按完整键缓存；任一张还没加载好时回退到全白组合，不污染缓存。
+    fn cache_material(&mut self, gfx: &Gfx, images: &GpuImages, key: MaterialTextures) {
+        if self.materials.contains_key(&key) {
+            return;
+        }
+        let (Some(base), Some(normal), Some(mr), Some(ao), Some(emissive)) = (
+            images.view(key[0]),
+            images.linear_view(key[1]),
+            images.linear_view(key[2]),
+            images.linear_view(key[3]),
+            images.view(key[4]),
+        ) else {
+            return;
+        };
+        self.materials.insert(
+            key,
+            gfx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("mesh material"),
+                layout: &self.material_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(base) },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(normal) },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(mr) },
+                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(ao) },
+                    wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(emissive) },
+                    wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                ],
+            }),
+        );
+    }
+
+    fn material(&self, key: MaterialTextures) -> &wgpu::BindGroup {
+        self.materials
+            .get(&key)
+            .or_else(|| self.materials.get(&[ImageId::WHITE; 5]))
+            .expect("全白材质总是先缓存")
     }
 
     /// 贴图加载好了就建 bind group 缓存起来；没加载好的什么也不做（画的时候用白色）。
@@ -545,22 +864,29 @@ impl Gpu {
         self.textures.get(id.index() as usize).and_then(Option::as_ref).or(self.textures[0].as_ref()).expect("白色贴图总是先上传")
     }
 
-    /// 每个 draw 占 `stride` 字节，关节矩阵另放一个缓冲；容量不够时按两倍扩容。
-    fn write_draws(&mut self, gfx: &Gfx, draws: &[Draw], bytes: &mut Vec<u8>, joints: &[Mat4]) {
+    /// 每个 draw 占 `stride` 字节，关节矩阵和实例化矩阵另放缓冲；容量不够时按两倍扩容。
+    fn write_draws(&mut self, gfx: &Gfx, draws: &[Draw], bytes: &mut Vec<u8>, joints: &[Mat4], instances: &[InstanceRaw]) {
         if draws.is_empty() {
             return;
         }
-        let (needed, needed_joints) = (draws.len() as u64, joints.len() as u64);
-        if needed > self.draw_capacity || needed_joints > self.joint_capacity {
+        let (needed, needed_joints, needed_instances) = (draws.len() as u64, joints.len() as u64, instances.len() as u64);
+        if needed > self.draw_capacity || needed_joints > self.joint_capacity || needed_instances > self.instance_capacity {
             self.draw_capacity = self.draw_capacity.max(needed.next_power_of_two());
             if needed_joints > self.joint_capacity {
                 self.joint_capacity = needed_joints.next_power_of_two();
                 self.joints = joint_buffer(&gfx.device, self.joint_capacity);
             }
-            (self.draws, self.draws_group) = draw_buffer(&gfx.device, &self.draw_layout, self.draw_capacity * self.stride, &self.joints, &self.morphs.buffer);
+            if needed_instances > self.instance_capacity {
+                self.instance_capacity = needed_instances.next_power_of_two();
+                self.instances = instance_buffer(&gfx.device, self.instance_capacity);
+            }
+            (self.draws, self.draws_group) = draw_buffer(&gfx.device, &self.draw_layout, self.draw_capacity * self.stride, &self.joints, &self.morphs.buffer, &self.instances);
         }
         if !joints.is_empty() {
             gfx.queue.write_buffer(&self.joints, 0, bytemuck::cast_slice(joints));
+        }
+        if !instances.is_empty() {
+            gfx.queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(instances));
         }
         bytes.clear();
         bytes.resize(draws.len() * self.stride as usize, 0);
@@ -573,7 +899,7 @@ impl Gpu {
 
 /// 着色器源码：前面拼上雾，采样盘换成 Rust 算的。GL 后端上 PCSS 退成泊松盘：GLSL ES 里同一张深度纹理
 /// 不能既按比较采样又直接读，找挡光的那一步写不出来。
-fn shader_source(gl: bool) -> String {
+pub(crate) fn shader_source(gl: bool) -> String {
     let source = format!("{FOG_WGSL}{SHADER}").replace("POISSON_DISK", &crate::shadow_soft::disk_wgsl());
     if !gl {
         return source;
@@ -610,7 +936,23 @@ fn joint_buffer(device: &wgpu::Device, capacity: u64) -> wgpu::Buffer {
     })
 }
 
-fn draw_buffer(device: &wgpu::Device, layout: &wgpu::BindGroupLayout, size: u64, joints: &wgpu::Buffer, morphs: &wgpu::Buffer) -> (wgpu::Buffer, wgpu::BindGroup) {
+fn instance_buffer(device: &wgpu::Device, capacity: u64) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("mesh instances"),
+        size: capacity * size_of::<InstanceRaw>() as u64,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
+}
+
+fn draw_buffer(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    size: u64,
+    joints: &wgpu::Buffer,
+    morphs: &wgpu::Buffer,
+    instances: &wgpu::Buffer,
+) -> (wgpu::Buffer, wgpu::BindGroup) {
     let buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("mesh draws"),
         size,
@@ -631,6 +973,7 @@ fn draw_buffer(device: &wgpu::Device, layout: &wgpu::BindGroupLayout, size: u64,
             },
             wgpu::BindGroupEntry { binding: 1, resource: joints.as_entire_binding() },
             wgpu::BindGroupEntry { binding: 2, resource: morphs.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 3, resource: instances.as_entire_binding() },
         ],
     });
     (buffer, group)
@@ -699,6 +1042,38 @@ mod tests {
         assert!(!in_view(proj, unit(Vec3::new(0.0, 0.0, -200.0))), "远平面以外");
         assert!(in_view(proj, (Vec3::new(-100.0, -0.5, -3.0), Vec3::new(100.0, 0.5, -2.0))), "横穿视野、角都在外面");
         assert!(in_view(proj, (Vec3::splat(f32::NAN), Vec3::ONE)), "算坏了的照画");
+    }
+
+    #[test]
+    fn static_opaque_draws_batch_into_instances() {
+        use bytemuck::Zeroable;
+        let make = |mesh: u32, x: f32| {
+            let mut raw = DrawRaw::zeroed();
+            raw.model = Mat4::from_translation(Vec3::new(x, 0.0, 0.0)).to_cols_array_2d();
+            Draw {
+                mesh: MeshId(mesh),
+                texture: ImageId::WHITE,
+                textures: [ImageId::WHITE; 5],
+                material: MaterialId::DEFAULT,
+                pipeline: 0,
+                shader: None,
+                joints: None,
+                blend: false,
+                depth: 0.0,
+                raw,
+            }
+        };
+        let mut draws = vec![make(0, 1.0), make(0, 2.0), make(0, 3.0), make(1, 4.0)];
+        let visible = vec![true, false, true, true];
+        let mut instances = Vec::new();
+        let mut batches = Vec::new();
+        let opaque = draws.len();
+        build_opaque_batches(&mut draws, &visible, opaque, &mut instances, &mut batches);
+        assert_eq!(batches, [(0, 2), (3, 1)], "前两个可见同网格合批为 2 个实例，第 4 个单独 1 个");
+        assert_eq!(instances.len(), 2);
+        assert_ne!(draws[0].raw.skin[1] & FLAG_INSTANCED, 0);
+        assert_eq!(draws[0].raw.morph[3], 0);
+        assert_eq!(draws[3].raw.skin[1] & FLAG_INSTANCED, 0);
     }
 
     #[test]
