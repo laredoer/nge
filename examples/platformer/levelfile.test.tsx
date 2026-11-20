@@ -3,6 +3,7 @@ import { expect, test } from "nsh/test";
 import { checkTypes, formatLevel, parseLevel, type Entity, type LevelFile } from "../../ts/level";
 import { TILESET, TYPES } from "./catalog";
 import stairs from "../editor/levels/stairs.json";
+import stairsV1 from "../editor/fixtures/stairs-v1.json";
 import { build, fileLevel, fromFile, LEVELS, MEADOW, TILE, toFile, WALKER, walkerBehavior, walkerSprites, type Built } from "./levels";
 
 const near = (a: number, b: number) => Math.abs(a - b) < 0.01;
@@ -196,4 +197,71 @@ test("走地怪的 id 带着第几轮：按 R 重开换了 id，引擎重建，�
   expect(gone.behavior).toBeUndefined();
   // 上一轮踩到的不算这一轮的
   expect(walkerSprites(walkers, 2, ["enemy-walker-0@1"])[0].behavior).toBeDefined();
+});
+
+// ---- 第 2 版（docs/editor-more.md）----
+
+/** 第 2 版的小关卡（第 1 版读进来会去掉新字段）。 */
+const minimal2 = (entities: Entity[]): LevelFile => ({ ...minimal(entities), version: 2 });
+
+test("第 2 版的新类型：装饰按旋转和 z 画、分组什么都不生成、预制体变成实例（按包围盒中心放、带覆盖）", () => {
+  const b = fromOk(
+    minimal2([
+      { id: "grp", type: "group", x: 0, y: 0 },
+      { id: "d", type: "deco", x: 40, y: 50, w: 20, h: 10, rotation: 30, z: -5, parent: "grp", props: { color: "#112233" } },
+      { id: "d2", type: "deco", x: 60, y: 50 },
+      { id: "p", type: "prefab", x: 300, y: 68, props: { prefab: "grove" }, set: { "b/crown": { y: 110 } } },
+      { id: "t", type: "prefab", x: 500, y: 60, props: { prefab: "tree" } },
+      { id: "m", type: "model", x: 30, y: 40, rotation: 90 },
+    ]),
+  );
+  expect(b.decos).toEqual([
+    { id: "deco-0", x: 40, y: 50, w: 20, h: 10, z: -5, rotation: 30, color: "#112233" },
+    { id: "deco-1", x: 60, y: 50, w: 32, h: 32, z: 0.5, rotation: 0, color: "#556677" },
+  ]);
+  expect(b.instances).toEqual([
+    { id: "prefab-0", prefab: "grove", x: 236, y: 0, set: { "b/crown": { y: 110 } } },
+    { id: "prefab-1", prefab: "asset:/@platformer/tree.json", x: 500, y: 0 },
+  ]);
+  expect(b.models[0].rotation).toEqual([0, 0, 90]);
+});
+
+test("走地怪：有路线点时按出生点 → 各个点来回走，速度、跳跃、视野、停留能改；没改的和以前一样", () => {
+  const b = fromOk(minimal2([{ id: "w", type: "walker", x: 100, y: 12, points: [[200, 12], [260, 76]], props: { speed: 150, rest: 1, sight: 5 } }, { id: "v", type: "walker", x: 50, y: 12 }]));
+  expect(b.walkers[1]).toEqual({ id: "enemy-walker-1", x: 50, y: 12, patrol: 3 });
+  const w = b.walkers[0];
+  expect(w).toEqual({ id: "enemy-walker-0", x: 100, y: 12, patrol: 3, route: [[200, 12], [260, 76]], speed: 150, sight: 5, rest: 1 });
+  const tree = walkerBehavior(w.x, w.y, w.patrol, w);
+  expect([tree.speed, tree.jump]).toEqual([150, WALKER.jump]);
+  const json = JSON.stringify(tree.tree);
+  expect(json).toContain('{"type":"see","target":"player","range":160}');
+  expect(json).toContain('{"type":"goto","x":100,"y":12},{"type":"wait","seconds":1},{"type":"goto","x":200,"y":12},{"type":"wait","seconds":1},{"type":"goto","x":260,"y":76},{"type":"wait","seconds":1}');
+  // 精灵用的也是这棵树
+  expect(walkerSprites([w], 0, [])[0].behavior).toEqual(tree);
+});
+
+test("有视差的瓦片层只是画面：不挡人，也不算进相机的范围", () => {
+  const level = minimal2([]);
+  level.tiles.push({ ...level.tiles[0], id: "far", cols: 40, y: 600, data: [Array(40).fill(2), Array(40).fill(3)], parallax: [0.5, 1], oneWay: [3], slopes: [{ frame: 4, left: 0, right: 1 }], name: "远处", locked: true });
+  const b = fromOk(level);
+  expect(b.tilemaps[1]).toMatchObject({ id: "far", solid: [], parallax: [0.5, 1] });
+  expect([b.tilemaps[1].oneWay, b.tilemaps[1].slopes, (b.tilemaps[1] as any).name]).toEqual([undefined, undefined, undefined]);
+  expect([b.right, b.top]).toEqual([320, 32]);
+});
+
+test("第二关石阶是第 2 版的文件：有分组、远景层、装饰和预制体；第 1 版的旧文件照样读", () => {
+  expect((stairs as { version: number }).version).toBe(2);
+  const parsed = parseLevel(stairs);
+  if (!parsed.ok) throw new Error(parsed.errors.join("；"));
+  const types = new Set(parsed.level.entities.map((e) => e.type));
+  for (const t of ["group", "deco", "prefab"]) expect(types.has(t)).toBe(true);
+  expect(parsed.level.entities.some((e) => e.parent !== undefined)).toBe(true);
+  expect(parsed.level.tiles.length).toBe(2);
+  expect(LEVELS[1].built.instances.length).toBeGreaterThan(0);
+  expect(LEVELS[1].built.decos.length).toBeGreaterThan(0);
+  // 旧的第 1 版（只有地面一层）
+  const old = fromFile(stairsV1);
+  if (!old.ok) throw new Error(old.errors.join("；"));
+  expect(old.built.tilemaps[0]).toEqual(LEVELS[1].built.tilemaps[0]);
+  expect(old.built.walkers).toEqual(LEVELS[1].built.walkers);
 });

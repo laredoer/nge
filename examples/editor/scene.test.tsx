@@ -10,7 +10,7 @@ const input = (level: LevelFile, over: Partial<SceneInput> = {}): SceneInput => 
 
 const everyType = (): LevelFile => {
   const level = toFile(MEADOW);
-  return { ...level, entities: [...level.entities, ...TYPE_ORDER.filter((t) => t === "light" || t === "model" || t === "walker").map((type) => ({ id: `x-${type}`, type, x: 100, y: 100 }))] };
+  return { ...level, entities: [...level.entities, ...TYPE_ORDER.filter((t) => ["light", "model", "walker", "group", "deco", "prefab"].includes(t)).map((type) => ({ id: `x-${type}`, type, x: 100, y: 100 }))] };
 };
 
 test("编辑时什么都不动：时间缩放 0，没有刚体、关节、角色，瓦片不建碰撞体", () => {
@@ -107,4 +107,44 @@ test("瓦片层没变时瓦片地图用同一份，不重新摊平", () => {
   const a = editorScene(input(level)).tilemaps![0];
   const moved = { ...level, entities: level.entities.map((e, i) => (i === 0 ? { ...e, x: e.x + 1 } : e)) };
   expect(editorScene(input(moved)).tilemaps![0] === a).toBe(true);
+});
+
+// ---- docs/editor-more.md ----
+
+test("藏起来的层不画；没写 z 的层按顺序叠；预制体实体变成实例（和游戏里一样按包围盒中心放）", () => {
+  const level = toFile(MEADOW);
+  const far = { ...level.tiles[0], id: "far", hidden: true };
+  const top = { ...level.tiles[0], id: "top" };
+  const withLayers: LevelFile = { ...level, tiles: [level.tiles[0], far, top], entities: [...level.entities, { id: "p", type: "prefab", x: 300, y: 68, props: { prefab: "grove" }, set: { a: { x: 1 } } }] };
+  const scene = editorScene(input(withLayers));
+  expect(scene.tilemaps!.map((t) => [t.id, t.z])).toEqual([["level", undefined], ["top", 0.002]]);
+  expect(scene.instances).toEqual([{ id: "ed:p:inst", prefab: "grove", x: 236, y: 0, set: { a: { x: 1 } } }]);
+  expect(Object.keys(scene.prefabs ?? {})).toContain("grove");
+});
+
+test("悬停：没选中的画一圈浅色细框，选中的不画；选中的走地怪画出路线点", () => {
+  const level = everyType();
+  const coin = level.entities.find((e) => e.type === "coin")!;
+  const hovered = editorScene(input(level, { hover: coin.id, view: { x: 0, y: 0, zoom: 2 } }));
+  const ring = hovered.sprites!.filter((s) => s.id.startsWith(`hov:${coin.id}:`));
+  expect(ring.length).toBe(4);
+  expect(ring.find((s) => s.id.endsWith(":t"))!.h).toBe(0.5);
+  expect(editorScene(input(level, { hover: coin.id, selection: [coin.id] })).sprites!.some((s) => s.id.startsWith("hov:"))).toBe(false);
+  const walker = { id: "w", type: "walker", x: 100, y: 12, points: [[200, 12], [260, 76]] as [number, number][] };
+  const routed = editorScene(input({ ...level, entities: [...level.entities, walker] }, { selection: ["w"] }));
+  expect(routed.sprites!.filter((s) => s.id.startsWith("pt:w:")).map((s) => [s.x, s.y])).toEqual([[200, 12], [260, 76]]);
+  // 路线：出生点 → 每个点连起来
+  expect(routed.sprites!.filter((s) => s.id.startsWith("ed:w:path")).length).toBe(2);
+});
+
+test("装饰按旋转和 z 画；转过的包围盒是外接矩形", () => {
+  const deco = { id: "d", type: "deco", x: 0, y: 0, w: 20, h: 10, rotation: 90, z: -5 };
+  const scene = editorScene(input({ ...toFile(MEADOW), entities: [deco] }));
+  const s = scene.sprites!.find((x) => x.id === "ed:d")!;
+  expect([s.rotation, s.z]).toEqual([90, -5]);
+  const b = boundsOf(deco);
+  expect([Math.round(b.right - b.left), Math.round(b.top - b.bottom)]).toEqual([10, 20]);
+  // 不能转的类型写了 rotation 也不算
+  const coin = boundsOf({ id: "c", type: "coin", x: 0, y: 0, rotation: 45 });
+  expect(coin.right - coin.left).toBe(14);
 });

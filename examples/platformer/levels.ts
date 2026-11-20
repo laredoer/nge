@@ -1,8 +1,9 @@
 // 平台跳跃的关卡数据，以及按数据生成地图、金币、移动平台、敌人。
-import { bt, type AnimGraphDef, type BehaviorNode, type Emitter3dNode, type JointNode, type LightNode, type ModelNode, type SpriteNode, type TilemapNode, type TrailNode, type Tween } from "../../ts/nge";
+import { bt, type AnimGraphDef, type BehaviorNode, type Emitter3dNode, type JointNode, type LightNode, type ModelNode, type PrefabInstance, type SpriteNode, type TilemapNode, type TrailNode, type Tween } from "../../ts/nge";
 import { checkTypes, LEVEL_FORMAT, LEVEL_VERSION, parseLevel, toTilemap, type Entity, type LevelFile } from "../../ts/level";
 import { tiled, type TiledMap } from "../../ts/tiled";
-import { propOf, sizeOf, TILESET, TYPES } from "./catalog";
+import { PREFAB_BOXES, propOf, rotationOf, sizeOf, TILESET, TYPES } from "./catalog";
+import { TREE } from "./prefabs";
 import heroAnim from "./hero-anim.json";
 import level3 from "./maps/level3.json";
 // 第二关在编辑器的目录里：编辑器只能读写自己目录下的 levels/（见 docs/editor.md）
@@ -81,7 +82,7 @@ export interface Built {
   /** 幽灵：id 以 enemy- 开头（踩它、碰它和别的敌人一样），会飞，追角色。 */
   ghosts: { id: string; x: number; y: number }[];
   /** 走地面的敌人：行为树巡逻，看见角色就沿地面追（跳上平台、落下来），追丢了回去巡逻（见 docs/gameplay2d.md）。 */
-  walkers: { id: string; x: number; y: number; patrol: number }[];
+  walkers: Walker[];
   /** 斜坡：转过角度的固定刚体。 */
   ramps: SpriteNode[];
   /** 一摞 3D 箱子摆在哪（x），没有是 null；见 `towerAt`。 */
@@ -102,12 +103,29 @@ export interface Built {
   lights: LightNode[];
   /** 摆着看的 3D 模型（关卡文件里摆的）。 */
   models: ModelNode[];
+  /** 装饰：没有刚体的色块（关卡文件第 2 版的 `deco`）。 */
+  decos: SpriteNode[];
+  /** 预制体实例（关卡文件第 2 版的 `prefab`）。 */
+  instances: PrefabInstance[];
+}
+
+/** 走地怪：出生点、往右巡逻几格；关卡文件里改过的才有路线点（有了就不看 `patrol`）、速度、跳跃、视野（格）、两头停几秒。 */
+export interface Walker {
+  id: string;
+  x: number;
+  y: number;
+  patrol: number;
+  route?: [number, number][];
+  speed?: number;
+  jump?: number;
+  sight?: number;
+  rest?: number;
 }
 
 /** 角色默认的起点。 */
 export const SPAWN: [number, number] = [3 * TILE, 16];
 /** 代码描述的关卡和 Tiled 关卡没有的东西。 */
-const EXTRAS = { spawn: SPAWN, lights: [], models: [] };
+const EXTRAS = { spawn: SPAWN, lights: [], models: [], decos: [], instances: [] };
 
 /** 按关卡数据生成场景里这一关的东西。地面顶边在 y = 0，地图左边在 x = 0。 */
 export function build(level: Level): Built {
@@ -154,6 +172,11 @@ export function build(level: Level): Built {
   return { tilemaps: [tilemap], coins, lifts, enemies, ghosts, walkers: [], ramps, tower, jelly, crate: crateAt(level.crate * TILE, 56), swing, goal: goalAt((cols - 4) * TILE, 40), right: cols * TILE, top: (ROWS - 1) * TILE, ...EXTRAS };
 }
 
+/** 装饰默认的 z：在瓦片（0）上面、金币（2）下面。 */
+const DECO_Z = 0.5;
+/** 物件库里预制体的名字 → 场景里的预制体（名字或文件）。 */
+export const PREFAB_REFS: Record<string, string> = { grove: "grove", tree: TREE };
+
 /** 地面上的敌人的 y（中心）。 */
 const ENEMY_Y = 12;
 
@@ -164,14 +187,17 @@ export const WALKER = { speed: 110, jump: 720, sight: 8 * TILE };
  * 走地面的敌人的行为树：看见角色（没墙挡着）就追，一次看见只发一次 `spotted`（黑板上记着，3 秒最多一次）；
  * 看不见了清掉记号，回到出生点，在出生点和右边 `patrol` 格之间来回走，两头各停一下。
  */
-export function walkerBehavior(x: number, y: number, patrol: number): BehaviorNode {
+export function walkerBehavior(x: number, y: number, patrol: number, o: Omit<Walker, "id" | "x" | "y" | "patrol"> = {}): BehaviorNode {
+  const rest = o.rest ?? 0.6;
+  // 有路线点：出生点 → 每个点，走到最后一个再从头（每个点停一下）
+  const stops: [number, number][] = o.route !== undefined && o.route.length > 0 ? [[x, y], ...o.route] : [[x, y], [x + patrol * TILE, y]];
   return {
-    speed: WALKER.speed,
-    jump: WALKER.jump,
+    speed: o.speed ?? WALKER.speed,
+    jump: o.jump ?? WALKER.jump,
     tree: bt.selector(
       [
-        bt.sequence([bt.see("player", WALKER.sight), bt.selector([bt.check(SPOTTED), bt.sequence([bt.set(SPOTTED, true), bt.invert(bt.cooldown(3, bt.invert(bt.emit("spotted"))))])]), bt.chase("player")], true),
-        bt.sequence([bt.set(SPOTTED, null), bt.repeat(bt.sequence([bt.goto(x, y), bt.wait(0.6), bt.goto(x + patrol * TILE, y), bt.wait(0.6)]))]),
+        bt.sequence([bt.see("player", o.sight === undefined ? WALKER.sight : o.sight * TILE), bt.selector([bt.check(SPOTTED), bt.sequence([bt.set(SPOTTED, true), bt.invert(bt.cooldown(3, bt.invert(bt.emit("spotted"))))])]), bt.chase("player")], true),
+        bt.sequence([bt.set(SPOTTED, null), bt.repeat(bt.sequence(stops.flatMap(([px, py]) => [bt.goto(px, py), bt.wait(rest)])))]),
       ],
       true,
     ),
@@ -186,11 +212,11 @@ const SPOTTED = "spotted";
  * `stomped` 里有的（踩到的，完整 id）变透明。
  */
 export function walkerSprites(walkers: Built["walkers"], round: number, stomped: string[]): SpriteNode[] {
-  return walkers.map(({ id, x, y, patrol }): SpriteNode => {
+  return walkers.map(({ id, x, y, patrol, ...o }): SpriteNode => {
     const full = `${id}@${round}`;
     return stomped.includes(full)
       ? { id: full, x, y, w: 24, h: 24, z: 4, color: "#00000000" }
-      : { id: full, x, y, w: 24, h: 24, z: 4, color: "#d35f5f", body: { kind: "character", friction: 0 }, behavior: walkerBehavior(x, y, patrol) };
+      : { id: full, x, y, w: 24, h: 24, z: 4, color: "#d35f5f", body: { kind: "character", friction: 0 }, behavior: walkerBehavior(x, y, patrol, o) };
   });
 }
 
@@ -467,8 +493,29 @@ function entitiesOf(entities: Entity[]) {
     // 聚光灯朝关卡平面往下照
     return spot ? { ...base, angle: num(e, "angle"), direction: [0, -0.5, -1] } : base;
   });
-  const models = of("model").map((e, i): ModelNode => ({ id: `model-${i}`, model: `asset:/@platformer/${propOf<string>(e, "model")}`, x: e.x, y: e.y, z: num(e, "z"), scale: num(e, "scale"), spin: num(e, "spin") }));
-  return { of, lifts, ramps, lights, models };
+  const models = of("model").map((e, i): ModelNode => {
+    const model: ModelNode = { id: `model-${i}`, model: `asset:/@platformer/${propOf<string>(e, "model")}`, x: e.x, y: e.y, z: num(e, "z"), scale: num(e, "scale"), spin: num(e, "spin") };
+    return rotationOf(e) === 0 ? model : { ...model, rotation: [0, 0, rotationOf(e)] };
+  });
+  const decos = of("deco").map((e, i): SpriteNode => {
+    const [w, h] = sizeOf(e);
+    return { id: `deco-${i}`, x: e.x, y: e.y, w, h, z: e.z ?? DECO_Z, rotation: rotationOf(e), color: propOf<string>(e, "color") };
+  });
+  // 实体的 (x, y) 是包围盒中心，实例的原点要减去偏移
+  const instances = of("prefab").map((e, i): PrefabInstance => {
+    const name = propOf<string>(e, "prefab");
+    const [cx, cy] = PREFAB_BOXES[name]?.center ?? [0, 0];
+    const instance: PrefabInstance = { id: `prefab-${i}`, prefab: PREFAB_REFS[name] ?? name, x: e.x - cx, y: e.y - cy };
+    return e.set === undefined ? instance : { ...instance, set: e.set };
+  });
+  const walkers = of("walker").map((e, i): Walker => {
+    const walker: Walker = { id: `enemy-walker-${i}`, x: e.x, y: e.y, patrol: num(e, "patrol") };
+    if (e.points !== undefined && e.points.length > 0) walker.route = e.points;
+    // 只带关卡里写了的：没改的和以前一样
+    for (const key of ["speed", "jump", "sight", "rest"] as const) if (e.props?.[key] !== undefined) walker[key] = num(e, key);
+    return walker;
+  });
+  return { of, lifts, ramps, lights, models, decos, instances, walkers };
 }
 
 /** 关卡文件 → 游戏用的关卡。先查格式和类型（缺终点、属性超范围……），不合规的不转，返回错误。 */
@@ -481,7 +528,10 @@ export function fromFile(file: unknown): { ok: true; built: Built; name: string;
     errors.push(`${e.id}：移动平台只能往一个方向走（横向、纵向距离只给一个）`);
   }
   if (errors.length > 0) return { ok: false, errors };
-  const { of, lifts, ramps, lights, models } = entitiesOf(level.entities);
+  const { of, lifts, ramps, lights, models, decos, instances, walkers } = entitiesOf(level.entities);
+  // 有视差的层只是画面：碰撞体不跟着视差挪（docs/parallax.md），不挡人，也不算进相机的范围
+  const moving = (t: { parallax?: [number, number] }) => t.parallax !== undefined && (t.parallax[0] !== 1 || t.parallax[1] !== 1);
+  const ground = level.tiles.filter((t) => !moving(t));
   const one = (type: string) => of(type)[0];
   const spawn = one("spawn");
   const swing = one("swing");
@@ -491,12 +541,17 @@ export function fromFile(file: unknown): { ok: true; built: Built; name: string;
   const goal = one("goal");
   const built: Built = {
     // 角色的速度归 Rust 管，地面默认不要摩擦
-    tilemaps: level.tiles.map((t) => ({ ...toTilemap(t), friction: t.friction ?? 0 })),
+    tilemaps: level.tiles.map((t, i) => {
+      const map: TilemapNode = { ...toTilemap(t, i), friction: t.friction ?? 0 };
+      if (!moving(t)) return map;
+      const { oneWay: _oneWay, slopes: _slopes, ...rest } = map;
+      return { ...rest, solid: [] };
+    }),
     coins: of("coin").map((e, i) => ({ id: `coin-${i}`, x: e.x, y: e.y })),
     lifts,
     enemies: of("enemy").map((e, i) => ({ id: `enemy-${i}`, x: e.x, y: e.y, to: { x: e.x + propOf<number>(e, "patrol") * TILE } })),
     ghosts: of("ghost").map((e, i) => ({ id: `enemy-ghost-${i}`, x: e.x, y: e.y })),
-    walkers: of("walker").map((e, i) => ({ id: `enemy-walker-${i}`, x: e.x, y: e.y, patrol: propOf<number>(e, "patrol") })),
+    walkers,
     ramps,
     tower: tower === undefined ? null : tower.x,
     jelly: jelly === undefined ? null : jelly.x,
@@ -504,11 +559,13 @@ export function fromFile(file: unknown): { ok: true; built: Built; name: string;
     // 铁链的支点在包围盒顶边的中点
     swing: swing === undefined ? NO_SWING : swingAt(swing.x, swing.y + sizeOf(swing)[1] / 2),
     goal: goalAt(goal.x, goal.y),
-    right: Math.max(0, ...level.tiles.map((t) => t.x + t.cols * t.tile)),
-    top: Math.max(0, ...level.tiles.map((t) => t.y)),
+    right: Math.max(0, ...ground.map((t) => t.x + t.cols * t.tile)),
+    top: Math.max(0, ...ground.map((t) => t.y)),
     spawn: spawn === undefined ? SPAWN : [spawn.x, spawn.y],
     lights,
     models,
+    decos,
+    instances,
   };
   return { ok: true, built, name: level.name, night: level.night };
 }

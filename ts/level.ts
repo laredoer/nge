@@ -1,19 +1,29 @@
-// 关卡文件：带版本号的 JSON（瓦片层 + 实体列表），读入时校验、保存时格式化（见 docs/editor.md）。
+// 关卡文件：带版本号的 JSON（瓦片层 + 实体列表），读入时迁移到现在的版本、校验，保存时格式化（见 docs/editor.md、docs/editor-more.md）。
 // 这里不知道有哪些实体类型：类型和属性由游戏的类型表给（`checkTypes`）。
 import type { TilemapNode } from "./nge";
 
 export const LEVEL_FORMAT = "nge-level";
-export const LEVEL_VERSION = 1;
+export const LEVEL_VERSION = 2;
 /** 坐标、尺寸的绝对值上限。 */
 export const MAX_COORD = 1e6;
 export const MAX_COLS = 2000;
 export const MAX_ROWS = 500;
 export const MAX_ENTITIES = 5000;
 export const MAX_LAYERS = 16;
+/** 一个实体最多几个路线点。 */
+export const MAX_POINTS = 64;
+/** 预制体覆盖最多几个子节点。 */
+export const MAX_OVERRIDES = 32;
+/** 视差的上限（0 是不动的远景，1 是跟着关卡走）。 */
+export const MAX_PARALLAX = 4;
+/** 旋转（度）的绝对值上限。 */
+export const MAX_ROTATION = 3600;
 /** 实体 id：字母、数字、- 和 _（编辑器的预览节点用 `ed:<id>:<部件>`，id 里不能有冒号）。 */
 const ID = /^[A-Za-z0-9_-]{1,64}$/;
 /** 属性名：字母开头的字母、数字、下划线（`__proto__` 这种进不来）。 */
 const PROP_KEY = /^[A-Za-z][A-Za-z0-9_]{0,31}$/;
+/** 预制体里子节点的路径：id 用 / 连起来（嵌套的预制体），最多 8 段。 */
+export const CHILD_PATH = /^[A-Za-z0-9_-]{1,64}(\/[A-Za-z0-9_-]{1,64}){0,7}$/;
 const MAX_TEXT = 256;
 const MAX_ID = 64;
 const MAX_ERRORS = 20;
@@ -39,6 +49,11 @@ export interface TileLayer {
   slopes?: TileSlope[];
   animated?: TileAnimation[];
   materials?: TileMaterial[];
+  /** 第 2 版：层面板上的名字、编辑器里隐藏 / 锁定（游戏不管）、视差 `[x, y]`。 */
+  name?: string;
+  hidden?: boolean;
+  locked?: boolean;
+  parallax?: [number, number];
 }
 
 export interface TileSlope {
@@ -72,6 +87,12 @@ export interface Entity {
   w?: number;
   h?: number;
   props?: Record<string, PropValue>;
+  /** 第 2 版：旋转（度）、z、父节点（只是层级，坐标还是世界坐标）、路线点、预制体按子节点的覆盖。 */
+  rotation?: number;
+  z?: number;
+  parent?: string;
+  points?: [number, number][];
+  set?: Record<string, Record<string, PropValue>>;
 }
 
 export interface LevelFile {
@@ -193,6 +214,18 @@ function layerOf(raw: unknown, path: string, errors: Errors): TileLayer {
   if (o.friction !== undefined) layer.friction = positiveOrZero(o.friction, `${path}.friction`, errors);
   if (o.z !== undefined) layer.z = coord(o.z, `${path}.z`, errors);
   Object.assign(layer, rulesOf(o, path, frames, errors));
+  if (o.name !== undefined) layer.name = text(o.name, `${path}.name`, errors, { max: MAX_ID });
+  if (o.hidden !== undefined) layer.hidden = flag(o.hidden, `${path}.hidden`, errors);
+  if (o.locked !== undefined) layer.locked = flag(o.locked, `${path}.locked`, errors);
+  if (o.parallax !== undefined) {
+    const raw = list(o.parallax, `${path}.parallax`, errors);
+    if (raw.length !== 2) errors.add(`${path}.parallax 要是两个数 [x, y]`);
+    const axis = (v: unknown, i: number) => {
+      if (!finite(v) || v < 0 || v > MAX_PARALLAX) errors.add(`${path}.parallax[${i}] 要是 0 到 ${MAX_PARALLAX} 的数`);
+      return finite(v) ? v : 1;
+    };
+    layer.parallax = [axis(raw[0], 0), axis(raw[1], 1)];
+  }
   return layer;
 }
 
@@ -279,7 +312,100 @@ function entityOf(raw: unknown, path: string, errors: Errors): Entity {
       entity.props = props;
     }
   }
+  if (o.rotation !== undefined) {
+    if (!finite(o.rotation) || Math.abs(o.rotation) > MAX_ROTATION) errors.add(`${path}.rotation 要是有限的数，绝对值不超过 ${MAX_ROTATION}`);
+    entity.rotation = finite(o.rotation) ? o.rotation : 0;
+  }
+  if (o.z !== undefined) entity.z = coord(o.z, `${path}.z`, errors);
+  if (o.parent !== undefined) entity.parent = idOf(o.parent, `${path}.parent`, errors);
+  if (o.points !== undefined) {
+    const raw = list(o.points, `${path}.points`, errors);
+    if (raw.length > MAX_POINTS) errors.add(`${path}.points 最多 ${MAX_POINTS} 个`);
+    entity.points = raw.slice(0, MAX_POINTS).map((p, i) => {
+      const at = `${path}.points[${i}]`;
+      if (!Array.isArray(p) || p.length !== 2) {
+        errors.add(`${at} 要是 [x, y]`);
+        return [0, 0];
+      }
+      return [coord(p[0], `${at}[0]`, errors), coord(p[1], `${at}[1]`, errors)];
+    });
+  }
+  if (o.set !== undefined) entity.set = overridesOf(o.set, `${path}.set`, errors);
   return entity;
+}
+
+/** 预制体覆盖：`{ 子节点路径: { 字段: 值 } }`，字段名、值和属性一样的规则。 */
+function overridesOf(raw: unknown, path: string, errors: Errors): Record<string, Record<string, PropValue>> {
+  if (!isObject(raw)) {
+    errors.add(`${path} 要是对象`);
+    return {};
+  }
+  const out: Record<string, Record<string, PropValue>> = {};
+  const entries = Object.entries(raw);
+  if (entries.length > MAX_OVERRIDES) errors.add(`${path} 最多 ${MAX_OVERRIDES} 个子节点`);
+  for (const [child, fields] of entries.slice(0, MAX_OVERRIDES)) {
+    if (!CHILD_PATH.test(child)) {
+      errors.add(`${path} 的子节点 ${JSON.stringify(child.slice(0, 40))} 要是 id 用 / 连起来（最多 8 段）`);
+      continue;
+    }
+    const at = `${path}.${child}`;
+    if (!isObject(fields)) {
+      errors.add(`${at} 要是对象`);
+      continue;
+    }
+    const values: Record<string, PropValue> = {};
+    for (const [key, v] of Object.entries(fields)) {
+      if (!PROP_KEY.test(key)) errors.add(`${at} 的字段名 ${JSON.stringify(key.slice(0, 40))} 要是字母开头的字母、数字、下划线`);
+      else if (typeof v === "boolean") values[key] = v;
+      else if (typeof v === "string") values[key] = text(v, `${at}.${key}`, errors);
+      else if (finite(v) && Math.abs(v) <= MAX_COORD) values[key] = v;
+      else errors.add(`${at}.${key} 只能是有限的数、布尔或字符串`);
+    }
+    out[child] = values;
+  }
+  return out;
+}
+
+/** 父节点：要指向关卡里有的、不是自己、不绕成圈。 */
+function checkParents(entities: Entity[], errors: Errors) {
+  const byId = new Map(entities.map((e) => [e.id, e]));
+  entities.forEach((e, i) => {
+    if (e.parent === undefined) return;
+    if (e.parent === e.id) return errors.add(`entities[${i}].parent 不能是自己`);
+    if (!byId.has(e.parent)) return errors.add(`entities[${i}].parent 指向的 ${e.parent} 不在关卡里`);
+    // 往上走：走的步数超过实体数就是绕成了圈
+    let at: Entity | undefined = e;
+    for (let steps = 0; at?.parent !== undefined; steps++) {
+      if (steps > entities.length) return errors.add(`entities[${i}].parent 绕成了圈（${e.id}）`);
+      at = byId.get(at.parent);
+    }
+  });
+}
+
+/** 第 1 版的读法认识的字段：迁到第 2 版时别的都丢掉（第 1 版读的时候本来就不算它们）。 */
+const V1_LAYER = ["id", "texture", "grid", "tile", "cols", "rows", "x", "y", "solid", "data", "friction", "z", "oneWay", "slopes", "animated", "materials"];
+const V1_ENTITY = ["id", "type", "name", "x", "y", "w", "h", "props"];
+const pick = (v: unknown, keys: string[]) => (isObject(v) ? Object.fromEntries(Object.entries(v).filter(([k]) => keys.includes(k))) : v);
+
+/** `LEVEL_MIGRATIONS[n]`：第 n 版的原始对象 → 第 n + 1 版。不改传进来的对象。 */
+export const LEVEL_MIGRATIONS: Record<number, (raw: Record<string, unknown>) => Record<string, unknown>> = {
+  1: (raw) => ({
+    ...raw,
+    version: 2,
+    tiles: Array.isArray(raw.tiles) ? raw.tiles.map((t) => pick(t, V1_LAYER)) : raw.tiles,
+    entities: Array.isArray(raw.entities) ? raw.entities.map((e) => pick(e, V1_ENTITY)) : raw.entities,
+  }),
+};
+
+/** 从文件的版本一步步迁到现在的版本（版本号不对的原样返回，交给 `parseLevel` 报）。 */
+export function migrateLevel(raw: Record<string, unknown>): Record<string, unknown> {
+  let out = raw;
+  while (Number.isInteger(out.version) && (out.version as number) < LEVEL_VERSION) {
+    const step = LEVEL_MIGRATIONS[out.version as number];
+    if (step === undefined) break;
+    out = step(out);
+  }
+  return out;
 }
 
 /** 读关卡文件：`input` 是文件内容或解析过的值。坏数据不抛异常，返回带路径的错误（最多 20 条）。 */
@@ -296,8 +422,9 @@ export function parseLevel(input: unknown): ParseResult {
   if (raw.format !== LEVEL_FORMAT) return { ok: false, errors: [`format 要是 "${LEVEL_FORMAT}"`] };
   if (!Number.isInteger(raw.version) || (raw.version as number) < 1) return { ok: false, errors: ["version 要是正整数"] };
   if ((raw.version as number) > LEVEL_VERSION) return { ok: false, errors: [`version ${raw.version} 是更新的编辑器存的，这里只认到 ${LEVEL_VERSION}`] };
+  const migrated = migrateLevel(raw);
   const errors = new Errors();
-  const tilesRaw = list(raw.tiles, "tiles", errors);
+  const tilesRaw = list(migrated.tiles, "tiles", errors);
   if (tilesRaw.length > MAX_LAYERS) return { ok: false, errors: [`tiles 最多 ${MAX_LAYERS} 层，这里有 ${tilesRaw.length} 层`] };
   const tiles = tilesRaw.map((t, i) => layerOf(t, `tiles[${i}]`, errors));
   const layerIds = new Map<string, number>();
@@ -306,7 +433,7 @@ export function parseLevel(input: unknown): ParseResult {
     if (first !== undefined) errors.add(`tiles[${i}].id 和 tiles[${first}] 重复：${t.id}`);
     else layerIds.set(t.id, i);
   });
-  const entitiesRaw = list(raw.entities, "entities", errors);
+  const entitiesRaw = list(migrated.entities, "entities", errors);
   if (entitiesRaw.length > MAX_ENTITIES) return { ok: false, errors: [`entities 最多 ${MAX_ENTITIES} 个，这里有 ${entitiesRaw.length} 个`] };
   const entities = entitiesRaw.map((e, i) => entityOf(e, `entities[${i}]`, errors));
   const seen = new Map<string, number>();
@@ -315,11 +442,12 @@ export function parseLevel(input: unknown): ParseResult {
     if (first !== undefined) errors.add(`entities[${i}].id 和 entities[${first}] 重复：${e.id}`);
     else seen.set(e.id, i);
   });
+  checkParents(entities, errors);
   const level: LevelFile = {
     format: LEVEL_FORMAT,
     version: LEVEL_VERSION,
-    name: raw.name === undefined ? "" : text(raw.name, "name", errors),
-    night: flag(raw.night, "night", errors),
+    name: migrated.name === undefined ? "" : text(migrated.name, "name", errors),
+    night: flag(migrated.night, "night", errors),
     tiles,
     entities,
   };
@@ -419,8 +547,13 @@ export function emptyLevel(o: { name: string; cols: number; rows: number; tile: 
   };
 }
 
-/** 瓦片层 → 引擎的瓦片地图。 */
-export function toTilemap(t: TileLayer): TilemapNode {
-  const { data, rows: _rows, ...rest } = t;
-  return { ...rest, data: data.flat() };
+/** 没写 z 的层按层的顺序叠：第 i 层（从 0 数）的 z 是 i 乘这个（很小，不会盖过 z 是 1 的精灵）。 */
+export const LAYER_Z_STEP = 0.001;
+
+/** 第 `index` 层瓦片 → 引擎的瓦片地图。没写 z 的按层的顺序叠（第一层不写 z，和以前一样）。 */
+export function toTilemap(t: TileLayer, index = 0): TilemapNode {
+  // 名字、显隐、锁定只给编辑器用
+  const { data, rows: _rows, name: _name, hidden: _hidden, locked: _locked, ...rest } = t;
+  const map: TilemapNode = { ...rest, data: data.flat() };
+  return index > 0 && t.z === undefined ? { ...map, z: index * LAYER_Z_STEP } : map;
 }

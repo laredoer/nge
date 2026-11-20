@@ -1,10 +1,11 @@
 // 关卡文件格式（ts/level.ts）：读入时校验、格式化、类型表检查（见 docs/editor.md）。
 import { expect, test } from "nsh/test";
-import { checkProp, checkTypes, emptyLevel, formatLevel, LEVEL_VERSION, parseLevel, toTilemap, type LevelFile, type TypeSpecs } from "../../ts/level";
+import stairs from "./levels/stairs.json";
+import { checkProp, checkTypes, emptyLevel, formatLevel, LEVEL_MIGRATIONS, LEVEL_VERSION, migrateLevel, parseLevel, toTilemap, type LevelFile, type TypeSpecs } from "../../ts/level";
 
 const sample = (): LevelFile => ({
   format: "nge-level",
-  version: 1,
+  version: LEVEL_VERSION,
   name: "测试",
   night: false,
   tiles: [{ id: "level", texture: "asset:/@g/tiles.png", grid: [3, 1], tile: 32, cols: 3, rows: 2, x: 0, y: 32, solid: [0, 1], data: [[-1, 2, -1], [1, 1, 0]] }],
@@ -28,7 +29,7 @@ test("合法的关卡原样读出来，字符串和解析过的值都行", () =>
 
 test("可选字段：没有 name / night / props / w / h 时补默认值，多余的字段丢掉", () => {
   const raw = { format: "nge-level", version: 1, tiles: [], entities: [{ id: "a", type: "coin", x: 1, y: 2, extra: 9 }], junk: true };
-  expect(parseLevel(raw)).toEqual({ ok: true, level: { format: "nge-level", version: 1, name: "", night: false, tiles: [], entities: [{ id: "a", type: "coin", x: 1, y: 2 }] } });
+  expect(parseLevel(raw)).toEqual({ ok: true, level: { format: "nge-level", version: LEVEL_VERSION, name: "", night: false, tiles: [], entities: [{ id: "a", type: "coin", x: 1, y: 2 }] } });
 });
 
 test("不是 JSON、不是对象、格式名不对都报错，不抛异常", () => {
@@ -228,4 +229,100 @@ test("瓦片层：最多 16 层，id 不重复；行数不对时不往下查每�
 test("实体 id 只能有字母、数字、- 和 _", () => {
   const l = sample();
   for (const id of ["a:to", "a b", "中"]) expect(errorsOf({ ...l, entities: [{ id, type: "coin", x: 0, y: 0 }] })[0]).toMatch(/id/);
+});
+
+// ---- 第 2 版（docs/editor-more.md）----
+
+const v2 = (): LevelFile => {
+  const l = sample();
+  return {
+    ...l,
+    tiles: [l.tiles[0], { ...l.tiles[0], id: "far", name: "远处", hidden: true, locked: true, parallax: [0.5, 1], z: -70 }],
+    entities: [
+      { id: "g", type: "group", name: "一组", x: 0, y: 0 },
+      { id: "e1", type: "coin", x: 16, y: 40, parent: "g" },
+      { id: "e2", type: "deco", x: 48, y: 12, rotation: 30, z: -5, parent: "g", points: [[1, 2], [3, 4]] },
+      { id: "e3", type: "prefab", x: 0, y: 0, props: { prefab: "grove" }, set: { "b/crown": { y: 110, unlit: true, color: "#fff" } } },
+    ],
+  };
+};
+
+test("第 2 版：层的名字、显隐、锁定、视差，实体的旋转、z、父节点、路线点、覆盖，读写来回不变", () => {
+  const level = v2();
+  expect(LEVEL_VERSION).toBe(2);
+  expect(parseLevel(formatLevel(level))).toEqual({ ok: true, level });
+  expect(parseLevel(level)).toEqual({ ok: true, level });
+});
+
+test("第 1 版的文件迁到第 2 版：第 1 版不认识的字段丢掉（意思不变），版本号改成 2，不改传进来的对象", () => {
+  const raw = JSON.parse(JSON.stringify({ ...v2(), version: 1 }));
+  const before = JSON.stringify(raw);
+  const r = parseLevel(raw);
+  if (!r.ok) throw new Error(r.errors.join("；"));
+  expect(JSON.stringify(raw)).toBe(before);
+  expect(r.level.version).toBe(2);
+  expect(r.level.tiles[1]).toEqual({ ...sample().tiles[0], id: "far", z: -70 });
+  expect(r.level.entities.map((e) => Object.keys(e).sort())).toEqual([["id", "name", "type", "x", "y"], ["id", "type", "x", "y"], ["id", "type", "x", "y"], ["id", "props", "type", "x", "y"]]);
+  // 迁移函数自己：一步一步迁
+  expect(Object.keys(LEVEL_MIGRATIONS)).toEqual(["1"]);
+  const m = migrateLevel({ format: "nge-level", version: 1, tiles: [{ id: "t", locked: true }], entities: [{ id: "a", parent: "b", set: {} }] });
+  expect(m).toEqual({ format: "nge-level", version: 2, tiles: [{ id: "t" }], entities: [{ id: "a" }] });
+  // 坏的不迁（交给校验去报）
+  expect(migrateLevel({ format: "nge-level", version: 1, tiles: "坏", entities: [7] })).toEqual({ format: "nge-level", version: 2, tiles: "坏", entities: [7] });
+});
+
+test("第 2 版的字段写错了报出路径：视差、旋转、路线点、覆盖的路径和值", () => {
+  const level = v2() as any;
+  level.tiles[1].parallax = [0.5, 9];
+  level.tiles[1].hidden = "是";
+  level.tiles[1].name = "x".repeat(80);
+  level.entities[2].rotation = 1e5;
+  level.entities[2].points = [[1, 2], [3]];
+  level.entities[3].set = { "b//crown": { y: 1 }, a: { "__proto__x": 1 }, c: { y: { deep: 1 } } };
+  const errors = errorsOf(level).join("\n");
+  for (const part of ["tiles[1].parallax[1]", "tiles[1].hidden", "tiles[1].name", "entities[2].rotation", "entities[2].points[1]", "entities[3].set 的子节点", "entities[3].set.a", "entities[3].set.c.y"]) expect(errors).toContain(part);
+  const many = v2() as any;
+  many.entities[2].points = Array.from({ length: 65 }, () => [0, 0]);
+  expect(errorsOf(many).join("\n")).toContain("entities[2].points 最多 64 个");
+});
+
+test("父节点：要指向有的实体，不能是自己，不能绕成圈", () => {
+  const level = v2() as any;
+  level.entities[0].parent = "e2";
+  expect(errorsOf(level).join("\n")).toContain("绕成了圈");
+  const self = v2() as any;
+  self.entities[1].parent = "e1";
+  expect(errorsOf(self).join("\n")).toContain("entities[1].parent");
+  const missing = v2() as any;
+  missing.entities[1].parent = "nope";
+  expect(errorsOf(missing).join("\n")).toContain("entities[1].parent 指向的 nope 不在关卡里");
+  // 好几层的父子链（不绕圈）是对的
+  const chain = v2() as any;
+  const ids = chain.entities.map((e: { id: string }) => e.id);
+  chain.entities.forEach((e: { parent?: string }, i: number) => {
+    if (i > 0) e.parent = ids[i - 1];
+    else delete e.parent;
+  });
+  expect(ids.length).toBeGreaterThan(2);
+  expect(parseLevel(chain).ok).toBe(true);
+});
+
+test("转成引擎的瓦片地图：去掉只给编辑器用的名字、显隐、锁定，带上视差", () => {
+  const map = toTilemap(v2().tiles[1]);
+  expect(map).toEqual({ id: "far", texture: "asset:/@g/tiles.png", grid: [3, 1], tile: 32, cols: 3, x: 0, y: 32, z: -70, parallax: [0.5, 1], solid: [0, 1], data: [-1, 2, -1, 1, 1, 0] });
+});
+
+test("没写 z 的层按顺序叠：第一层不写 z（和以前一样），后面的每层高一点点；写了的照写", () => {
+  const [a, b] = v2().tiles;
+  expect(toTilemap(a, 0).z).toBe(undefined);
+  expect(toTilemap(a, 2).z).toBe(0.002);
+  expect(toTilemap(b, 1).z).toBe(-70);
+});
+
+test("石阶的文件是第 2 版，读进来再格式化、再读回来一样", () => {
+  const r = parseLevel(stairs);
+  if (!r.ok) throw new Error(r.errors.join("；"));
+  expect((stairs as { version: number }).version).toBe(2);
+  expect(parseLevel(formatLevel(r.level))).toEqual(r);
+  expect(r.level).toEqual(stairs as unknown as LevelFile);
 });

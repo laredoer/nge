@@ -1,7 +1,7 @@
 // 编辑器里实体画成什么（docs/editor.md）：用游戏里同样的颜色、尺寸、模型，但不要刚体、关节，不动。
 import type { Entity } from "../../ts/level";
 import type { LightNode, ModelNode, SpriteNode } from "../../ts/nge";
-import { propOf, sizeOf, TILESET } from "./catalog";
+import { propOf, rotationOf, sizeOf, TILESET, TYPES } from "./catalog";
 import { COIN_SHADER } from "./effects";
 import { crateAt, flagOn, goalAt, jellyAt, rampOf, swingAt, towerAt } from "./levels";
 
@@ -29,6 +29,21 @@ export function previewAt(e: Entity, index: number): Preview {
   return index === 0 ? p : { ...p, sprites: p.sprites.map((s) => ({ ...s, z: (s.z ?? 0) + index * ORDER_STEP })) };
 }
 
+/** 能单独设 z 的类型：写了 z 用它，不然用类型的。 */
+const zOf = (e: Entity, fallback: number) => (TYPES[e.type]?.layered === true && e.z !== undefined ? e.z : fallback);
+
+/** 走地怪的巡逻线：有路线点时从出生点连到每个点，不然往右 `patrol` 格。 */
+export function routeOf(e: Entity): [number, number][] {
+  if (e.points !== undefined && e.points.length > 0) return [[e.x, e.y], ...e.points];
+  return [[e.x, e.y], [e.x + propOf<number>(e, "patrol") * TILE, e.y]];
+}
+
+/** 两点之间的一条线（细长的精灵，转过去）。 */
+function segment(id: string, [ax, ay]: [number, number], [bx, by]: [number, number], color: string, z: number): SpriteNode {
+  const length = Math.hypot(bx - ax, by - ay);
+  return { id, x: (ax + bx) / 2, y: (ay + by) / 2, w: Math.max(length, 1), h: 2, z, color, unlit: true, rotation: (Math.atan2(by - ay, bx - ax) * 180) / Math.PI };
+}
+
 /** 点选用的深度：画在最上面的那个精灵的 z（只有模型的按 3），加上场景树里的顺序。 */
 export function depthOf(e: Entity, index: number): number {
   const zs = previewOf(e).sprites.map((s) => s.z ?? 0);
@@ -53,6 +68,24 @@ export function previewOf(e: Entity): Preview {
       p.sprites.push({ id, x: e.x, y: e.y, w, h, z: 4, color: "#9b59b6" });
       break;
     }
+    case "walker": {
+      const route = routeOf(e);
+      route.slice(1).forEach((to, i) => p.sprites.push(segment(previewId(e, `path${i}`), route[i], to, "#d35f5f80", 3)));
+      p.sprites.push({ id, x: e.x, y: e.y, w, h, z: 4, color: "#d35f5f" });
+      break;
+    }
+    case "deco":
+      p.sprites.push({ id, x: e.x, y: e.y, w, h, z: zOf(e, 0.5), rotation: rotationOf(e), color: propOf<string>(e, "color") });
+      break;
+    case "group":
+      // 分组本身不画东西：一个小十字，看得出它在哪
+      p.sprites.push({ id: previewId(e, "h"), x: e.x, y: e.y, w: 12, h: 2, z: 7, color: "#8899aa", unlit: true });
+      p.sprites.push({ id, x: e.x, y: e.y, w: 2, h: 12, z: 7, color: "#8899aa", unlit: true });
+      break;
+    case "prefab":
+      // 实例由场景的 `instances` 画（scene.ts）；这里只画一个淡淡的底，空的地方也点得到
+      p.sprites.push({ id, x: e.x, y: e.y, w, h, z: -1, color: "#2f3d5c30", unlit: true });
+      break;
     case "ghost":
       p.sprites.push({ id, x: e.x, y: e.y, w, h, z: 4, color: "#c8d2ffd0", unlit: true });
       break;
@@ -99,7 +132,7 @@ export function previewOf(e: Entity): Preview {
       break;
     }
     case "model":
-      p.models.push({ id, model: `asset:/@platformer/${propOf<string>(e, "model")}`, x: e.x, y: e.y, z: propOf<number>(e, "z"), scale: propOf<number>(e, "scale") });
+      p.models.push({ id, model: `asset:/@platformer/${propOf<string>(e, "model")}`, x: e.x, y: e.y, z: propOf<number>(e, "z"), scale: propOf<number>(e, "scale"), ...(rotationOf(e) === 0 ? {} : { rotation: [0, 0, rotationOf(e)] as [number, number, number] }) });
       break;
     default:
       // 不认识的类型：洋红色的方块，一眼看得出来

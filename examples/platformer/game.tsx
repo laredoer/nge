@@ -1,4 +1,4 @@
-import { batch, effect, keymap, type NativeComponentRef, platform, safeArea, signal, Text, View } from "nsh";
+import { batch, effect, keymap, type NativeComponentRef, platform, safeArea, signal, Text, untracked, View } from "nsh";
 import { Button } from "nsh/base";
 import { ActionButton, floatText, gameView, httpClient, inputMap, netRoom, push, saved, saveSlots, setTiles, sound, touchGestures, transitions, tween, VirtualStick, type ActionEvent, type Gesture, type Scene, type SpriteNode, type Tap } from "../../ts/nge";
 import { DEFAULT_CONTROLS, guestSprite, PLAYER_GROUP } from "./controls";
@@ -12,6 +12,7 @@ import { labAction, labScene, levelAfterLab } from "./lab";
 import { BIG_MAP, bigScene, digOf } from "./bigmap";
 import { GROVES, levelTransition, PREFABS, TEXTURES } from "./prefabs";
 import { campfireAt, finish, flagOn, HERO, JELLY_ZONE, jellyAt, LEVELS, TILE, TOWER_TRIGGER, towerAt, towerSpot, walkerSprites, type Built, type Progress } from "./levels";
+import { liveTiles, startLive } from "./live";
 
 /** Rust 发的事件：掉出关卡或被敌人撞到送回起点、按 R 重新开始、踩到敌人。 */
 interface Events {
@@ -45,18 +46,33 @@ const BACKDROP: SpriteNode[] = [
 const lang = strings();
 const t = lang.t;
 
+/** 试玩的一关。 */
+export interface Trial {
+  name: string;
+  built: Built;
+  night?: boolean;
+}
+
 export interface GameProps {
-  /** 试玩一关（关卡编辑器用）：只有这一关，不读写存档、不联网、不能按数字选关。 */
-  trial?: { name: string; built: Built; night?: boolean };
+  /**
+   * 试玩一关（关卡编辑器用）：只有这一关，不读写存档、不联网、不能按数字选关。
+   * 给函数时是热重载：每次取值是编辑器里现在的关卡，正在跑的这一关就地更新（见 docs/editor-more.md）。
+   */
+  trial?: Trial | (() => Trial);
   /** 试玩时按 Esc 回去。 */
   onExit?: () => void;
 }
 
 export function Game(props: GameProps = {}) {
-  const trial = props.trial;
+  const liveTrial = typeof props.trial === "function" ? props.trial : undefined;
+  const trial = liveTrial === undefined ? (props.trial as Trial | undefined) : untracked(liveTrial);
   const levels = trial === undefined ? LEVELS : [trial];
+  /** 热重载时这一关现在的样子（地图声明、起点见 `follow`）。 */
+  const live = signal<Trial | null>(null);
+  /** 这一关：热重载时是编辑器里现在的。 */
+  const entry = () => live() ?? levels[level()];
   /** 关卡名：试玩用关卡文件里的名字。 */
-  const levelName = (index: number) => (trial === undefined ? t(levelKey(index)) : trial.name);
+  const levelName = (index: number) => (trial === undefined ? t(levelKey(index)) : entry().name);
   if (props.onExit !== undefined) keymap.bind("escape", () => props.onExit!());
   const chosenLang = saved<string | null>("lang", null);
   effect(() => lang.setLocale(chosenLang()));
@@ -128,7 +144,7 @@ export function Game(props: GameProps = {}) {
   let switching = true;
   /** 换关过场：过场里不能选关，状态栏显示载入进度。 */
   const fade = transitions();
-  const now = () => levels[level()].built;
+  const now = () => entry().built;
   /** 联网（见 docs/networking.md）：按 N 开关，记在设备上；中继连不上时一直重试，照样单机玩。 */
   const online = netSetting();
   const room = netRoom();
@@ -152,10 +168,36 @@ export function Game(props: GameProps = {}) {
     http.post(url, { board: boardOf(level()), name, score: seconds }, { timeout: 5 }).then(fetchLeader);
   };
 
+  const liftTween = ({ node, to, duration }: Built["lifts"][number]) => tween(game, { id: node.id, to, duration, ease: "easeInOut", repeat: -1, yoyo: true });
+  const enemyTween = ({ id, to }: Built["enemies"][number]) => tween(game, { id, to, duration: 1.5, ease: "linear", repeat: -1, yoyo: true });
   // 在 levelStart 里发：平台、敌人已经建出来了
   const startTweens = () => {
-    for (const { node, to, duration } of now().lifts) tween(game, { id: node.id, to, duration, ease: "easeInOut", repeat: -1, yoyo: true });
-    for (const { id, to } of now().enemies) tween(game, { id, to, duration: 1.5, ease: "linear", repeat: -1, yoyo: true });
+    now().lifts.forEach(liftTween);
+    now().enemies.forEach(enemyTween);
+  };
+  /**
+   * 热重载：编辑器里的关卡变了，这一关就地更新。瓦片只发变了的格子（setTiles），声明留着最初的；
+   * 角色的起点留着开始时的（不把正在玩的角色拉回去）；移动平台、巡逻的敌人路线变了的重新发补间。
+   */
+  const follow = (source: () => Trial) => {
+    const first = untracked(source);
+    let maps = startLive(first.built.tilemaps);
+    let before = first.built;
+    effect(() => {
+      const next = source();
+      untracked(() => {
+        const r = liveTiles(maps, next.built.tilemaps, !switching);
+        maps = r.maps;
+        for (const e of r.edits) setTiles(game, e);
+        if (!switching) {
+          const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+          next.built.lifts.filter((l) => !same(l, before.lifts.find((o) => o.node.id === l.node.id))).forEach(liftTween);
+          next.built.enemies.filter((e) => !same(e, before.enemies.find((o) => o.id === e.id))).forEach(enemyTween);
+        }
+        before = next.built;
+        live.set({ ...next, built: { ...next.built, tilemaps: maps.declared, spawn: first.built.spawn } });
+      });
+    });
   };
   const reset = () => {
     taken.set([]);
@@ -211,6 +253,7 @@ export function Game(props: GameProps = {}) {
   // 试玩不读存档，直接开始
   if (trial === undefined) slots.loaded.then(() => pick(slots.latest() ?? 0));
   else play(0);
+  if (liveTrial !== undefined) follow(liveTrial);
 
   /** 这一关的那摞 3D 箱子（没有就是 null）：id 带着摞的次数，重新开始时重建。 */
   const tower = () => {
@@ -235,14 +278,14 @@ export function Game(props: GameProps = {}) {
     level: levelId(),
     transition: levelTransition(level(), [COIN_SOUND, WIN_SOUND]),
     prefabs: PREFABS,
-    instances: GROVES,
+    instances: [...GROVES, ...now().instances],
     textures: TEXTURES,
-    background: levels[level()].night ? "#0b0f1e" : "#1b2233",
+    background: entry().night ? "#0b0f1e" : "#1b2233",
     shaders: SHADERS,
-    ...(levels[level()].night ? night(now().goal) : {}),
+    ...(entry().night ? night(now().goal) : {}),
     // 夜里的压暗在前，bloom 和背景模糊每关都有
-    post: [...(levels[level()].night ? night(now().goal).post : []), ...POST],
-    audio: { preload: [COIN_SOUND, WIN_SOUND], ...levelAudio(levels[level()].night ?? false) },
+    post: [...(entry().night ? night(now().goal).post : []), ...POST],
+    audio: { preload: [COIN_SOUND, WIN_SOUND], ...levelAudio(entry().night ?? false) },
     physics: { gravity: [0, -1800] },
     camera: { follow: "player", y: 60, smooth: 0.15, zoom: zoom(), bounds: { left: 0, right: now().right, bottom: -160, top: now().top } },
     camera3d: { match2d: true, interleave: true },
@@ -260,7 +303,8 @@ export function Game(props: GameProps = {}) {
     tilemaps: now().tilemaps,
     sprites: [
       ...BACKDROP,
-      ...(levels[level()].night ? stonesNear(3 * TILE) : []),
+      ...(entry().night ? stonesNear(3 * TILE) : []),
+      ...now().decos,
       ...remotePlayers(room.peers()),
       { ...playerSprite(), x: now().spawn[0], y: now().spawn[1], ...(flashing() ? FLASH : {}) },
       // 第二个手柄接入时多一个角色，拔掉就去掉

@@ -21,3 +21,17 @@ export function zoomAt(view: CameraView, size: [number, number], at: [number, nu
 export function pinchView(view: CameraView, size: [number, number], g: { x: number; y: number; factor: number; dx: number; dy: number }): CameraView {
   return pan(zoomAt(view, size, [g.x - g.dx, g.y - g.dy], g.factor), g.dx, g.dy);
 }
+
+/**
+ * 拖到画布边上自动滚动：指针离边 `margin` 以内时这一下挪多少（屏幕 point，y 朝下，和指针挪的方向一样），越靠边越快，
+ * 出了画布按最快算；不在边上是 [0, 0]。
+ */
+export function edgeScroll(size: [number, number], [px, py]: [number, number], margin = 32, speed = 12): [number, number] {
+  const axis = (p: number, length: number) => {
+    if (length <= 2 * margin) return 0;
+    if (p < margin) return -speed * Math.min(1, (margin - p) / margin);
+    if (p > length - margin) return speed * Math.min(1, (p - (length - margin)) / margin);
+    return 0;
+  };
+  return [axis(px, size[0]), axis(py, size[1])];
+}

@@ -1636,7 +1636,7 @@ mod tests {
         let prefabs = include_str!("../prefabs.ts");
         assert!(prefabs.contains("asset:/@platformer/tree.json") && prefabs.contains("\"asset:/@platformer/hero.png\": { mipmaps: false }"));
         let game = include_str!("../game.tsx");
-        assert!(game.contains("instances: GROVES") && game.contains("transition: levelTransition(") && game.contains("onTransition={fade.handle}"));
+        assert!(game.contains("instances: [...GROVES, ...now().instances]") && game.contains("transition: levelTransition(") && game.contains("onTransition={fade.handle}"));
         let mut app = app();
         let grove = json!({ "instances": [{ "id": "a", "prefab": "asset:/@platformer/tree.json" }, { "id": "b", "prefab": "asset:/@platformer/tree.json", "x": 127, "set": { "crown": { "y": 104 } } }] });
         app.prop("scene", Some(&json!({ "prefabs": { "grove": grove }, "instances": [{ "id": "grove-1", "prefab": "grove", "x": -346 }] })));

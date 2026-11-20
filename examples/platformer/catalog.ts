@@ -11,16 +11,42 @@ export interface EntityType extends TypeSpec {
   fixedY?: number;
   /** 能在属性面板里改的尺寸：`"w"` 只能改宽（移动平台的高在游戏里固定是 16），`"wh"` 宽高都能改。 */
   resizable?: "w" | "wh";
+  /** 能转（`rotation`，度）：装饰、模型。 */
+  rotatable?: true;
+  /** 能单独设 z（`z`，画的先后）：装饰。 */
+  layered?: true;
+  /** 有路线点（`points`）：走地怪。 */
+  route?: true;
 }
 
 const MODELS = ["crate.glb", "flag.glb", "jelly.glb"];
+/** 物件库里能放的预制体：`prefabs.ts` 的名字或文件（见 docs/scene-flow.md）。 */
+export const PREFAB_CHOICES = ["grove", "tree"];
+/** 预制体的包围盒：大小、实例原点到包围盒中心的偏移（实体的 (x, y) 是包围盒中心，实例放在 (x, y) 减偏移）。 */
+export const PREFAB_BOXES: Record<string, { size: [number, number]; center: [number, number] }> = {
+  // 两棵树：树干底在原点，第二棵在右边 127、树冠高 14
+  grove: { size: [192, 140], center: [64, 68] },
+  tree: { size: [64, 124], center: [0, 60] },
+};
 
 export const TYPES: Record<string, EntityType> = {
   spawn: { label: "出生点", size: [24, 32], color: "#ff7a59", props: [], max: 1 },
   coin: { label: "金币", size: [14, 14], color: "#ffd93d", props: [] },
   enemy: { label: "敌人", size: [24, 24], color: "#9b59b6", props: [{ key: "patrol", label: "巡逻格数", kind: "number", min: 1, max: 20, default: 3 }] },
   ghost: { label: "幽灵", size: [22, 22], color: "#c8d2ff", props: [] },
-  walker: { label: "走地怪", size: [24, 24], color: "#d35f5f", props: [{ key: "patrol", label: "巡逻格数", kind: "number", min: 1, max: 20, default: 3 }] },
+  walker: {
+    label: "走地怪",
+    size: [24, 24],
+    color: "#d35f5f",
+    route: true,
+    props: [
+      { key: "patrol", label: "巡逻格数", kind: "number", min: 1, max: 20, default: 3 },
+      { key: "speed", label: "速度", kind: "number", min: 40, max: 400, default: 110 },
+      { key: "jump", label: "起跳速度", kind: "number", min: 200, max: 1200, default: 720 },
+      { key: "sight", label: "视野格数", kind: "number", min: 1, max: 30, default: 8 },
+      { key: "rest", label: "两头停几秒", kind: "number", min: 0, max: 5, default: 0.6 },
+    ],
+  },
   lift: {
     label: "移动平台",
     size: [64, 16],
@@ -55,6 +81,7 @@ export const TYPES: Record<string, EntityType> = {
     label: "模型",
     size: [40, 40],
     color: "#88a0c8",
+    rotatable: true,
     props: [
       { key: "model", label: "模型", kind: "choice", options: MODELS, default: "crate.glb" },
       { key: "scale", label: "缩放", kind: "number", min: 1, max: 500, default: 40 },
@@ -62,6 +89,17 @@ export const TYPES: Record<string, EntityType> = {
       { key: "spin", label: "每秒转", kind: "number", min: -720, max: 720, default: 0 },
     ],
   },
+  group: { label: "分组", size: [16, 16], color: "#8899aa", props: [] },
+  deco: {
+    label: "装饰",
+    size: [32, 32],
+    color: "#556677",
+    resizable: "wh",
+    rotatable: true,
+    layered: true,
+    props: [{ key: "color", label: "颜色", kind: "text", default: "#556677", pattern: /^#([0-9a-f]{6}|[0-9a-f]{8})$/i, hint: " #rrggbb 或 #rrggbbaa" }],
+  },
+  prefab: { label: "预制体", size: [160, 140], color: "#2f3d5c", props: [{ key: "prefab", label: "预制体", kind: "choice", options: PREFAB_CHOICES, default: "grove" }] },
 };
 
 /** 物件库里的顺序。 */
@@ -107,16 +145,25 @@ export const TILESET = {
 
 /** 实体的宽高：能改的用自己写的，不然用类型的默认值（不认识的类型按 16 × 16）。和游戏里一样：不能改的写了也不算。 */
 export function sizeOf(e: Entity): [number, number] {
+  if (e.type === "prefab") return PREFAB_BOXES[propOf<string>(e, "prefab")]?.size ?? [16, 16];
   const spec = TYPES[e.type];
   const [w, h] = spec?.size ?? [16, 16];
   const r = spec?.resizable;
   return [r !== undefined ? (e.w ?? w) : w, r === "wh" ? (e.h ?? h) : h];
 }
 
-/** 包围盒。 */
+/** 转了多少度：能转的类型才算。 */
+export function rotationOf(e: Entity): number {
+  return TYPES[e.type]?.rotatable === true ? (e.rotation ?? 0) : 0;
+}
+
+/** 包围盒：转过的取四个角的外接矩形。 */
 export function boundsOf(e: Entity): { left: number; right: number; bottom: number; top: number } {
   const [w, h] = sizeOf(e);
-  return { left: e.x - w / 2, right: e.x + w / 2, bottom: e.y - h / 2, top: e.y + h / 2 };
+  const a = (rotationOf(e) * Math.PI) / 180;
+  const [c, s] = [Math.abs(Math.cos(a)), Math.abs(Math.sin(a))];
+  const [hw, hh] = [(w * c + h * s) / 2, (w * s + h * c) / 2];
+  return { left: e.x - hw, right: e.x + hw, bottom: e.y - hh, top: e.y + hh };
 }
 
 /** 属性的说明（找不到是 undefined）。 */

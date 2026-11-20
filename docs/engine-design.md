@@ -98,7 +98,7 @@
 | **3D 渲染补齐** | 材质 `blend` 的半透明网格按到相机的距离由远到近画；`SpotLight` 聚光灯；聚光灯、点光源（六面）能投影子，方向光可以分 2–4 段级联；`Animator::play(clip, fade)` 淡入淡出；glTF 的变形（morph target）和 `weights` 动画；见 [render3d-more.md](render3d-more.md) | 平台跳跃第一关有照着箱子堆、投影子的聚光灯，一只半透明的果冻靠近时从 idle 淡到 squish |
 | **Web** | `wasm32` 上浏览器主线程用 `requestAnimationFrame` 驱动引擎，只用 WebGPU；仓库里改过的 `nsh-platform-web` 支持原生组件；资源启动前取进内存，键盘、声音（第一次按键后出声）；见 [web.md](web.md) | `nsh package --target web` 打出的长坂坡在浏览器里能玩 |
 | **联网** | `nge-net`：WebSocket 连接（原生 tokio-tungstenite 在单独线程、浏览器 `WebSocket`），断线指数退避重连；postcard 协议；`NetSync` 每秒 20 次广播位置，`Remote` 缓冲 100 ms 插值、容忍乱序丢包；`Http` 的 GET / POST（原生 ureq、浏览器 fetch）；`nge-relay` 中继（房间、进出通知、心跳、人数 / 大小 / 频率上限，顺带排行榜）；场景的 `net`、TSX 的 `netRoom()` / `httpClient()`；见 [networking.md](networking.md) | 平台跳跃两个窗口同一关互相看见（半透明、头顶名字），N 开关，中继连不上照常单机，通关成绩进排行榜 |
-| **编辑器** | `examples/editor`：用 nge 做的关卡编辑器，画布就是平台跳跃的游戏视图（编辑时 `timeScale: 0`、不放角色和刚体）；带版本号的关卡文件格式 `ts/level.ts`（读入校验、保存格式化）；命令模式的撤销重做、点选 / 框选 / 拖动 / 吸附、瓦片刷、复制粘贴、属性校验都是纯函数；⌘R 用当前关卡试玩，Esc 回来；见 [editor.md](editor.md) | 平台跳跃第二关「石阶」从关卡文件读，编辑器里能打开、改、保存、直接试玩 |
+| **编辑器** | `examples/editor`：用 nge 做的关卡编辑器，画布就是平台跳跃的游戏视图（编辑时 `timeScale: 0`、不放角色和刚体）；带版本号的关卡文件格式 `ts/level.ts`（读入校验、保存格式化）；命令模式的撤销重做、点选 / 框选 / 拖动 / 吸附、瓦片刷、复制粘贴、属性校验都是纯函数；⌘R 用当前关卡试玩，Esc 回来；见 [editor.md](editor.md)。补齐（关卡文件第 2 版，第 1 版自动迁移）：多个瓦片层（层面板、视差、z、显隐、锁定）、矩形和油漆桶、改瓦片规则（单向、斜坡、动画、摩擦弹性）；实体旋转和 z、分组和父子层级（场景树缩进、折叠、拖行改父节点，挪 / 删 / 复制带子孙）；走地怪的参数和可拖的路线点、预制体实例和覆盖；悬停高亮、边上自动滚动、缩放以指针为中心；试玩时改关卡就地更新（瓦片走 `setTiles`）；见 [editor-more.md](editor-more.md) | 平台跳跃第二关「石阶」从关卡文件读，编辑器里能打开、改、保存、直接试玩；石阶有远景木架层、路牌分组、树的预制体，试玩时改了关卡不用重开 |
 | **M6 Android** | 仓库里改过的 `nsh-platform-android` 支持 Rust 写的原生组件（`SurfaceView`），wgpu 只走 Vulkan，画面没了暂停、回来换新的 surface；Android 键码和手柄的轴换成和 Mac 一样的键名；不用 Gradle，`tools/nsh-android.sh` 编好 Java 运行时再交给 `nsh package`；Vulkan 上的管线存到磁盘（`codeCacheDir`），坏了、版本不对当没有；见 [android.md](android.md) | 平台跳跃在 Android 模拟器上能玩，第二次启动读到管线缓存 |
 | **输入映射** | 动作绑定（`Actions`，按钮 / 一维 / 二维轴，Rust 每帧问、TSX 收 `action` 事件）；`inputMap()` 改键（按任意键、冲突、恢复默认、存在设备上）；手柄按设备分（`pad` command，`Input::pad`，每个玩家一个手柄，接入 / 拔出事件）；扳机模拟量；手柄震动（`Rumble`，GameController haptics / Android `VibratorManager` / `vibrationActuator`）；浏览器的手柄；见 [input-actions.md](input-actions.md) | 平台跳跃的操作全走动作，有改键面板，第二个手柄接入时出现第二个角色，落地、受伤时震动 |
 | **触屏控制** | `<VirtualStick>`（浮动 / 固定、死区、半径、八 / 四方向，按动作发）；手势识别的纯函数状态机（轻点、长按、滑动、拖动、双指捏合和旋转，`gestureHandlers`）；`<ActionButton>` 的按住连发、冷却显示、按下反馈；引擎认直接驱动的一帧内重按；见 [touch-input.md](touch-input.md) | 长坂坡在手机上用摇杆和按钮能玩；平台跳跃的 ← → 换成摇杆、双指缩放镜头；编辑器触控板捏合缩放 |
@@ -114,4 +114,4 @@
 
 - 正式名称和 crate 前缀
 - 是否给 nsh 上游提 PR：iOS `run_app` 支持注册组件，以及能否从原生层直接拿到输入以降低延迟
-- 工具链的其余部分（资源打包、编辑器里编辑 Tiled 地图和多个瓦片层）：关卡编辑器已经有了（见 [editor.md](editor.md)），这些等有需要再做
+- 工具链的其余部分（资源打包、编辑器里编辑 Tiled 地图）：关卡编辑器已经有了（见 [editor.md](editor.md)、[editor-more.md](editor-more.md)），这些等有需要再做

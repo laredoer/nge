@@ -96,15 +96,97 @@ test("有没保存的修改时新建要问：取消就留着", async () => {
   expect(app.shows("tree-e4")).toBe(false);
 });
 
-test("⌘R 试玩当前关卡，Esc 回来，改动还在", async () => {
+test("⌘R 试玩当前关卡：两边的面板还在，改了关卡就地更新、不重开；Esc 回来，改动还在", async () => {
   const app = await start();
   await app.press("lib-coin");
   await app.keyboard.press("mod+r");
   expect(has(app.texts(), "试玩，按 Esc 回到编辑")).toBe(true);
-  expect(app.shows("tree-e1")).toBe(false);
-  await app.keyboard.press("escape");
+  expect(has(app.texts(), "0 / 1 coin")).toBe(true);
+  // 试玩时场景树、属性面板还在：再放一个金币，正在玩的这一关多了一个（状态栏的金币数跟着变）
+  expect(app.shows("tree-e1")).toBe(true);
+  await app.press("lib-coin");
+  expect(has(app.texts(), "0 / 2 coin")).toBe(true);
+  // 撤销照常，正在玩的也跟着撤
+  await app.keyboard.press("mod+z");
+  expect(has(app.texts(), "0 / 1 coin")).toBe(true);
+  // 不合规的改动（删掉终点）：试玩里先不更新，状态栏说为什么
+  await app.press("tree-e3");
+  await app.press("delete");
+  expect(has(app.texts(), "试玩里先不更新")).toBe(true);
+  expect(has(app.texts(), "试玩，按 Esc 回到编辑")).toBe(true);
+  await app.keyboard.press("mod+z");
+  await app.press("stop");
+  expect(app.shows("stop")).toBe(false);
+  expect(app.shows("play")).toBe(true);
   expect(app.shows("tree-e4")).toBe(true);
   expect(has(app.texts(), "未命名 ●")).toBe(true);
+  await app.keyboard.press("mod+r");
+  await app.keyboard.press("escape");
+  expect(app.shows("play")).toBe(true);
+});
+
+test("层：加一层、设为当前层、刷子画在当前层；锁上的层画不上；矩形、油漆桶的快捷键", async () => {
+  const app = await start();
+  await app.press("layer-add");
+  expect(app.shows("layer-1")).toBe(true);
+  expect(app.value("layer-name")).toBe("第 2 层");
+  await app.clear("layer-px");
+  await app.type("layer-px", "0.5\n");
+  expect(has(app.texts(), "第 2 层 · 视差")).toBe(true);
+  await app.press("layer-1-locked");
+  await app.press("tile-0");
+  expect(app.shows("layer-1-locked")).toBe(true);
+  await app.keyboard.press("r");
+  await app.keyboard.press("g");
+  await app.press("layer-0");
+  await app.press("layer-remove");
+  expect(app.shows("layer-1")).toBe(false);
+  await app.keyboard.press("mod+z");
+  expect(app.shows("layer-1")).toBe(true);
+});
+
+test("分组：放一个分组和金币，属性面板里填父节点；场景树缩进、能折叠；拖一行到别的行上改父节点", async () => {
+  const app = await start();
+  await app.press("lib-group");
+  await app.press("lib-coin");
+  await app.clear("field-parent");
+  await app.type("field-parent", "e4\n");
+  expect(app.shows("fold-e4")).toBe(true);
+  await app.press("fold-e4");
+  expect(app.shows("tree-e5")).toBe(false);
+  await app.press("fold-e4");
+  expect(app.shows("tree-e5")).toBe(true);
+  // 父节点不能是自己的子孙
+  await app.press("tree-e4");
+  await app.clear("field-parent");
+  await app.type("field-parent", "e5\n");
+  expect(has(app.texts(), "不能放进自己")).toBe(true);
+  // 把出生点（第一行）拖到分组那一行上（往下 3 行）
+  await app.press("tree-e1");
+  await app.drag("grip-e1", { y: 24 * 3 });
+  expect(app.value("field-parent")).toBe("e4");
+});
+
+test("走地怪：加路线点、删路线点；预制体：加覆盖、删覆盖，写错的说原因", async () => {
+  const app = await start();
+  await app.press("lib-walker");
+  await app.press("point-add");
+  await app.press("point-add");
+  expect(app.shows("point-1-remove")).toBe(true);
+  await app.press("point-0-remove");
+  expect(app.shows("point-1-remove")).toBe(false);
+  await app.press("lib-prefab");
+  await app.type("override-path", "b/crown");
+  await app.type("override-field", "y");
+  await app.type("override-value", "110");
+  await app.press("override-add");
+  expect(has(app.texts(), "b/crown / y = 110")).toBe(true);
+  await app.press("override-b/crown-y-remove");
+  expect(has(app.texts(), "b/crown / y = 110")).toBe(false);
+  await app.clear("override-path");
+  await app.type("override-path", "b//crown");
+  await app.press("override-add");
+  expect(app.shows("override-error")).toBe(true);
 });
 
 test("不能试玩的关卡不进试玩：删掉终点，状态栏说原因", async () => {
