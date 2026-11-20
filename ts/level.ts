@@ -22,8 +22,8 @@ export const MAX_ROTATION = 3600;
 const ID = /^[A-Za-z0-9_-]{1,64}$/;
 /** 属性名：字母开头的字母、数字、下划线（`__proto__` 这种进不来）。 */
 const PROP_KEY = /^[A-Za-z][A-Za-z0-9_]{0,31}$/;
-/** 预制体里子节点的路径：id 用 / 连起来（嵌套的预制体），最多 8 段。 */
-export const CHILD_PATH = /^[A-Za-z0-9_-]{1,64}(\/[A-Za-z0-9_-]{1,64}){0,7}$/;
+/** 预制体里子节点的路径：id 用 / 连起来（嵌套的预制体），最多 8 段；不能有 `__proto__` 这一段（写进对象会被吞掉）。 */
+export const CHILD_PATH = /^(?!(?:[^/]*\/)*__proto__(?:\/|$))[A-Za-z0-9_-]{1,64}(\/[A-Za-z0-9_-]{1,64}){0,7}$/;
 const MAX_TEXT = 256;
 const MAX_ID = 64;
 const MAX_ERRORS = 20;
@@ -345,7 +345,7 @@ function overridesOf(raw: unknown, path: string, errors: Errors): Record<string,
   if (entries.length > MAX_OVERRIDES) errors.add(`${path} 最多 ${MAX_OVERRIDES} 个子节点`);
   for (const [child, fields] of entries.slice(0, MAX_OVERRIDES)) {
     if (!CHILD_PATH.test(child)) {
-      errors.add(`${path} 的子节点 ${JSON.stringify(child.slice(0, 40))} 要是 id 用 / 连起来（最多 8 段）`);
+      errors.add(`${path} 的子节点 ${JSON.stringify(child.slice(0, 40))} 要是 id 用 / 连起来（最多 8 段，不能有 __proto__ 这一段）`);
       continue;
     }
     const at = `${path}.${child}`;

@@ -4,7 +4,7 @@ import { checkTypes, formatLevel, parseLevel, type Entity, type LevelFile } from
 import { TILESET, TYPES } from "./catalog";
 import stairs from "../editor/levels/stairs.json";
 import stairsV1 from "../editor/fixtures/stairs-v1.json";
-import { build, fileLevel, fromFile, LEVELS, MEADOW, TILE, toFile, WALKER, walkerBehavior, walkerSprites, type Built } from "./levels";
+import { build, coinsGot, fileLevel, fromFile, LEVELS, MEADOW, TILE, toFile, WALKER, walkerBehavior, walkerSprites, type Built } from "./levels";
 
 const near = (a: number, b: number) => Math.abs(a - b) < 0.01;
 const round = (v: number) => Math.round(v * 100) / 100;
@@ -58,7 +58,7 @@ test("第二关石阶从文件读：72 列、16 个金币、2 个敌人、1 个�
   expect([b.crate.body.x, b.goal.x]).toEqual([66.5 * TILE, 68 * TILE]);
   // 敌人的 id 还是 enemy- 开头（Rust 按这个认）
   for (const e of [...b.enemies, ...b.ghosts, ...b.walkers]) expect(e.id.startsWith("enemy-")).toBe(true);
-  expect(b.walkers[0]).toEqual({ id: "enemy-walker-0", x: 1200, y: 12, patrol: 3 });
+  expect(b.walkers[0]).toEqual({ id: "enemy-walker:e21", x: 1200, y: 12, patrol: 3 });
   expect(b.tilemaps[0].friction).toBe(0);
   // 相机的上边和以前一样
   expect(LEVELS.map((l) => l.built.top)).toEqual([448, 448, 448]);
@@ -144,12 +144,12 @@ test("实体按类型转：出生点、移动平台（宽、往上走）、斜�
     ]),
   );
   expect(b.spawn).toEqual([50, 30]);
-  expect(b.lifts[0]).toEqual({ node: { id: "lift-0", x: 64, y: 0, w: 96, h: 16 }, to: { y: 100 }, duration: 3 });
+  expect(b.lifts[0]).toEqual({ node: { id: "lift:l", x: 64, y: 0, w: 96, h: 16 }, to: { y: 100 }, duration: 3 });
   // 往右下降：左边高
   expect(b.ramps[0].rotation! < 0).toBe(true);
-  expect(b.lights).toEqual([{ id: "light-0", kind: "spot", x: 10, y: 20, z: 50, color: "#ffffff", intensity: 20000, range: 400, angle: 30, direction: [0, -0.5, -1] }]);
-  expect(b.models).toEqual([{ id: "model-0", model: "asset:/@platformer/flag.glb", x: 30, y: 40, z: 0, scale: 20, spin: 0 }]);
-  expect(b.enemies[0]).toEqual({ id: "enemy-0", x: 200, y: 12, to: { x: 200 + 2 * TILE } });
+  expect(b.lights).toEqual([{ id: "light:p", kind: "spot", x: 10, y: 20, z: 50, color: "#ffffff", intensity: 20000, range: 400, angle: 30, direction: [0, -0.5, -1] }]);
+  expect(b.models).toEqual([{ id: "model:m", model: "asset:/@platformer/flag.glb", x: 30, y: 40, z: 0, scale: 20, spin: 0 }]);
+  expect(b.enemies[0]).toEqual({ id: "enemy-patrol:e", x: 200, y: 12, to: { x: 200 + 2 * TILE } });
   expect(b.tilemaps[0].friction).toBe(0);
   expect(b.right).toBe(320);
 });
@@ -216,26 +216,27 @@ test("第 2 版的新类型：装饰按旋转和 z 画、分组什么都不生�
     ]),
   );
   expect(b.decos).toEqual([
-    { id: "deco-0", x: 40, y: 50, w: 20, h: 10, z: -5, rotation: 30, color: "#112233" },
-    { id: "deco-1", x: 60, y: 50, w: 32, h: 32, z: 0.5, rotation: 0, color: "#556677" },
+    { id: "deco:d", x: 40, y: 50, w: 20, h: 10, z: -5, rotation: 30, color: "#112233" },
+    { id: "deco:d2", x: 60, y: 50, w: 32, h: 32, z: 0.5, rotation: 0, color: "#556677" },
   ]);
   expect(b.instances).toEqual([
-    { id: "prefab-0", prefab: "grove", x: 236, y: 0, set: { "b/crown": { y: 110 } } },
-    { id: "prefab-1", prefab: "asset:/@platformer/tree.json", x: 500, y: 0 },
+    { id: "prefab:p", prefab: "grove", x: 236, y: 0, set: { "b/crown": { y: 110 } } },
+    { id: "prefab:t", prefab: "asset:/@platformer/tree.json", x: 500, y: 0 },
   ]);
   expect(b.models[0].rotation).toEqual([0, 0, 90]);
 });
 
 test("走地怪：有路线点时按出生点 → 各个点来回走，速度、跳跃、视野、停留能改；没改的和以前一样", () => {
   const b = fromOk(minimal2([{ id: "w", type: "walker", x: 100, y: 12, points: [[200, 12], [260, 76]], props: { speed: 150, rest: 1, sight: 5 } }, { id: "v", type: "walker", x: 50, y: 12 }]));
-  expect(b.walkers[1]).toEqual({ id: "enemy-walker-1", x: 50, y: 12, patrol: 3 });
+  expect(b.walkers[1]).toEqual({ id: "enemy-walker:v", x: 50, y: 12, patrol: 3 });
   const w = b.walkers[0];
-  expect(w).toEqual({ id: "enemy-walker-0", x: 100, y: 12, patrol: 3, route: [[200, 12], [260, 76]], speed: 150, sight: 5, rest: 1 });
+  expect(w).toEqual({ id: "enemy-walker:w", x: 100, y: 12, patrol: 3, route: [[200, 12], [260, 76]], speed: 150, sight: 5, rest: 1 });
   const tree = walkerBehavior(w.x, w.y, w.patrol, w);
   expect([tree.speed, tree.jump]).toEqual([150, WALKER.jump]);
   const json = JSON.stringify(tree.tree);
   expect(json).toContain('{"type":"see","target":"player","range":160}');
-  expect(json).toContain('{"type":"goto","x":100,"y":12},{"type":"wait","seconds":1},{"type":"goto","x":200,"y":12},{"type":"wait","seconds":1},{"type":"goto","x":260,"y":76},{"type":"wait","seconds":1}');
+  // 来回走：出生点 → 各个点 → 原路回来（不从最后一个点直接跳回出生点）
+  expect(json).toContain('{"type":"goto","x":100,"y":12},{"type":"wait","seconds":1},{"type":"goto","x":200,"y":12},{"type":"wait","seconds":1},{"type":"goto","x":260,"y":76},{"type":"wait","seconds":1},{"type":"goto","x":200,"y":12},{"type":"wait","seconds":1}]');
   // 精灵用的也是这棵树
   expect(walkerSprites([w], 0, [])[0].behavior).toEqual(tree);
 });
@@ -264,4 +265,29 @@ test("第二关石阶是第 2 版的文件：有分组、远景层、装饰和�
   if (!old.ok) throw new Error(old.errors.join("；"));
   expect(old.built.tilemaps[0]).toEqual(LEVELS[1].built.tilemaps[0]);
   expect(old.built.walkers).toEqual(LEVELS[1].built.walkers);
+});
+
+test("游戏里的 id 按编辑器里实体的 id 生成：删掉、重排前面的，后面的 id 不变（拿过的金币、踩过的敌人记在对的上面）", () => {
+  const all: Entity[] = [
+    { id: "a1", type: "coin", x: 40, y: 40 },
+    { id: "a2", type: "coin", x: 80, y: 40 },
+    { id: "b1", type: "enemy", x: 120, y: 12 },
+    { id: "b2", type: "enemy", x: 160, y: 12 },
+    { id: "c1", type: "walker", x: 200, y: 12 },
+    { id: "d1", type: "deco", x: 220, y: 40 },
+    { id: "f1", type: "prefab", x: 240, y: 68, props: { prefab: "tree" } },
+    { id: "g1", type: "lift", x: 64, y: 0 },
+  ];
+  const whole = fromOk(minimal2(all));
+  const fewer = fromOk(minimal2(all.filter((e) => !["a1", "b1"].includes(e.id)).reverse()));
+  expect(fewer.coins[0].id).toBe(whole.coins[1].id);
+  expect(fewer.enemies[0].id).toBe(whole.enemies[1].id);
+  for (const k of ["walkers", "decos", "instances"] as const) expect(fewer[k][0].id).toBe(whole[k][0].id);
+  expect(fewer.lifts[0].node.id).toBe(whole.lifts[0].node.id);
+  // 敌人照样以 enemy- 开头；不同类型的不会撞
+  for (const e of [...whole.enemies, ...whole.walkers]) expect(e.id.startsWith("enemy-")).toBe(true);
+  const ids = [...whole.coins.map((c) => c.id), ...whole.enemies.map((e) => e.id), ...whole.walkers.map((w) => w.id), ...whole.decos.map((d) => d.id), ...whole.instances.map((p) => p.id), ...whole.lifts.map((l) => l.node.id)];
+  expect(new Set(ids).size).toBe(ids.length);
+  // 状态栏的「得到」只数还在的金币
+  expect(coinsGot(fewer.coins, [whole.coins[0].id, whole.coins[1].id])).toBe(1);
 });

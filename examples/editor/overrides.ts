@@ -8,7 +8,7 @@ const FIELD = /^[A-Za-z][A-Za-z0-9_]{0,31}$/;
 export function parseOverride(path: string, field: string, text: string): Parsed<{ path: string; field: string; value: PropValue }> {
   const p = path.trim();
   const f = field.trim();
-  if (!CHILD_PATH.test(p)) return { ok: false, error: "子节点要是 id 用 / 连起来，比如 b/crown" };
+  if (!CHILD_PATH.test(p)) return { ok: false, error: "子节点要是 id 用 / 连起来，比如 b/crown（不能有 __proto__ 这一段）" };
   if (!FIELD.test(f)) return { ok: false, error: "字段名要是字母开头的字母、数字、下划线" };
   const t = text.trim();
   if (t.length > 256 || /[\u0000-\u001f\u007f]/.test(t)) return { ok: false, error: "值太长或有控制字符" };

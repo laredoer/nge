@@ -190,7 +190,9 @@ export const WALKER = { speed: 110, jump: 720, sight: 8 * TILE };
 export function walkerBehavior(x: number, y: number, patrol: number, o: Omit<Walker, "id" | "x" | "y" | "patrol"> = {}): BehaviorNode {
   const rest = o.rest ?? 0.6;
   // 有路线点：出生点 → 每个点，走到最后一个再从头（每个点停一下）
-  const stops: [number, number][] = o.route !== undefined && o.route.length > 0 ? [[x, y], ...o.route] : [[x, y], [x + patrol * TILE, y]];
+  const ends: [number, number][] = o.route !== undefined && o.route.length > 0 ? [[x, y], ...o.route] : [[x, y], [x + patrol * TILE, y]];
+  // 来回走：去的时候经过每个点，回来时原路返回（两头不重复）
+  const stops = [...ends, ...ends.slice(1, -1).reverse()];
   return {
     speed: o.speed ?? WALKER.speed,
     jump: o.jump ?? WALKER.jump,
@@ -474,42 +476,45 @@ export function fromTiled(map: TiledMap): Built {
   };
 }
 
-/** 关卡文件里的东西：id 按类型编号（敌人以 enemy- 开头，Rust 按这个认）。 */
+/**
+ * 关卡文件里的东西：游戏里的 id 按编辑器里实体的 id 生成（删掉、重排前面的不影响后面的，拿过的金币、踩过的敌人还记在对的上面）。
+ * 用 `:` 隔开（实体 id 里没有 `:`），不同类型的不会撞；敌人以 enemy- 开头，Rust 按这个认。
+ */
 function entitiesOf(entities: Entity[]) {
   const of = (type: string) => entities.filter((e) => e.type === type);
   const num = (e: Entity, key: string) => propOf<number>(e, key);
-  const lifts = of("lift").map((e, i) => {
+  const lifts = of("lift").map((e) => {
     const [dx, dy] = [num(e, "dx"), num(e, "dy")];
-    return lift(`lift-${i}`, e.x, e.y, dy === 0 ? { x: e.x + dx } : { y: e.y + dy }, num(e, "duration"), sizeOf(e)[0]);
+    return lift(`lift:${e.id}`, e.x, e.y, dy === 0 ? { x: e.x + dx } : { y: e.y + dy }, num(e, "duration"), sizeOf(e)[0]);
   });
-  const ramps = of("ramp").map((e, i) => {
+  const ramps = of("ramp").map((e) => {
     const [w, h] = sizeOf(e);
     const down = propOf<boolean>(e, "down");
-    return rampOf(`ramp-${i}`, [e.x - w / 2, e.y + (down ? h : -h) / 2], [e.x + w / 2, e.y + (down ? -h : h) / 2]);
+    return rampOf(`ramp:${e.id}`, [e.x - w / 2, e.y + (down ? h : -h) / 2], [e.x + w / 2, e.y + (down ? -h : h) / 2]);
   });
-  const lights = of("light").map((e, i): LightNode => {
+  const lights = of("light").map((e): LightNode => {
     const spot = propOf<string>(e, "kind") === "spot";
-    const base: LightNode = { id: `light-${i}`, kind: spot ? "spot" : "point", x: e.x, y: e.y, z: num(e, "z"), color: propOf<string>(e, "color"), intensity: num(e, "intensity"), range: num(e, "range") };
+    const base: LightNode = { id: `light:${e.id}`, kind: spot ? "spot" : "point", x: e.x, y: e.y, z: num(e, "z"), color: propOf<string>(e, "color"), intensity: num(e, "intensity"), range: num(e, "range") };
     // 聚光灯朝关卡平面往下照
     return spot ? { ...base, angle: num(e, "angle"), direction: [0, -0.5, -1] } : base;
   });
-  const models = of("model").map((e, i): ModelNode => {
-    const model: ModelNode = { id: `model-${i}`, model: `asset:/@platformer/${propOf<string>(e, "model")}`, x: e.x, y: e.y, z: num(e, "z"), scale: num(e, "scale"), spin: num(e, "spin") };
+  const models = of("model").map((e): ModelNode => {
+    const model: ModelNode = { id: `model:${e.id}`, model: `asset:/@platformer/${propOf<string>(e, "model")}`, x: e.x, y: e.y, z: num(e, "z"), scale: num(e, "scale"), spin: num(e, "spin") };
     return rotationOf(e) === 0 ? model : { ...model, rotation: [0, 0, rotationOf(e)] };
   });
-  const decos = of("deco").map((e, i): SpriteNode => {
+  const decos = of("deco").map((e): SpriteNode => {
     const [w, h] = sizeOf(e);
-    return { id: `deco-${i}`, x: e.x, y: e.y, w, h, z: e.z ?? DECO_Z, rotation: rotationOf(e), color: propOf<string>(e, "color") };
+    return { id: `deco:${e.id}`, x: e.x, y: e.y, w, h, z: e.z ?? DECO_Z, rotation: rotationOf(e), color: propOf<string>(e, "color") };
   });
   // 实体的 (x, y) 是包围盒中心，实例的原点要减去偏移
-  const instances = of("prefab").map((e, i): PrefabInstance => {
+  const instances = of("prefab").map((e): PrefabInstance => {
     const name = propOf<string>(e, "prefab");
     const [cx, cy] = PREFAB_BOXES[name]?.center ?? [0, 0];
-    const instance: PrefabInstance = { id: `prefab-${i}`, prefab: PREFAB_REFS[name] ?? name, x: e.x - cx, y: e.y - cy };
+    const instance: PrefabInstance = { id: `prefab:${e.id}`, prefab: PREFAB_REFS[name] ?? name, x: e.x - cx, y: e.y - cy };
     return e.set === undefined ? instance : { ...instance, set: e.set };
   });
-  const walkers = of("walker").map((e, i): Walker => {
-    const walker: Walker = { id: `enemy-walker-${i}`, x: e.x, y: e.y, patrol: num(e, "patrol") };
+  const walkers = of("walker").map((e): Walker => {
+    const walker: Walker = { id: `enemy-walker:${e.id}`, x: e.x, y: e.y, patrol: num(e, "patrol") };
     if (e.points !== undefined && e.points.length > 0) walker.route = e.points;
     // 只带关卡里写了的：没改的和以前一样
     for (const key of ["speed", "jump", "sight", "rest"] as const) if (e.props?.[key] !== undefined) walker[key] = num(e, key);
@@ -547,10 +552,10 @@ export function fromFile(file: unknown): { ok: true; built: Built; name: string;
       const { oneWay: _oneWay, slopes: _slopes, ...rest } = map;
       return { ...rest, solid: [] };
     }),
-    coins: of("coin").map((e, i) => ({ id: `coin-${i}`, x: e.x, y: e.y })),
+    coins: of("coin").map((e) => ({ id: `coin:${e.id}`, x: e.x, y: e.y })),
     lifts,
-    enemies: of("enemy").map((e, i) => ({ id: `enemy-${i}`, x: e.x, y: e.y, to: { x: e.x + propOf<number>(e, "patrol") * TILE } })),
-    ghosts: of("ghost").map((e, i) => ({ id: `enemy-ghost-${i}`, x: e.x, y: e.y })),
+    enemies: of("enemy").map((e) => ({ id: `enemy-patrol:${e.id}`, x: e.x, y: e.y, to: { x: e.x + propOf<number>(e, "patrol") * TILE } })),
+    ghosts: of("ghost").map((e) => ({ id: `enemy-ghost:${e.id}`, x: e.x, y: e.y })),
     walkers,
     ramps,
     tower: tower === undefined ? null : tower.x,
@@ -633,6 +638,11 @@ export const LEVELS: { name: string; built: Built; night?: boolean }[] = [
   fileLevel(stairs, "石阶"),
   { name: "云端", built: fromTiled(level3), night: true },
 ];
+
+/** 拿到了几个金币：只数关卡里还有的（热重载删了金币以后不会「得到」比总数多）。 */
+export function coinsGot(coins: { id: string }[], taken: string[]): number {
+  return coins.filter((c) => taken.includes(c.id)).length;
+}
 
 /** 存档：解锁到第几关（从 1 数），每关最好的用时（秒，键是关卡号）。 */
 export interface Progress {

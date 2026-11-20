@@ -326,3 +326,14 @@ test("石阶的文件是第 2 版，读进来再格式化、再读回来一样",
   expect(parseLevel(formatLevel(r.level))).toEqual(r);
   expect(r.level).toEqual(stairs as unknown as LevelFile);
 });
+
+test("覆盖的子节点路径不能有 __proto__ 这一段（写进对象会被吞掉）", () => {
+  const raw = JSON.parse(formatLevel(v2()));
+  raw.entities[3].set = JSON.parse('{"__proto__": {"y": 1}}');
+  expect(errorsOf(raw).join("\n")).toContain("__proto__");
+  raw.entities[3].set = JSON.parse('{"a/__proto__": {"y": 1}}');
+  expect(errorsOf(raw).join("\n")).toContain("__proto__");
+  // 别的带下划线的照样行
+  raw.entities[3].set = JSON.parse('{"__crown": {"y": 1}}');
+  expect(parseLevel(raw).ok).toBe(true);
+});

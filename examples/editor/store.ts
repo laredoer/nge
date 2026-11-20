@@ -48,7 +48,7 @@ export function blankLevel(): LevelFile {
 /** 出生点、终点要在地图里（没有视差的瓦片层合起来的范围），不然一开始就掉下去或者到不了。 */
 export function outsideMap(level: LevelFile): string[] {
   const ground = level.tiles.filter((t) => t.parallax === undefined || (t.parallax[0] === 1 && t.parallax[1] === 1));
-  if (ground.length === 0) return [];
+  if (ground.length === 0) return ["没有挡人的瓦片层（都有视差）"];
   const left = Math.min(...ground.map((t) => t.x));
   const right = Math.max(...ground.map((t) => t.x + t.cols * t.tile));
   const top = Math.max(...ground.map((t) => t.y));
@@ -57,6 +57,10 @@ export function outsideMap(level: LevelFile): string[] {
     .filter((e) => (e.type === "spawn" || e.type === "goal") && (e.x < left || e.x > right || e.y < bottom || e.y > top))
     .map((e) => `${labelOf({ ...e, name: undefined })}在地图外面`);
 }
+
+/** 状态栏：试玩中；热重载时关卡不合规、没换掉正在玩的。 */
+const PLAYING = "试玩中，按 Esc 回到编辑";
+const STALE = "试玩里先不更新";
 
 export const START_VIEW: CameraView = { x: 480, y: 200, zoom: 1 };
 
@@ -84,6 +88,8 @@ export function createStore(deps: Deps) {
   const hover = signal<string | null>(null);
   const pointerAt = signal<[number, number] | null>(null);
   let clipboard: Entity[] = [];
+  /** 剪贴板里的东西挂在哪些没一起复制的父节点下面：复制以后这个 id 被新东西用了（或者换了关卡）就去掉，粘贴时不再挂上去。 */
+  let outside = new Set<string>();
 
   const level = () => editor().level;
   /** 当前层的下标（层被删了时夹到范围里）。 */
@@ -95,16 +101,20 @@ export function createStore(deps: Deps) {
   /** 试玩时关卡变了：合规就换掉正在玩的（热重载），不合规的留着上一次的，状态栏说为什么。 */
   const relive = () => {
     if (playing() === null) return;
-    const why = trialProblems(level());
-    if (why.length > 0) return status.set(`试玩里先不更新：${why.slice(0, 2).join("；")}`);
-    const r = fromFile(level());
-    if (r.ok) playing.set({ name: r.name || "试玩", built: r.built, night: r.night });
+    const r = trialOf(level());
+    if (!r.ok) return status.set(`${STALE}：${r.errors.slice(0, 2).join("；")}`);
+    playing.set(r.playing);
+    // 上一次没更新、这次好了：状态栏换回来
+    if (status().startsWith(STALE)) status.set(PLAYING);
   };
   // 关卡变了，正在拖的就作废（拖着的东西可能没了，一笔的旧值也不对了）
   const run = (cmd: Command, select?: string[]) => {
     batch(() => {
       drag.set(IDLE);
+      const before = new Set(level().entities.map((e) => e.id));
       editor.set(execute(editor(), cmd, now()));
+      // 新建出来的 id 碰上了剪贴板记着的父节点：那已经不是原来那个了
+      for (const e of level().entities) if (!before.has(e.id)) outside.delete(e.id);
       selection.set(prune(select ?? selection(), level()));
       relive();
     });
@@ -125,7 +135,8 @@ export function createStore(deps: Deps) {
   /** 贴进来：`remember` 时剪贴板换成贴进来的（接着粘贴再错开一格），⌘D 不动剪贴板。 */
   const paste = (clip: Entity[], remember: boolean) => {
     if (clip.length === 0) return;
-    const added = pasted(level(), clip, [cell(), 0]);
+    // ⌘D（不经过剪贴板）复制的就是现在的，父节点总是原来那个
+    const added = pasted(level(), clip, [cell(), 0], remember ? (p) => outside.has(p) : undefined);
     if (remember) clipboard = added;
     run(addEntities(added), added.map((e) => e.id));
   };
@@ -159,17 +170,23 @@ export function createStore(deps: Deps) {
     const changed = Object.entries(r.value).some(([k, v]) => JSON.stringify(v) !== JSON.stringify(e[k as keyof Entity]));
     if (!changed) return null;
     const [dx, dy] = [(r.value.x ?? e.x) - e.x, (r.value.y ?? e.y) - e.y];
-    const kids = dx === 0 && dy === 0 ? [] : level().entities.filter((k) => descendantsOf(level(), id).includes(k.id));
-    const update = updateEntity(level(), id, r.value);
+    const below = new Set(dx === 0 && dy === 0 ? [] : descendantsOf(level(), id));
+    const kids = level().entities.filter((k) => below.has(k.id));
+    // 自己的路线点也跟着平移
+    const shifted = e.points === undefined || (dx === 0 && dy === 0) ? r.value : { ...r.value, points: e.points.map(([x, y]): [number, number] => [x + dx, y + dy]) };
+    const update = updateEntity(level(), id, shifted);
     run(kids.length === 0 ? update : compose("修改", [update, moveTo(level(), kids.map((k) => ({ id: k.id, x: k.x + dx, y: k.y + dy })))]));
     return null;
   };
   /** 一组实体换父节点（`undefined` 回到最外层）。 */
   const setParentOf = (ids: string[], parent: string | undefined): string | null => {
     if (parent !== undefined && entity(parent) === undefined) return `没有 ${parent}`;
-    if (ids.some((id) => !canParent(level(), id, parent))) return "不能放进自己或自己的子孙里";
-    const cmd = setParent(level(), ids, parent);
+    // 不合规的（会放进自己或自己的子孙里）跳过，别的照放；全不合规才说原因
+    const fits = ids.filter((id) => canParent(level(), id, parent));
+    if (fits.length === 0) return "不能放进自己或自己的子孙里";
+    const cmd = setParent(level(), fits, parent);
     if (cmd !== null) run(cmd);
+    if (fits.length < ids.length) status.set(`跳过了 ${ids.length - fits.length} 个：不能放进自己或自己的子孙里`);
     return null;
   };
   /** 场景树里拖一行放到另一行上：选中的（含拖的这一行）放进那一行；`null` 是放回最外层。 */
@@ -322,6 +339,7 @@ export function createStore(deps: Deps) {
   const reset = (next: LevelFile, name: string | null) => {
     batch(() => {
       editor.set(newEditor(next));
+      outside = new Set();
       selection.set([]);
       file.set(name);
       view.set(START_VIEW);
@@ -329,7 +347,8 @@ export function createStore(deps: Deps) {
       layer.set(0);
       collapsed.set([]);
       hover.set(null);
-      relive();
+      // 换了一关：试玩停掉（正在玩的是上一关，起点也是上一关的）
+      playing.set(null);
     });
   };
   const newLevel = async () => {
@@ -480,22 +499,22 @@ export function createStore(deps: Deps) {
     return { level: previewOf(ctx(), d), selection: selection(), view: view(), size: size(), grid: grid(), box: d.kind === "box" ? [d.start, d.end] : null, hover: hover() };
   };
 
-  /** 试玩前要查的：格式和类型、出生点和终点在不在地图里。 */
-  const trialProblems = (l: LevelFile): string[] => {
+  /** 试玩前要查的：格式和类型、出生点和终点在不在地图里；合规的顺便转好（只转一次）。 */
+  const trialOf = (l: LevelFile): { ok: true; playing: Playing } | { ok: false; errors: string[] } => {
     const r = fromFile(l);
-    if (!r.ok) return r.errors;
-    return outsideMap(l);
+    if (!r.ok) return r;
+    const out = outsideMap(l);
+    if (out.length > 0) return { ok: false, errors: out };
+    return { ok: true, playing: { name: r.name || "试玩", built: r.built, night: r.night } };
   };
   /** 试玩：先查关卡合不合规，不合规的不进。 */
   const play = () => {
-    const why = trialProblems(level());
-    if (why.length > 0) return status.set(`还不能试玩：${why.slice(0, 3).join("；")}`);
-    const r = fromFile(level());
-    if (!r.ok) return;
+    const r = trialOf(level());
+    if (!r.ok) return status.set(`还不能试玩：${r.errors.slice(0, 3).join("；")}`);
     batch(() => {
       drag.set(IDLE);
-      playing.set({ name: r.name || "试玩", built: r.built, night: r.night });
-      status.set("试玩中，按 Esc 回到编辑");
+      playing.set(r.playing);
+      status.set(PLAYING);
     });
   };
   const stop = () => {
@@ -515,6 +534,8 @@ export function createStore(deps: Deps) {
     duplicate: () => paste(copy(level(), selection()), false),
     copy: () => {
       clipboard = copy(level(), selection());
+      const copied = new Set(clipboard.map((e) => e.id));
+      outside = new Set(clipboard.flatMap((e) => (e.parent !== undefined && !copied.has(e.parent) ? [e.parent] : [])));
       status.set(`复制了 ${clipboard.length} 个`);
     },
     paste: () => paste(clipboard, true),

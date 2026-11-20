@@ -39,7 +39,7 @@ export function removeEntities(level: LevelFile, ids: string[]): Command {
   };
 }
 
-/** 把一组实体放到新位置。`merge` 给了时相邻的同类移动合成一步（方向键微移）。 */
+/** 把一组实体放到新位置（路线点一起平移）。`merge` 给了时相邻的同类移动合成一步（方向键微移）。 */
 export function moveTo(level: LevelFile, targets: { id: string; x: number; y: number }[], merge?: string): Command {
   const to = new Map(targets.map((t) => [t.id, { x: t.x, y: t.y }]));
   const from = new Map(level.entities.filter((e) => to.has(e.id)).map((e) => [e.id, { x: e.x, y: e.y }]));
@@ -55,7 +55,10 @@ function moves(from: Positions, to: Positions, merge?: string): MoveCommand {
   const place = (pos: Positions) => (l: LevelFile) =>
     mapEntities(l, (e) => {
       const p = pos.get(e.id);
-      return p === undefined || !from.has(e.id) ? e : { ...e, x: p.x, y: p.y };
+      if (p === undefined || !from.has(e.id)) return e;
+      // 路线点跟着实体平移（撤回时按反方向挪回来）
+      const [dx, dy] = [p.x - e.x, p.y - e.y];
+      return e.points === undefined ? { ...e, x: p.x, y: p.y } : { ...e, x: p.x, y: p.y, points: e.points.map(([x, y]) => [x + dx, y + dy]) };
     });
   return {
     label: "移动",

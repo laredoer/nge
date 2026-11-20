@@ -1,6 +1,7 @@
 // 父子层级、预制体覆盖、路线点（docs/editor-more.md）。
 import { expect, test } from "nsh/test";
-import { emptyLevel, formatLevel, parseLevel, type LevelFile } from "../../ts/level";
+import { emptyLevel, formatLevel, parseLevel, type Entity, type LevelFile } from "../../ts/level";
+import { blankLevel } from "./store";
 import { copy, pasted } from "./clipboard";
 import { canParent, descendantsOf, dropTarget, setParent, treeRows, withDescendants } from "./hierarchy";
 import { overrideList, parseOverride, withOverride, withoutOverride } from "./overrides";
@@ -99,6 +100,9 @@ test("路线点：加在最后一个右边一格，删、挪；点中最近的�
   expect(pointAt(entities, ["w"], [160, 14], 6)).toEqual({ id: "w", index: 1 });
   expect(pointAt(entities, ["v"], [160, 14], 6)).toEqual({ id: "v", index: 0 });
   expect(pointAt(entities, ["w"], [148, 30], 6)).toBe(null);
+  // 没选中的实体的点更近也不算
+  expect(pointAt(entities, ["v"], [165, 12], 6)).toEqual({ id: "v", index: 0 });
+  expect(pointAt(entities, [], [160, 12], 6)).toBe(null);
   // 满了不加
   expect(addPoint({ ...w, points: Array.from({ length: 64 }, () => [0, 0] as [number, number]) }, 32).length).toBe(64);
 });
@@ -115,4 +119,40 @@ test("复制分组带着子孙，粘贴换新 id、父节点换成新的；只�
   expect(gone[0].parent).toBe(undefined);
   const walker = pasted(l, [{ id: "w", type: "walker", x: 0, y: 0, points: [[10, 0]] }], [32, 8]);
   expect(walker[0].points).toEqual([[42, 8]]);
+});
+
+test("大关卡：5000 个实体的场景树、2000 个里选 300 个换父节点、带子孙都是线性的，很快算完", () => {
+  const base = blankLevel();
+  const many = (n: number): LevelFile => ({
+    ...base,
+    entities: [
+      ...base.entities,
+      // 一半挂在前一个分组下面，形成几层
+      ...Array.from({ length: n }, (_, i): Entity => ({ id: `c${i}`, type: i % 2 === 0 ? "group" : "coin", x: i, y: 0, ...(i % 2 === 1 ? { parent: `c${i - 1}` } : {}) })),
+    ],
+  });
+  const big = many(5000);
+  let t = Date.now();
+  expect(treeRows(big, new Set()).length).toBe(5003);
+  expect(withDescendants(big, big.entities.map((e) => e.id)).length).toBe(5003);
+  expect(Date.now() - t).toBeLessThan(300);
+  const mid = many(2000);
+  const ids = mid.entities.slice(3, 303).map((e) => e.id);
+  t = Date.now();
+  const cmd = setParent(mid, ids, "e1");
+  expect(Date.now() - t).toBeLessThan(300);
+  // 选中的里面有父子的只挪最上面的：150 个分组
+  expect(cmd!.apply(mid).entities.filter((e) => e.parent === "e1").length).toBe(150);
+});
+
+test("属性面板加覆盖：路径里有 __proto__ 这一段的不收", () => {
+  expect(parseOverride("__proto__", "y", "1").ok).toBe(false);
+  expect(parseOverride("b/__proto__", "y", "1").ok).toBe(false);
+  expect(parseOverride("b/__crown", "y", "1").ok).toBe(true);
+});
+
+test("父节点不在关卡里的（不该有，保险）：场景树里当最外层显示，不丢", () => {
+  const l = level();
+  const orphan = { ...l, entities: [...l.entities, { id: "o", type: "coin", x: 0, y: 0, parent: "gone" }] };
+  expect(treeRows(orphan, new Set()).find((r) => r.id === "o")).toEqual({ id: "o", depth: 0, parent: false, collapsed: false });
 });

@@ -5,13 +5,13 @@ import { memoryStore } from "./files";
 import { blankLevel, createStore, outsideMap } from "./store";
 import { edgeScroll } from "./view";
 
-const setup = () => {
+const setup = (answer: string | null = null) => {
   let t = 0;
-  return createStore({ files: async () => memoryStore(), ask: async () => null, now: () => (t += 1000) });
+  return createStore({ files: async () => memoryStore(), ask: async () => answer, now: () => (t += 1000) });
 };
 /** 视图在世界原点、800 × 600：世界 (x, y) 在屏幕上是 (400 + x, 300 - y)。 */
-const centered = () => {
-  const s = setup();
+const centered = (answer: string | null = null) => {
+  const s = setup(answer);
   s.view.set({ x: 0, y: 0, zoom: 1 });
   s.size.set([800, 600]);
   return s;
@@ -337,4 +337,125 @@ test("出生点、终点在不在地图里：按没有视差的层合起来算",
   expect(outsideMap(out)).toEqual(["终点在地图外面"]);
   const wide = { ...out, tiles: [level.tiles[0], { ...level.tiles[0], id: "left", x: -320 }] };
   expect(outsideMap(wide)).toEqual([]);
+});
+
+test("挪走地怪（拖、方向键、改 x / y、挪它的父节点）时路线点一起平移；撤销一起还原", () => {
+  const s = centered();
+  s.grid.set(0);
+  s.addAtCenter("walker");
+  const w = s.selection()[0];
+  s.addRoutePoint(w);
+  const pts = () => s.entity(w)!.points!;
+  const [px, py] = pts()[0];
+  // 属性面板改 x
+  s.setField(w, "x", String(s.entity(w)!.x + 50));
+  expect(pts()).toEqual([[px + 50, py]]);
+  s.undo();
+  expect(pts()).toEqual([[px, py]]);
+  // 方向键
+  s.selection.set([w]);
+  s.nudge(3, 0);
+  expect(pts()).toEqual([[px + 3, py]]);
+  s.undo();
+  // 画布上拖（拖的时候预览里也跟着）
+  const e = s.entity(w)!;
+  s.pointer("down", screen(e.x, e.y));
+  s.pointer("move", screen(e.x + 40, e.y));
+  expect(s.sceneInput().level.entities.find((x) => x.id === w)!.points).toEqual([[px + 40, py]]);
+  s.pointer("up", screen(e.x + 40, e.y));
+  expect(pts()).toEqual([[px + 40, py]]);
+  s.undo();
+  expect(pts()).toEqual([[px, py]]);
+  // 挪父节点
+  s.addAtCenter("group");
+  const g = s.selection()[0];
+  s.setField(w, "parent", g);
+  s.setField(g, "x", String(s.entity(g)!.x + 20));
+  expect(pts()).toEqual([[px + 20, py]]);
+  s.undo();
+  expect(pts()).toEqual([[px, py]]);
+});
+
+test("拖几行放进一个分组：不合规的（分组本身、它的祖先）跳过，别的照放，状态栏说跳过了几个；全不合规才不放", () => {
+  const s = centered();
+  s.addAtCenter("group");
+  const outer = s.selection()[0];
+  s.addAtCenter("group");
+  const inner = s.selection()[0];
+  s.setField(inner, "parent", outer);
+  s.addAtCenter("coin");
+  const coin = s.selection()[0];
+  // 选中金币和外层分组，拖到里层分组上：外层放不进（是里层的祖先），金币照放
+  s.selection.set([coin, outer]);
+  s.dropOn(coin, inner);
+  expect(s.entity(coin)!.parent).toBe(inner);
+  expect(s.entity(outer)!.parent).toBe(undefined);
+  expect(s.status()).toContain("跳过了 1 个");
+  // 只有不合规的：不放，说原因
+  s.selection.set([outer]);
+  s.dropOn(outer, inner);
+  expect(s.entity(outer)!.parent).toBe(undefined);
+  expect(s.status()).toContain("不能放进自己");
+});
+
+test("粘贴时父节点没一起复制：还是原来那个就留在它下面（删了又撤销回来也算）；id 被新东西重用过、换了关卡就放到最外层", async () => {
+  const s = centered("discard");
+  s.addAtCenter("group");
+  const g = s.selection()[0];
+  s.addAtCenter("coin");
+  const coin = s.selection()[0];
+  s.setField(coin, "parent", g);
+  s.selection.set([coin]);
+  s.copy();
+  // 原来那个分组还在：粘贴进同一个分组
+  s.paste();
+  expect(s.entity(s.selection()[0])!.parent).toBe(g);
+  s.undo();
+  // 删了分组又撤销回来（还是原来那个）：照样粘贴进去
+  s.selection.set([g]);
+  s.remove();
+  s.undo();
+  s.paste();
+  expect(s.entity(s.selection()[0])!.parent).toBe(g);
+  s.undo();
+  // 删了分组（金币一起删），新放一个平台拿到同一个 id：粘贴出来的不挂到平台下面
+  s.selection.set([g]);
+  s.remove();
+  s.addAtCenter("lift");
+  expect(s.selection()[0]).toBe(g);
+  s.paste();
+  expect(s.entity(s.selection()[0])!.parent).toBe(undefined);
+  // 换了关卡：放到最外层
+  await s.newLevel();
+  s.addAtCenter("group");
+  expect(s.selection()[0]).toBe(g);
+  s.paste();
+  expect(s.entity(s.selection()[0])!.parent).toBe(undefined);
+});
+
+test("试玩中新建、打开关卡：先停掉试玩，不把正在玩的换成另一关（起点还是旧关的）", async () => {
+  const s = centered("discard");
+  s.addAtCenter("coin");
+  s.play();
+  expect(s.playing()).not.toBe(null);
+  await s.newLevel();
+  expect(s.playing()).toBe(null);
+  expect(s.level().entities.length).toBe(3);
+});
+
+test("试玩热重载不合规以后又改好了：状态栏不再停在「先不更新」", () => {
+  const s = setup();
+  s.play();
+  s.selection.set(["e3"]);
+  s.remove();
+  expect(s.status()).toContain("试玩里先不更新");
+  s.undo();
+  expect(s.status()).not.toContain("先不更新");
+  expect(s.status()).toContain("试玩中");
+});
+
+test("所有层都有视差（没有挡人的地面）：不能试玩，说原因", () => {
+  const level = blankLevel();
+  const floating = { ...level, tiles: level.tiles.map((t) => ({ ...t, parallax: [0.5, 1] as [number, number] })) };
+  expect(outsideMap(floating)).toEqual(["没有挡人的瓦片层（都有视差）"]);
 });

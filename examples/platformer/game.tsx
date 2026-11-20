@@ -11,8 +11,8 @@ import { boardOf, leaderOf, nameTags, netLabel, netNode, netSetting, playerName,
 import { labAction, labScene, levelAfterLab } from "./lab";
 import { BIG_MAP, bigScene, digOf } from "./bigmap";
 import { GROVES, levelTransition, PREFABS, TEXTURES } from "./prefabs";
-import { campfireAt, finish, flagOn, HERO, JELLY_ZONE, jellyAt, LEVELS, TILE, TOWER_TRIGGER, towerAt, towerSpot, walkerSprites, type Built, type Progress } from "./levels";
-import { liveTiles, startLive } from "./live";
+import { campfireAt, coinsGot, finish, flagOn, HERO, JELLY_ZONE, jellyAt, LEVELS, TILE, TOWER_TRIGGER, towerAt, towerSpot, walkerSprites, type Built, type Progress } from "./levels";
+import { enemyTweenOf, followStep, liftTweenOf, restartFollow, startFollow } from "./live";
 
 /** Rust 发的事件：掉出关卡或被敌人撞到送回起点、按 R 重新开始、踩到敌人。 */
 interface Events {
@@ -168,34 +168,36 @@ export function Game(props: GameProps = {}) {
     http.post(url, { board: boardOf(level()), name, score: seconds }, { timeout: 5 }).then(fetchLeader);
   };
 
-  const liftTween = ({ node, to, duration }: Built["lifts"][number]) => tween(game, { id: node.id, to, duration, ease: "easeInOut", repeat: -1, yoyo: true });
-  const enemyTween = ({ id, to }: Built["enemies"][number]) => tween(game, { id, to, duration: 1.5, ease: "linear", repeat: -1, yoyo: true });
   // 在 levelStart 里发：平台、敌人已经建出来了
   const startTweens = () => {
-    now().lifts.forEach(liftTween);
-    now().enemies.forEach(enemyTween);
+    now().lifts.forEach((l) => tween(game, liftTweenOf(l)));
+    now().enemies.forEach((e) => tween(game, enemyTweenOf(e)));
   };
+  /** 热重载时整关重开前调：让重建时声明里就是现在的地图（见 `restartFollow`）。 */
+  let rebase: (() => void) | undefined;
   /**
    * 热重载：编辑器里的关卡变了，这一关就地更新。瓦片只发变了的格子（setTiles），声明留着最初的；
    * 角色的起点留着开始时的（不把正在玩的角色拉回去）；移动平台、巡逻的敌人路线变了的重新发补间。
    */
   const follow = (source: () => Trial) => {
     const first = untracked(source);
-    let maps = startLive(first.built.tilemaps);
-    let before = first.built;
+    let f = startFollow(first.built);
+    const show = (t: Trial) => live.set({ ...t, built: { ...t.built, tilemaps: f.maps.declared, spawn: first.built.spawn } });
+    rebase = () => {
+      f = restartFollow(f);
+      const shown = untracked(live);
+      if (shown !== null) show(shown);
+    };
     effect(() => {
       const next = source();
       untracked(() => {
-        const r = liveTiles(maps, next.built.tilemaps, !switching);
-        maps = r.maps;
+        const r = followStep(f, next.built, !switching);
+        f = r.follow;
         for (const e of r.edits) setTiles(game, e);
-        if (!switching) {
-          const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
-          next.built.lifts.filter((l) => !same(l, before.lifts.find((o) => o.node.id === l.node.id))).forEach(liftTween);
-          next.built.enemies.filter((e) => !same(e, before.enemies.find((o) => o.id === e.id))).forEach(enemyTween);
-        }
-        before = next.built;
-        live.set({ ...next, built: { ...next.built, tilemaps: maps.declared, spawn: first.built.spawn } });
+        show(next);
+        // 补间等场景声明发出去以后再发：新加的平台、敌人那时已经在引擎里了；中间换了关的不发
+        const round = current().round;
+        if (r.tweens.length > 0) setTimeout(() => current().round === round && r.tweens.forEach((t) => tween(game, t)), 0);
       });
     });
   };
@@ -220,6 +222,7 @@ export function Game(props: GameProps = {}) {
       // 上一关的名字不带到新关卡上：新关卡建好（levelStart）时再冒
       clearTimeout(titleEnd);
       title.set(null);
+      rebase?.();
       current.set({ index, round: current().round + 1 });
       leader.set(null);
     });
@@ -348,7 +351,7 @@ export function Game(props: GameProps = {}) {
       trial !== undefined ? "" : " · ",
       t("level", { n: level() + 1, name: levelName(level()) }),
       " · ",
-      t("coins", { got: taken().length, all: now().coins.length, count: now().coins.length }),
+      t("coins", { got: coinsGot(now().coins, taken()), all: now().coins.length, count: now().coins.length }),
       " · ",
       t("falls", { count: falls() }),
       best() === undefined ? "" : t("best", { seconds: best()! }),
