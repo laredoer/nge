@@ -1,5 +1,5 @@
 import { mount, type NativeComponentRef, safeArea, signal, Text, View } from "nsh";
-import { gameView, saved, shake, sound, type Pick3d } from "../../ts/nge";
+import { camera3dTrack, gameView, saved, shake, sound, type Pick3d } from "../../ts/nge";
 import { ATMOSPHERES, DEFAULT_QUALITY, RELICS, regionOf, SHRINES, SOUNDS, worldScene, type Fx3dPreset, type QualitySettings, type ShadingPreset, type ShrineInfo, type TimeOfDay, type ToneMapOption } from "./scene";
 import "whispering-isles/native";
 
@@ -28,7 +28,7 @@ const GameView = gameView<{}, { telemetry: Telemetry; interact: Interact }>({
 const CAPTURE_KEYS = [
   "Space", "ShiftLeft", "ShiftRight", "Enter", "Escape",
   "KeyW", "KeyA", "KeyS", "KeyD", "KeyQ", "KeyE", "KeyJ", "KeyL",
-  "KeyF", "KeyT", "KeyV", "KeyC", "KeyP", "KeyR", "KeyX",
+  "KeyF", "KeyT", "KeyV", "KeyC", "KeyP", "KeyR", "KeyX", "KeyO",
   "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight",
 ];
 
@@ -122,8 +122,30 @@ function App() {
     awakened.set(next);
     sound(gameRef, { src: SOUNDS.shrine, volume: 0.75 });
     shake(gameRef, { strength: 14, duration: 0.45 });
+    camera3dTrack(gameRef, {
+      tag: `shrine:${s.id}`,
+      returnDuration: 0.9,
+      keyframes: [
+        { pos: [s.x + 150, s.y + 95, s.z + 150], target: [s.x, s.y + 72, s.z], duration: 0.9, fov: 48, ease: "easeOut" },
+        { pos: [s.x - 165, s.y + 135, s.z + 120], target: [s.x, s.y + 96, s.z], duration: 1.5, fov: 50, ease: "easeInOut" },
+      ],
+    });
     const title = next.length === SHRINES.length ? `全部圣坛已共鸣 · ${s.name}` : `唤醒圣坛 · ${s.name} (${next.length}/${SHRINES.length})`;
     showToast(title, s.lore, 5500);
+  };
+
+  const playFlyover = () => {
+    sound(gameRef, { src: SOUNDS.time, volume: 0.4 });
+    showToast("3D 过场运镜预览", "正在沿关键帧轨道巡游风语群岛（按 Esc 可随时跳过）", 4500);
+    camera3dTrack(gameRef, {
+      tag: "flyover",
+      returnDuration: 1.0,
+      keyframes: [
+        { pos: [190, 140, 260], target: [0, 42, 160], duration: 1.1, fov: 52, ease: "easeInOut" },
+        { pos: [260, 220, -160], target: [0, 120, -480], duration: 1.8, fov: 54, ease: "easeInOut" },
+        { pos: [-210, 310, -520], target: [0, 220, -760], duration: 1.7, fov: 48, ease: "easeInOut" },
+      ],
+    });
   };
 
   const handleInteract = () => {
@@ -203,6 +225,8 @@ function App() {
           else if (e.code === "KeyP") toggleFlag("perf");
           else if (e.code === "KeyR") round.set(round() + 1);
           else if (e.code === "KeyX") shake(gameRef, { strength: 16, duration: 0.45 });
+          else if (e.code === "KeyO") playFlyover();
+          else if (e.code === "Escape") camera3dTrack(gameRef, { stop: true });
         }}
       />
       <Hud
@@ -219,6 +243,7 @@ function App() {
         onCycleFx3d={cycleFx3d}
         onToggleFlag={toggleFlag}
         onShake={() => shake(gameRef, { strength: 16, duration: 0.45 })}
+        onFlyover={playFlyover}
         onReset={resetProgress}
       />
     </View>
@@ -239,6 +264,7 @@ function Hud(props: {
   onCycleFx3d: () => void;
   onToggleFlag: (key: "ssao" | "fxaa" | "bloom" | "navDebug" | "perf") => void;
   onShake: () => void;
+  onFlyover: () => void;
   onReset: () => void;
 }) {
   const p = props.pos;
@@ -318,6 +344,9 @@ function Hud(props: {
             </View>
             <View class="px-2 py-1 rounded-lg bg-rose-500/35" onPress={props.onShake}>
               <Text class="text-rose-100 text-xs">震屏(X)</Text>
+            </View>
+            <View class="px-2 py-1 rounded-lg bg-indigo-500/40" onPress={props.onFlyover}>
+              <Text class="text-indigo-100 text-xs">运镜(O)</Text>
             </View>
           </View>
           <View class="flex-row items-center gap-1.5">

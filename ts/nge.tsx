@@ -1360,6 +1360,36 @@ export function shake(game: NativeComponentRef | undefined, args: Shake = {}) {
   game?.command("shake", args);
 }
 
+/** 3D 过场运镜的关键帧。 */
+export interface Camera3dKeyframe {
+  pos: [number, number, number];
+  target: [number, number, number];
+  /** 过渡秒数（首帧写 0 表示直接切入，>0 表示从当前相机平滑过渡）。 */
+  duration?: number;
+  /** 可选垂直视角（度）。 */
+  fov?: number;
+  ease?: "linear" | "easeIn" | "easeOut" | "easeInOut";
+}
+
+/** `camera3dTrack` 命令参数：播放一段 3D 运镜轨道或提前停止。 */
+export interface Camera3dTrack {
+  keyframes?: Camera3dKeyframe[];
+  tag?: string;
+  /** 播完后平滑归位到玩法相机的秒数（默认 0.6）。 */
+  returnDuration?: number;
+  stop?: boolean;
+}
+
+export interface Camera3dTrackEnd {
+  tag: string | null;
+  cancelled: boolean;
+}
+
+/** 播放 3D 过场运镜轨道（结束后自动平滑归位到当前 3D 相机）。 */
+export function camera3dTrack(game: NativeComponentRef | undefined, args: Camera3dTrack) {
+  game?.command("camera3dTrack", args);
+}
+
 export interface AnimEnd {
   id: string;
 }
@@ -1491,6 +1521,8 @@ interface BuiltinEvents {
   query3d: Query3dReply;
   /** 3D 屏幕拾取命中事件（`scene.pick3d`）。 */
   pick3d: Pick3d;
+  /** 3D 过场运镜轨道结束或被取消。 */
+  camera3dTrackEnd: Camera3dTrackEnd;
   dropThrough: DropThroughEvent;
   /** 性能汇总（`scene.perf.events`）。 */
   perf: PerfEvent;
@@ -1506,14 +1538,14 @@ export type GameViewProps<P, E> = NativeComponentProps<Partial<BuiltinProps> & P
 
 /**
  * 生成游戏视图组件。`props` / `events` 是游戏自己的通道名（Rust 侧 `add_prop` / `add_state` / `add_event`），
- * 类型由泛型给出；内置 prop `scene` / `actions`、事件 `tap` / `collide` / `animEnd` / `animEvent` / `tweenEnd` / `key` / `action` / `pad` / `levelStart` / `chase` / `behavior` / `typed` / `fps` / `error` / `ready` / `net` / `http` / `query3d` / `pick3d` / `dropThrough` / `preload` / `transition`，触摸自动转成引擎的 `touch` command。
+ * 类型由泛型给出；内置 prop `scene` / `actions`、事件 `tap` / `collide` / `animEnd` / `animEvent` / `tweenEnd` / `key` / `action` / `pad` / `levelStart` / `chase` / `behavior` / `typed` / `fps` / `error` / `ready` / `net` / `http` / `query3d` / `pick3d` / `camera3dTrackEnd` / `dropThrough` / `preload` / `transition`，触摸自动转成引擎的 `touch` command。
  */
 export function gameView<P extends object = {}, E extends object = {}>(
   spec: { props?: readonly (keyof P & string)[]; events?: readonly (keyof E & string)[] } = {},
 ) {
   const Native = nativeComponent<BuiltinProps & P, BuiltinEvents & E>("nge.game", {
     props: [...new Set(["scene", "captureKeys", "actions", "screenOrientation", ...(spec.props ?? [])])] as (keyof (BuiltinProps & P) & string)[],
-    events: [...new Set(["tap", "collide", "animEnd", "animEvent", "tweenEnd", "key", "action", "pad", "levelStart", "chase", "behavior", "typed", "fps", "error", "ready", "net", "http", "query3d", "pick3d", "dropThrough", "preload", "transition", ...(spec.events ?? [])])] as (keyof (BuiltinEvents & E) & string)[],
+    events: [...new Set(["tap", "collide", "animEnd", "animEvent", "tweenEnd", "key", "action", "pad", "levelStart", "chase", "behavior", "typed", "fps", "error", "ready", "net", "http", "query3d", "pick3d", "camera3dTrackEnd", "dropThrough", "preload", "transition", ...(spec.events ?? [])])] as (keyof (BuiltinEvents & E) & string)[],
   });
 
   return (props: GameViewProps<P, E>) => {
