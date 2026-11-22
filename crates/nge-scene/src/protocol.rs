@@ -69,6 +69,9 @@ pub struct Scene {
     /// 3D 导航网格（从地形模型与静态碰撞体自动构建）。
     #[serde(deserialize_with = "crate::lenient::navmesh3d")]
     pub navmesh3d: Option<crate::nav3d::NavMesh3dNode>,
+    /// 3D 屏幕拾取（鼠标/触控点击自动打物理射线并发 `pick3d` 事件）。
+    #[serde(deserialize_with = "crate::lenient::pick3d")]
+    pub pick3d: Option<crate::pick3d::Pick3dNode>,
     /// 进度条（见 docs/world-ui.md）。
     #[serde(deserialize_with = "crate::lenient::bars")]
     pub bars: Vec<crate::world_ui::BarNode>,

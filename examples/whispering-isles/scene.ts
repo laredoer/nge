@@ -3,7 +3,7 @@ import type { BarNode, BubbleNode, Decal3dNode, Emitter3dNode, Joint3dNode, Ligh
 import world from "./world.json";
 
 export type TimeOfDay = 0 | 1 | 2 | 3; // 0 晨曦 · 1 晴空 · 2 暮霞 · 3 星夜
-export type ToneMapOption = "agx" | "aces" | "reinhard" | "none";
+export type ToneMapOption = "aces" | "reinhard" | "none";
 export type ShadingPreset = "stylized" | "toon" | "raw";
 export type Fx3dPreset = "aura" | "holo" | "off";
 
@@ -19,7 +19,7 @@ export interface QualitySettings {
 }
 
 export const DEFAULT_QUALITY: QualitySettings = {
-  tonemap: "agx",
+  tonemap: "aces",
   ssao: true,
   fxaa: true,
   bloom: true,
@@ -150,6 +150,7 @@ export function worldScene(
   tod: TimeOfDay,
   round: number,
   quality: QualitySettings = DEFAULT_QUALITY,
+  beacon: [number, number, number] | null = null,
 ): Scene {
   const atmo = ATMOSPHERES[tod];
   const solidStyle = quality.shading === "toon" ? "toon" : "pbr";
@@ -203,7 +204,7 @@ export function worldScene(
         ? { shader: quality.fx3d, params: quality.fx3d === "aura" ? [0.45, 1.6, 2.0, 1.5] : [0.3, 1.0, 1.6, 1.3] }
         : {}),
     },
-    // 3D 导航寻路实战 1：跟随探索者的风灵伙伴（沿 3D NavMesh 自动爬坡、绕开树干/巨石/圣坛）
+    // 3D 导航寻路实战 1：平时跟随探索者，左键点击地面后自动沿 3D NavMesh 飞往标点侦察
     {
       id: "wind-wisp",
       model: "asset:/@whispering-isles/wisp.glb",
@@ -211,7 +212,9 @@ export function worldScene(
       y: world.spawn.y + 18,
       z: world.spawn.z + 24,
       animation: { clip: "float", loop: true },
-      nav: { follow: "explorer", speed: 155, minDistance: 46, hover: 24, turnSpeed: 8 },
+      nav: beacon
+        ? { target: beacon, speed: 195, arrive: 18, hover: 24, turnSpeed: 10 }
+        : { follow: "explorer", speed: 155, minDistance: 46, hover: 24, turnSpeed: 8 },
       trail: { lifetime: 0.45, width: [5.5, 0], color: ["#48f5ffff", "#48f5ff00"], minDistance: 4, blend: "add" },
       ...(quality.fx3d !== "off"
         ? { shader: quality.fx3d, params: [0.35, 1.5, 1.9, 1.35] }
@@ -508,6 +511,7 @@ export function worldScene(
     ssao: { enabled: quality.ssao, intensity: 0.55, radius: 0.02 },
     shaders3d: CUSTOM_SHADERS_3D,
     navmesh3d: { surface: "terrain", maxSlope: 48, minY: -8, agentRadius: 14, debug: quality.navDebug },
+    pick3d: { exclude: "explorer", maxDistance: 3500 },
     post,
     physics3d: { gravity: [0, -981, 0] },
     audio: { preload: Object.values(SOUNDS) },
@@ -537,9 +541,12 @@ export function worldScene(
         typing: 16,
       } satisfies BubbleNode,
     ],
-    // 3D 贴地光环与法阵实战：探索者脚底风灵光环 + 5 座圣坛脚下旋转古代符文法阵 + 浮空风灵脚底接触影
+    // 3D 贴地光环与法阵实战：探索者脚底风灵光环 + 5 座圣坛脚下旋转古代符文法阵 + 浮空风灵脚底接触影 + 点击地面扩散波纹标点
     decals3d: [
       { id: "hero-ring", kind: "ring", follow: "explorer", size: 46, color: "#48f5ffaa", spin: 28, pulse: 0.08, lift: 2.5 } satisfies Decal3dNode,
+      ...(beacon
+        ? [{ id: "pick-beacon", kind: "pulse", x: beacon[0], y: beacon[1], z: beacon[2], size: 58, color: "#ffe45eee", spin: 42, pulse: 0.16, lift: 3.0 } satisfies Decal3dNode]
+        : []),
       { id: "wisp-shadow", kind: "shadow", follow: "wind-wisp", size: 28, lift: 2.0 } satisfies Decal3dNode,
       { id: "sentinel-shadow", kind: "shadow", follow: "camp-sentinel", size: 34, lift: 2.0 } satisfies Decal3dNode,
       ...SHRINES.map((s): Decal3dNode => {

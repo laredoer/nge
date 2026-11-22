@@ -1,5 +1,5 @@
 import { mount, type NativeComponentRef, safeArea, signal, Text, View } from "nsh";
-import { gameView, saved, shake, sound } from "../../ts/nge";
+import { gameView, saved, shake, sound, type Pick3d } from "../../ts/nge";
 import { ATMOSPHERES, DEFAULT_QUALITY, RELICS, regionOf, SHRINES, SOUNDS, worldScene, type Fx3dPreset, type QualitySettings, type ShadingPreset, type ShrineInfo, type TimeOfDay, type ToneMapOption } from "./scene";
 import "whispering-isles/native";
 
@@ -53,6 +53,7 @@ function App() {
   const tod = signal<TimeOfDay>(0);
   const round = signal(1);
   const quality = signal<QualitySettings>({ ...DEFAULT_QUALITY });
+  const beacon = signal<[number, number, number] | null>(null);
   const toast = signal<{ title: string; body: string } | null>(null);
   const pos = signal<Telemetry>({
     x: 0,
@@ -104,9 +105,14 @@ function App() {
     }
   };
 
-  const handleInteract = () => {
-    const s = nearbyShrine();
-    if (!s) return;
+  let beaconTimer: ReturnType<typeof setTimeout> | undefined;
+  const dropBeacon = (pt: [number, number, number], ms = 7000) => {
+    beacon.set(pt);
+    if (beaconTimer) clearTimeout(beaconTimer);
+    beaconTimer = setTimeout(() => beacon.set(null), ms);
+  };
+
+  const interactShrine = (s: ShrineInfo) => {
     const cur = awakened();
     if (cur.includes(s.id)) {
       showToast(s.name, s.lore, 4500);
@@ -118,6 +124,31 @@ function App() {
     shake(gameRef, { strength: 14, duration: 0.45 });
     const title = next.length === SHRINES.length ? `全部圣坛已共鸣 · ${s.name}` : `唤醒圣坛 · ${s.name} (${next.length}/${SHRINES.length})`;
     showToast(title, s.lore, 5500);
+  };
+
+  const handleInteract = () => {
+    const s = nearbyShrine();
+    if (s) interactShrine(s);
+  };
+
+  const handlePick3d = (e: Pick3d) => {
+    const shrine = e.id ? SHRINES.find((s) => s.id === e.id) : undefined;
+    if (shrine) {
+      const p = pos();
+      const dist = Math.round(Math.hypot(shrine.x - p.x, shrine.z - p.z));
+      dropBeacon([shrine.x, shrine.y, shrine.z]);
+      if (dist <= 260 || awakened().includes(shrine.id)) {
+        interactShrine(shrine);
+      } else {
+        sound(gameRef, { src: SOUNDS.time, volume: 0.35 });
+        showToast(`远眺圣坛 · ${shrine.name}（距 ${dist}m）`, "已派风灵飞往圣坛标点，靠近后可唤醒或点击互动。", 3200);
+      }
+      return;
+    }
+    dropBeacon(e.point);
+    sound(gameRef, { src: SOUNDS.time, volume: 0.25 });
+    const targetName = e.id && e.id !== "terrain" ? `「${e.id}」` : "地面标点";
+    showToast("风灵前往侦察", `已点击 ${targetName} (${Math.round(e.point[0])}, ${Math.round(e.point[1])}, ${Math.round(e.point[2])})`, 2200);
   };
 
   const cycleTime = () => {
@@ -134,7 +165,7 @@ function App() {
   };
 
   const cycleToneMap = () => {
-    const order: ToneMapOption[] = ["agx", "aces", "reinhard", "none"];
+    const order: ToneMapOption[] = ["aces", "reinhard", "none"];
     const cur = quality();
     const next = order[(order.indexOf(cur.tonemap) + 1) % order.length];
     quality.set({ ...cur, tonemap: next });
@@ -162,9 +193,10 @@ function App() {
         class="flex-1"
         ref={(n: NativeComponentRef) => (gameRef = n)}
         captureKeys={CAPTURE_KEYS}
-        scene={worldScene(new Set(awakened()), new Set(collected()), tod(), round(), quality())}
+        scene={worldScene(new Set(awakened()), new Set(collected()), tod(), round(), quality(), beacon())}
         onTelemetry={handleTelemetry}
         onInteract={handleInteract}
+        onPick3d={handlePick3d}
         onKey={(e) => {
           if (!e.down || e.repeat) return;
           if (e.code === "KeyT") cycleTime();
@@ -362,7 +394,7 @@ function Hud(props: {
 
       {/* 底部操作说明 */}
       <View class="absolute bottom-3 left-0 right-0 items-center" style={{ pointerEvents: "none" }}>
-        <Text class="text-white/65 text-xs">WASD 移动 · Q/E 旋转视角 · Space 跳跃 / 空中按住滑翔 · Shift 冲刺 · F 唤醒圣坛 · T 切换昼夜 · V 视角远近</Text>
+        <Text class="text-white/65 text-xs">WASD 移动 · Q/E 旋转视角 · Space 跳跃/滑翔 · 左键点击地面引导风灵/点击圣坛互动 · F 交互 · T 昼夜 · V 视角</Text>
       </View>
     </View>
   );

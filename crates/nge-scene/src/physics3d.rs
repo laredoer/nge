@@ -33,7 +33,9 @@ pub(crate) fn register(app: &mut nge_ecs::App) {
         .add_systems(PostUpdate, crate::joints3d::resolve.before(Physics3dStepped))
         .add_command(crate::query3d::QUERY3D)
         .add_event(crate::query3d::QUERY3D_RESULT)
-        .add_systems(PostUpdate, (collide, crate::query3d::answer.before(Physics3dDebugDraw)).after(Physics3dStepped));
+        .add_event(crate::pick3d::PICK3D)
+        .add_systems(PostUpdate, (collide, crate::query3d::answer.before(Physics3dDebugDraw)).after(Physics3dStepped))
+        .add_systems(PostUpdate, crate::pick3d::pick3d.after(Physics3dStepped).after(crate::camera3d_rig::Camera3dRigUpdated));
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]

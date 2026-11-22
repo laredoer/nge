@@ -76,6 +76,26 @@ impl Camera3d {
         }
     }
 
+    /// 把屏幕坐标（左上角原点，y 朝下，单位与 `viewport` 一致）转成世界空间射线 `(origin, dir)`；
+    /// `origin` 落在近平面上，`dir` 为单位方向向量；同时支持透视与正交相机。
+    pub fn screen_to_ray(&self, transform: &Transform3d, screen_pos: glam::Vec2, viewport: glam::Vec2) -> Option<(Vec3, Vec3)> {
+        if !(viewport.x > 0.0 && viewport.y > 0.0 && viewport.is_finite() && screen_pos.is_finite()) {
+            return None;
+        }
+        let inv = self.view_proj(transform, viewport.x / viewport.y).inverse();
+        if !inv.is_finite() {
+            return None;
+        }
+        let ndc = glam::Vec2::new(screen_pos.x / viewport.x * 2.0 - 1.0, 1.0 - screen_pos.y / viewport.y * 2.0);
+        let near = inv.project_point3(ndc.extend(0.0));
+        let far = inv.project_point3(ndc.extend(1.0));
+        if !(near.is_finite() && far.is_finite()) {
+            return None;
+        }
+        let dir = (far - near).normalize_or_zero();
+        (dir != Vec3::ZERO).then_some((near, dir))
+    }
+
     pub(crate) fn ortho_height(&self) -> Option<f32> {
         self.ortho.filter(|h| h.is_finite() && *h > 0.0)
     }
@@ -171,5 +191,24 @@ mod tests {
         let iso = Transform3d::from_xyz(10.0, 10.0, 10.0).looking_at(Vec3::ZERO, Vec3::Y);
         let dir = Camera3d { ortho: Some(10.0), ..Camera3d::default() }.eye(&iso);
         assert!((dir - Vec3::ONE.normalize().extend(0.0)).length() < 1e-5, "{dir}");
+    }
+
+    #[test]
+    fn screen_to_ray_projects_center_and_corners_for_perspective_and_ortho() {
+        let vp = glam::Vec2::new(200.0, 100.0);
+        let cam = Camera3d::default();
+        let t = Transform3d::from_xyz(0.0, 2.0, 10.0).looking_at(Vec3::new(0.0, 2.0, 0.0), Vec3::Y);
+        let (orig, dir) = cam.screen_to_ray(&t, glam::Vec2::new(100.0, 50.0), vp).unwrap();
+        assert!((orig - Vec3::new(0.0, 2.0, 9.9)).length() < 1e-3, "{orig}");
+        assert!((dir - Vec3::NEG_Z).length() < 1e-4, "{dir}");
+        // 右上角屏幕点（x 偏大、y 偏小）射线应朝右上方
+        let (_, ur) = cam.screen_to_ray(&t, glam::Vec2::new(180.0, 10.0), vp).unwrap();
+        assert!(ur.x > 0.0 && ur.y > 0.0 && ur.z < 0.0, "{ur}");
+        // 正交相机边缘射线方向仍平行于 -Z，起点偏移到对应世界坐标
+        let ortho = Camera3d { ortho: Some(100.0), ..Camera3d::default() };
+        let (o_orig, o_dir) = ortho.screen_to_ray(&t, glam::Vec2::new(200.0, 0.0), vp).unwrap();
+        assert!((o_dir - Vec3::NEG_Z).length() < 1e-4, "{o_dir}");
+        assert!((o_orig.x - 100.0).abs() < 1e-3 && (o_orig.y - 52.0).abs() < 1e-3, "{o_orig}");
+        assert!(cam.screen_to_ray(&t, glam::Vec2::ZERO, glam::Vec2::ZERO).is_none());
     }
 }

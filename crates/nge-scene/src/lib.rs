@@ -30,6 +30,8 @@ mod particles3d;
 mod nodes;
 mod physics;
 mod physics3d;
+#[cfg_attr(not(feature = "physics3d"), allow(dead_code))]
+mod pick3d;
 mod prefab;
 mod preload;
 mod protocol;
@@ -84,6 +86,7 @@ pub use nodes::{AmbientNode, AnchorName, BURST, Burst, Camera3dNode, EmitterNode
 pub use net::{NetNode, REMOTE_PREFIX, parse_remote};
 pub use physics::{BodyKind, BodyNode, COLLIDE, Collide, DROP_THROUGH, DROPPED, DropThrough, Dropped, PUSH, PhysicsNode, Push, ShapeName};
 pub use physics3d::{Body3dKind, ModelBody, Physics3dNode, Shape3dName};
+pub use pick3d::{PICK3D, Pick3d, Pick3dNode};
 pub use query3d::{Hit3d, QUERY3D, QUERY3D_RESULT, Query3d, Query3dCommand, Query3dKind, Query3dResult, Shape3dQuery};
 pub use prefab::{InstanceNode, SceneFile};
 pub use preload::{Failed, PRELOAD, PRELOADED, Preload, PreloadProgress};

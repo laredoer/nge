@@ -101,7 +101,7 @@ lenient!(
     background => "background", camera => "camera", camera3d => "camera3d", ambient => "ambient", physics => "physics",
     physics3d => "physics3d", lighting => "lighting", audio => "audio", time_scale => "timeScale", perf => "perf",
     net => "net", bounds => "camera.bounds", behavior => "sprites.behavior", transition => "transition",
-    sky => "sky", fog => "fog", shadows => "shadows", tonemap => "tonemap", ssao => "ssao", navmesh3d => "navmesh3d", shadow_priority => "lights.shadowPriority", tile_chunk => "tilemaps.chunk"
+    sky => "sky", fog => "fog", shadows => "shadows", tonemap => "tonemap", ssao => "ssao", navmesh3d => "navmesh3d", pick3d => "pick3d", shadow_priority => "lights.shadowPriority", tile_chunk => "tilemaps.chunk"
 );
 
 /// 逐字段解析的对象：`get` 一个字段，写错的 warn 后当没写。
