@@ -957,6 +957,8 @@ export interface Scene {
   navmesh3d?: NavMesh3dNode;
   /** 3D 屏幕拾取：鼠标/触控点击自动打物理射线并发 `pick3d` 事件（可写 `true` 或过滤对象）。 */
   pick3d?: boolean | Pick3dNode;
+  /** 3D 区域触发器（球形/盒形体积感应，进出自动派发 `zone3d` 事件）。 */
+  zones3d?: Zone3dNode[];
   joints?: JointNode[];
   /** 3D 关节。 */
   joints3d?: Joint3dNode[];
@@ -1116,6 +1118,31 @@ export interface Pick3d {
   normal: [number, number, number];
   distance: number;
   screen: [number, number];
+}
+
+/** `scene.zones3d`：3D 球形或盒形区域触发器。 */
+export interface Zone3dNode {
+  id: string;
+  /** 形状："sphere"（默认）| "box"。 */
+  shape?: "sphere" | "box";
+  x?: number;
+  y?: number;
+  z?: number;
+  /** 球形触发区半径（默认 80）。 */
+  r?: number;
+  /** 盒形触发区全尺寸 `[w, h, d]`（默认 `[100, 100, 100]`）。 */
+  size?: [number, number, number];
+  /** 仅监听这些 3D 模型 id；不写时监听所有已声明模型。 */
+  watch?: string[];
+  /** 是否用 3D 线框显示触发区边界（默认 false）。 */
+  debug?: boolean;
+}
+
+/** `zone3d` 事件：3D 模型进入或离开触发区。 */
+export interface Zone3dEvent {
+  zone: string;
+  model: string;
+  entered: boolean;
 }
 
 /** 点中了可点击的精灵或模型。x / y 是指针的 2D 世界坐标；点中模型时 point 是 3D 命中点。 */
@@ -1523,6 +1550,8 @@ interface BuiltinEvents {
   pick3d: Pick3d;
   /** 3D 过场运镜轨道结束或被取消。 */
   camera3dTrackEnd: Camera3dTrackEnd;
+  /** 3D 区域触发器进出事件（`scene.zones3d`）。 */
+  zone3d: Zone3dEvent;
   dropThrough: DropThroughEvent;
   /** 性能汇总（`scene.perf.events`）。 */
   perf: PerfEvent;
@@ -1538,14 +1567,14 @@ export type GameViewProps<P, E> = NativeComponentProps<Partial<BuiltinProps> & P
 
 /**
  * 生成游戏视图组件。`props` / `events` 是游戏自己的通道名（Rust 侧 `add_prop` / `add_state` / `add_event`），
- * 类型由泛型给出；内置 prop `scene` / `actions`、事件 `tap` / `collide` / `animEnd` / `animEvent` / `tweenEnd` / `key` / `action` / `pad` / `levelStart` / `chase` / `behavior` / `typed` / `fps` / `error` / `ready` / `net` / `http` / `query3d` / `pick3d` / `camera3dTrackEnd` / `dropThrough` / `preload` / `transition`，触摸自动转成引擎的 `touch` command。
+ * 类型由泛型给出；内置 prop `scene` / `actions`、事件 `tap` / `collide` / `animEnd` / `animEvent` / `tweenEnd` / `key` / `action` / `pad` / `levelStart` / `chase` / `behavior` / `typed` / `fps` / `error` / `ready` / `net` / `http` / `query3d` / `pick3d` / `camera3dTrackEnd` / `zone3d` / `dropThrough` / `preload` / `transition`，触摸自动转成引擎的 `touch` command。
  */
 export function gameView<P extends object = {}, E extends object = {}>(
   spec: { props?: readonly (keyof P & string)[]; events?: readonly (keyof E & string)[] } = {},
 ) {
   const Native = nativeComponent<BuiltinProps & P, BuiltinEvents & E>("nge.game", {
     props: [...new Set(["scene", "captureKeys", "actions", "screenOrientation", ...(spec.props ?? [])])] as (keyof (BuiltinProps & P) & string)[],
-    events: [...new Set(["tap", "collide", "animEnd", "animEvent", "tweenEnd", "key", "action", "pad", "levelStart", "chase", "behavior", "typed", "fps", "error", "ready", "net", "http", "query3d", "pick3d", "camera3dTrackEnd", "dropThrough", "preload", "transition", ...(spec.events ?? [])])] as (keyof (BuiltinEvents & E) & string)[],
+    events: [...new Set(["tap", "collide", "animEnd", "animEvent", "tweenEnd", "key", "action", "pad", "levelStart", "chase", "behavior", "typed", "fps", "error", "ready", "net", "http", "query3d", "pick3d", "camera3dTrackEnd", "zone3d", "dropThrough", "preload", "transition", ...(spec.events ?? [])])] as (keyof (BuiltinEvents & E) & string)[],
   });
 
   return (props: GameViewProps<P, E>) => {

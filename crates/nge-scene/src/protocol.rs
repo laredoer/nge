@@ -72,6 +72,9 @@ pub struct Scene {
     /// 3D 屏幕拾取（鼠标/触控点击自动打物理射线并发 `pick3d` 事件）。
     #[serde(deserialize_with = "crate::lenient::pick3d")]
     pub pick3d: Option<crate::pick3d::Pick3dNode>,
+    /// 3D 区域触发器（球形/盒形体积感应，进出派发 `zone3d` 事件）。
+    #[serde(deserialize_with = "crate::lenient::zones3d")]
+    pub zones3d: Vec<crate::zones3d::Zone3dNode>,
     /// 进度条（见 docs/world-ui.md）。
     #[serde(deserialize_with = "crate::lenient::bars")]
     pub bars: Vec<crate::world_ui::BarNode>,

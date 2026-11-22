@@ -1,6 +1,6 @@
 import { mount, type NativeComponentRef, safeArea, signal, Text, View } from "nsh";
-import { camera3dTrack, gameView, saved, shake, sound, type Pick3d } from "../../ts/nge";
-import { ATMOSPHERES, DEFAULT_QUALITY, RELICS, regionOf, SHRINES, SOUNDS, worldScene, type Fx3dPreset, type QualitySettings, type ShadingPreset, type ShrineInfo, type TimeOfDay, type ToneMapOption } from "./scene";
+import { camera3dTrack, gameView, saved, shake, sound, type Pick3d, type Zone3dEvent } from "../../ts/nge";
+import { ATMOSPHERES, DEFAULT_QUALITY, REGIONS, RELICS, regionOf, SHRINES, SOUNDS, worldScene, type Fx3dPreset, type QualitySettings, type ShadingPreset, type ShrineInfo, type TimeOfDay, type ToneMapOption } from "./scene";
 import "whispering-isles/native";
 
 interface Telemetry {
@@ -54,7 +54,9 @@ function App() {
   const round = signal(1);
   const quality = signal<QualitySettings>({ ...DEFAULT_QUALITY });
   const beacon = signal<[number, number, number] | null>(null);
+  const shrineZone = signal<ShrineInfo | null>(null);
   const toast = signal<{ title: string; body: string } | null>(null);
+  let initialCampSeen = false;
   const pos = signal<Telemetry>({
     x: 0,
     y: 56,
@@ -74,18 +76,24 @@ function App() {
     toastTimer = setTimeout(() => toast.set(null), ms);
   };
 
-  const nearbyShrine = (): ShrineInfo | null => {
-    const p = pos();
-    let best: ShrineInfo | null = null;
-    let bestDist = 115;
-    for (const s of SHRINES) {
-      const d = Math.hypot(s.x - p.x, s.z - p.z);
-      if (d < bestDist && Math.abs(s.y - p.y) < 95) {
-        bestDist = d;
-        best = s;
-      }
+  const nearbyShrine = (): ShrineInfo | null => shrineZone();
+
+  const handleZone3d = (e: Zone3dEvent) => {
+    if (e.zone.startsWith("shrine-zone-")) {
+      const sid = e.zone.slice("shrine-zone-".length);
+      const s = SHRINES.find((item) => item.id === sid) ?? null;
+      if (e.entered) shrineZone.set(s);
+      else if (shrineZone()?.id === sid) shrineZone.set(null);
+      return;
     }
-    return best;
+    if (e.entered && e.zone.startsWith("region-")) {
+      if (e.zone === "region-camp" && !initialCampSeen) {
+        initialCampSeen = true;
+        return;
+      }
+      const r = REGIONS.find((item) => item.id === e.zone);
+      if (r) showToast(`踏入 · ${r.name}`, r.desc, 2800);
+    }
   };
 
   const handleTelemetry = (t: Telemetry) => {
@@ -219,6 +227,7 @@ function App() {
         onTelemetry={handleTelemetry}
         onInteract={handleInteract}
         onPick3d={handlePick3d}
+        onZone3d={handleZone3d}
         onKey={(e) => {
           if (!e.down || e.repeat) return;
           if (e.code === "KeyT") cycleTime();

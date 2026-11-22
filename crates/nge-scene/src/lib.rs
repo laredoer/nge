@@ -54,6 +54,7 @@ mod tile_chunks_tests;
 mod tile_perf_tests;
 mod transition;
 mod world_ui;
+mod zones3d;
 
 use std::collections::HashMap;
 
@@ -98,6 +99,7 @@ pub use sync::SceneId;
 pub use scene_perf::{PERF, PerfEvent, PerfEvents, PerfNode};
 pub use tile_chunks::{SET_TILES, SetTiles};
 pub use tilemap::TilemapNode;
+pub use zones3d::{ZONE3D, Zone3dEvent, Zone3dNode, Zone3dShape};
 
 /// 注册 `scene` prop、`tap` 等事件、`burst` / `floatText` / `push` / `sound` / `tween` / `shake` command 和命名纹理。
 /// 要在 `Render3dPlugin`、`Render2dPlugin` 之后添加（先 3D 后 2D，否则模型会盖住精灵）；没加 `ParticlePlugin` / `TextPlugin` / `PhysicsPlugin` / `AudioPlugin` 时自己补上。
@@ -251,8 +253,10 @@ impl Plugin for ScenePlugin {
             .init_resource::<camera3d_rig::Camera3dRig>()
             .init_resource::<camera3d_track::Camera3dTrackState>()
             .init_resource::<decals3d::DecalTextures>()
+            .init_resource::<zones3d::Zones3dState>()
             .add_command(camera3d_track::CAMERA3D_TRACK)
             .add_event(camera3d_track::CAMERA3D_TRACK_END)
+            .add_event(zones3d::ZONE3D)
             .add_command(PRELOAD)
             .add_event(PRELOADED)
             .add_event(TRANSITION)
@@ -302,7 +306,7 @@ impl Plugin for ScenePlugin {
                     .before(nge_audio::AudioUpdated),
             )
             .add_systems(PostUpdate, (camera3d_rig::camera3d_rig, camera3d_track::step_camera3d_track).chain().in_set(camera3d_rig::Camera3dRigUpdated).after(PhysicsStepped).after(nge_physics3d::Physics3dStepped).after(attach::attach).after(nge_render3d::SocketsUpdated).before(behave::follow))
-            .add_systems(PostUpdate, decals3d::draw_decals3d.after(PhysicsStepped).after(nge_physics3d::Physics3dStepped).after(attach::attach).after(nge_render3d::SocketsUpdated))
+            .add_systems(PostUpdate, (decals3d::draw_decals3d, zones3d::check_zones3d).after(PhysicsStepped).after(nge_physics3d::Physics3dStepped).after(attach::attach).after(nge_render3d::SocketsUpdated))
             .add_systems(PostUpdate, (behave::follow, physics::collide.after(PhysicsStepped), audio::listen.after(camera::camera_rig).before(nge_audio::AudioUpdated), camera::camera_rig.after(PhysicsStepped), match2d::match_2d.after(camera::camera_rig)));
     }
 }

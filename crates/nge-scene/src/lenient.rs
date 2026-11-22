@@ -94,7 +94,7 @@ macro_rules! lenient {
 
 lenient!(
     sprites => "sprites", tilemaps => "tilemaps", texts => "texts", emitters => "emitters", models => "models",
-    emitters3d => "emitters3d", decals3d => "decals3d", lights => "lights", bars => "bars", bubbles => "bubbles", joints => "joints",
+    emitters3d => "emitters3d", decals3d => "decals3d", zones3d => "zones3d", lights => "lights", bars => "bars", bubbles => "bubbles", joints => "joints",
     joints3d => "joints3d", post => "post", lighting_lights => "lighting.lights", tile_slopes => "tilemaps.slopes",
     tile_animated => "tilemaps.animated", tile_materials => "tilemaps.materials", instances => "instances",
     set_tiles => "setTiles.tiles", audio_effects => "audio.buses 的 effects", audio_emitters => "audio.emitters";

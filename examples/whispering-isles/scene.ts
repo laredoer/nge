@@ -1,5 +1,5 @@
 // 风语群岛 3D 开放世界场景声明：动态昼夜天空、PCSS 级联软阴影、地形 trimesh、物理遗迹门、浮空石台与 3D 粒子。
-import type { BarNode, BubbleNode, Decal3dNode, Emitter3dNode, Joint3dNode, LightNode, ModelNode, PostNode, Scene, SkyNode, FogNode } from "../../ts/nge";
+import type { BarNode, BubbleNode, Decal3dNode, Emitter3dNode, Joint3dNode, LightNode, ModelNode, PostNode, Scene, SkyNode, FogNode, Zone3dNode } from "../../ts/nge";
 import world from "./world.json";
 
 export type TimeOfDay = 0 | 1 | 2 | 3; // 0 晨曦 · 1 晴空 · 2 暮霞 · 3 星夜
@@ -65,6 +65,24 @@ export interface RelicInfo {
   y: number;
   z: number;
 }
+
+export interface RegionInfo {
+  id: string;
+  name: string;
+  desc: string;
+  x: number;
+  y: number;
+  z: number;
+  r: number;
+}
+
+export const REGIONS: RegionInfo[] = [
+  { id: "region-camp", name: "晨曦营地", desc: "温暖的篝火与探索起点，通向四方群岛。", x: 0, y: 30, z: 220, r: 220 },
+  { id: "region-forest", name: "翡翠松林", desc: "古松参天，林间萤火在风中轻舞。", x: -580, y: 55, z: -260, r: 340 },
+  { id: "region-ruins", name: "风蚀石林遗迹", desc: "昔日浮空城邦的石拱门与可推开的木门仍矗立于此。", x: 540, y: 78, z: -320, r: 270 },
+  { id: "region-cove", name: "晶蓝湖湾", desc: "碧蓝浅湾与金色沙滩环绕着湖畔圣坛。", x: -440, y: 0, z: 440, r: 300 },
+  { id: "region-summit", name: "星穹峰顶", desc: "群岛最高点，跃入云海张开滑翔伞可俯瞰全景。", x: 0, y: 214, z: -760, r: 310 },
+];
 
 export const SHRINES: ShrineInfo[] = world.shrines;
 export const RELICS: RelicInfo[] = world.relics;
@@ -512,6 +530,28 @@ export function worldScene(
     shaders3d: CUSTOM_SHADERS_3D,
     navmesh3d: { surface: "terrain", maxSlope: 48, minY: -8, agentRadius: 14, debug: quality.navDebug },
     pick3d: { exclude: "explorer", maxDistance: 3500 },
+    // 3D 区域触发器实战：5 大生态区域踏入感应 + 5 座圣坛交互感应圈（开启导航调试线时同步可视化边界）
+    zones3d: [
+      ...REGIONS.map((r): Zone3dNode => ({
+        id: r.id,
+        shape: "sphere",
+        x: r.x,
+        y: r.y,
+        z: r.z,
+        r: r.r,
+        watch: ["explorer"],
+      })),
+      ...SHRINES.map((s): Zone3dNode => ({
+        id: `shrine-zone-${s.id}`,
+        shape: "sphere",
+        x: s.x,
+        y: s.y + 15,
+        z: s.z,
+        r: 120,
+        watch: ["explorer"],
+        debug: quality.navDebug,
+      })),
+    ],
     post,
     physics3d: { gravity: [0, -981, 0] },
     audio: { preload: Object.values(SOUNDS) },
